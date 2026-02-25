@@ -1,315 +1,325 @@
+"""HD61700 CPU Test Suite v6 - compact for MicroPython"""
 import hd61700
-import machine
-import binascii
+import gc
 
-# Move test code to RAM area (Standard PB-1000 RAM: 0x6000-0x7FFF)
-TEST_BASE_ADDR = 0x7000
+TB = 0x7000
+_A = []
 
-class CPUTester:
+class T:
     def __init__(self):
-        # Initialize anchor list for GC protection
-        try:
-            hd61700._init_anchor()
-        except AttributeError:
-            pass
-
-        # Anchor callbacks to prevent GC
-        self._mem_read_cb = self._mem_read
-        self._mem_write_cb = self._mem_write
-        self._cbs = (self._mem_read_cb, self._mem_write_cb)
-        
-        # New C API to anchor objects
-        try:
-            hd61700._anchor_callbacks(self._cbs)
-        except AttributeError:
-             pass 
-            
-        hd61700.set_mem_callbacks(self._mem_read_cb, self._mem_write_cb)
-        
-        # By default, use direct C memory
-        self.use_c_mem = True
+        _A.append(hd61700._init_anchor())
+        self._mr = self._mem_read
+        self._mw = self._mem_write
+        _A.extend([self._mr, self._mw])
+        hd61700.set_mem_callbacks(self._mr, self._mw)
         hd61700.use_c_memory(True)
-        self.reset_context()
+        self.ram = bytearray(0x2000)
+        _A.append(self.ram)
+        self.rst()
 
-    def reset_context(self):
+    def rst(self):
+        hd61700.reset(False)
+        hd61700.use_c_memory(True)
         hd61700.set_debug(False)
         hd61700.set_key_debug(False)
         hd61700.set_lcd_debug(False)
-        
-        # RAM area (0x6000-0x7FFF)
-        self.ram = bytearray(0x2000)
-        self.rom0 = bytearray(0x2000)
-        self.rom1 = bytearray(0x8000)
-        
-        hd61700.reset(False)
-        hd61700.use_c_memory(self.use_c_mem) # Ensure C-direct mode persists after reset
-        
-        # Initialize SIR registers to expected defaults for tests
-        # SX=0, SY=1, SZ=2
-        hd61700.set_sreg(0, 0) # SX
-        hd61700.set_sreg(1, 1) # SY
-        hd61700.set_sreg(2, 2) # SZ
-        
-        hd61700.load_rom(0, self.rom0)
-        hd61700.load_rom(1, self.rom1)
-        # Clear all RAM
-        for i in range(0x2000):
-            hd61700.write_mem(0x6000 + i, 0)
+        for i in range(32): hd61700.set_reg(i, 0)
+        for i in range(3): hd61700.set_sreg(i, i)
+        for i in range(8): hd61700.set_reg16(i, 0)
 
-    def _mem_read(self, segment, offset):
-        if offset < 0x2000:
-            return self.rom0[offset]
-        elif 0x6000 <= offset < 0x8000:
-            return self.ram[offset - 0x6000]
-        elif offset >= 0x8000:
-            return self.rom1[offset - 0x8000]
-        return 0xFF
+    def _mem_read(self, seg, off):
+        if 0x6000 <= off < 0x8000: return self.ram[off - 0x6000]
+        return 0
 
-    def _mem_write(self, segment, offset, data):
-        if 0x6000 <= offset < 0x8000:
-            self.ram[offset - 0x6000] = data
+    def _mem_write(self, seg, off, d):
+        if 0x6000 <= off < 0x8000: self.ram[off - 0x6000] = d & 0xFF
 
-    def load_code(self, addr, code):
+    def lc(self, addr, code):
         for i, b in enumerate(code):
-            hd61700.write_mem(addr + i, b)
-            if 0x6000 <= addr + i < 0x8000:
-                self.ram[addr + i - 0x6000] = b
+            a = addr + i
+            hd61700.write_mem(a, b)
+            if 0x6000 <= a < 0x8000: self.ram[a - 0x6000] = b
 
-    def run_test(self, name, code, setup_fn=None, verify_fn=None, start_pc=TEST_BASE_ADDR):
-        print(f"Testing {name:35}... ", end="")
-        self.reset_context()
-        
-        # Append a landing loop (JR -2 = 17 FE) to stabilize PC
-        full_code = list(code)
-        # But wait, 0xf8 (NOP) is 1 byte, 0x17 0xfe is 2 bytes.
-        # It's safer to just provide code that ends in a known state.
-        
-        self.load_code(start_pc, full_code)
-        hd61700.set_pc(start_pc)
-        
-        if setup_fn:
-            setup_fn()
-            
+    def ex(self, code, setup=None, pc=TB, stop=None):
+        self.rst()
+        gc.collect()
+        self.lc(pc, code)
+        hd61700.set_pc(pc)
+        if setup: setup()
+        sp = stop if stop else pc + len(code)
+        hd61700.execute(500, sp)
+
+def R(n): return hd61700.get_reg(n)
+def F(): return hd61700.get_flags()
+def M(a): return hd61700.read_mem(a)
+def PC(): return hd61700.get_pc()
+
+def run_tests():
+    t = T()
+    print("HD61700 CPU Test v6")
+    print("=" * 40)
+    total_p = 0; total_f = 0
+
+    def check(name, code, setup, checks, stop=None):
+        nonlocal total_p, total_f
         try:
-            # Determine stop PC if code ends in 0xf8 (NOP)
-            stop_pc = -1
-            if full_code[-1] == 0xf8:
-                # Execution should stop at the last NOP or slightly after
-                # Actually mod_execute stops WHEN it fetches an instruction at stop_pc
-                # So if we want to include the NOP, stop_pc = last_pc + 1
-                stop_pc = start_pc + len(full_code) - 1
-            
-            # Execute
-            hd61700.execute(500, stop_pc) 
-            
-            if verify_fn:
-                ok, msg = verify_fn()
-                if ok:
-                    print("PASS")
-                    return True
-                else:
-                    print(f"FAIL ({msg})")
-                    return False
+            t.ex(code, setup, stop=stop)
+            ok = True; msg = ""
+            for c in checks:
+                r = c()
+                if r is not None and not r[0]:
+                    ok = False; msg = r[1]; break
+            if ok:
+                print(f"  {name:32} OK")
+                total_p += 1
             else:
-                print("OK")
-                return True
+                print(f"  {name:32} NG ({msg})")
+                total_f += 1
         except Exception as e:
-            import sys
-            import io
-            f = io.StringIO()
-            sys.print_exception(e, f)
-            print(f"FAIL (Exception: {f.getvalue().splitlines()[-1]})")
-            return False
+            print(f"  {name:32} EX ({e})")
+            total_f += 1
 
-# --- Enhanced helper to check flags ---
-def check_flags(expected_z=None, expected_c=None, expected_lz=None, expected_uz=None):
-    f = hd61700.get_flags()
-    errs = []
-    # FLAG_Z 0x80, FLAG_C 0x40, FLAG_LZ 0x20, FLAG_UZ 0x10
-    if expected_z is not None:
-        if bool(f & 0x80) != expected_z: errs.append(f"Z:{bool(f & 0x80)}!=exp:{expected_z}")
-    if expected_c is not None:
-        if bool(f & 0x40) != expected_c: errs.append(f"C:{bool(f & 0x40)}!=exp:{expected_c}")
-    if expected_lz is not None:
-        if bool(f & 0x20) != expected_lz: errs.append(f"LZ:{bool(f & 0x20)}!=exp:{expected_lz}")
-    if expected_uz is not None:
-        if bool(f & 0x10) != expected_uz: errs.append(f"UZ:{bool(f & 0x10)}!=exp:{expected_uz}")
-    
-    if errs:
-        return False, f"Flags mismatch: {', '.join(errs)} (Flags: {f:02X})"
-    return True, ""
+    def cr(r, e): return lambda: (R(r)==e, f"R{r}={R(r):02X}!={e:02X}")
+    def cm(a, e): return lambda: (M(a)==e, f"[{a:04X}]={M(a):02X}!={e:02X}")
+    def cf(z=None, c=None):
+        def _ck():
+            f = F(); e = []
+            if z is not None and bool(f&0x80)!=z: e.append(f"Z={bool(f&0x80)}")
+            if c is not None and bool(f&0x40)!=c: e.append(f"C={bool(f&0x40)}")
+            return (len(e)==0, ",".join(e)) if e else (True,"")
+        return _ck
+    def cp(e): return lambda: (PC()==e, f"PC={PC():04X}!={e:04X}")
 
-# --- Rigorous Test Group: Check-Only Arithmetic & Register Preservation ---
+    # ── 8-bit Arithmetic ──
+    print("\n[8-bit Arith]")
+    def s1(): hd61700.set_reg(0,5); hd61700.set_reg(1,3); hd61700.set_sreg(1,1)
+    check("ADC chk(5+3)", [0x00,0x20], s1, [cf(z=False,c=False)])
 
-def test_rigor_check_only(tester):
-    results = []
-    
-    # CASE 1: SBC R0, R1 (Check Only) (0x01 0x20)
-    # R0=5, R1=3. Expected: R0 remains 5, Flags update (5-3=2 -> Z=0, C=0, LZ=0, UZ=1)
-    def verify_check_only():
-        r0 = hd61700.get_reg(0)
-        if r0 != 5: return False, f"R0 mod! got {r0:02X}"
-        return check_flags(expected_z=False, expected_c=False, expected_lz=False, expected_uz=True)
+    def s2(): hd61700.set_reg(0,5); hd61700.set_reg(1,4); hd61700.set_sreg(1,1)
+    check("SBC chk(5-4)", [0x01,0x20], s2, [cf(z=False,c=False)])
 
-    results.append(tester.run_test("SBC R0, R1 (Check Only)", 
-        [0x42, 0x00, 0x05, 0x42, 0x01, 0x03, 0x01, 0x20, 0xf8], None, verify_check_only))
+    def s3(): hd61700.set_reg(0,3); hd61700.set_reg(1,5); hd61700.set_sreg(1,1)
+    check("SBC borrow(3-5)", [0x01,0x20], s3, [cf(c=True)])
 
-    # CASE 2: AN R0, #0x55 (Check Only) (0x44 0x00 0x55)
-    # R0=0xAA. AA & 55 = 0. Expected: R0 remains AA, Z=1
-    def verify_an_check():
-        r0 = hd61700.get_reg(0)
-        if r0 != 0xAA: return False, f"R0 mod! got {r0:02X}"
-        return check_flags(expected_z=True)
+    def s4(): hd61700.set_reg(0,5); hd61700.set_reg(1,3); hd61700.set_sreg(1,1)
+    check("AD(5+3=8)", [0x08,0x20], s4, [cr(0,8), cf(z=False,c=False)])
 
-    results.append(tester.run_test("AN R0, imm (Check Only)", 
-        [0x42, 0x00, 0xAA, 0x44, 0x00, 0x55, 0xf8], None, verify_an_check))
+    def s5(): hd61700.set_reg(0,1); hd61700.set_reg(1,3); hd61700.set_sreg(1,1)
+    check("SB(1-3=FE,C=1)", [0x09,0x20], s5, [cr(0,0xFE), cf(c=True)])
 
-    return all(results)
+    def s6(): hd61700.set_reg(0,0x80); hd61700.set_reg(1,0x80); hd61700.set_sreg(1,1)
+    check("AD overflow", [0x08,0x20], s6, [cr(0,0), cf(z=True,c=True)])
 
-# --- Rigorous Test Group: Memory Interaction ---
+    def s7(): hd61700.set_reg(0,10)
+    check("AD imm(10+20)", [0x40,0x00,20], s7, [cr(0,30)])
 
-def test_rigor_memory(tester):
-    results = []
-    
-    def verify_mem_sync():
-        val_c = hd61700.read_mem(0x6500)
-        if val_c != 0x99: return False, f"C-direct mismatch: exp 99, got {val_c:02X}"
-        return True, ""
+    def s8(): hd61700.set_reg(0,1)
+    check("SB imm(1-2)", [0x41,0x00,2], s8, [cr(0,0xFF), cf(c=True)])
 
-    # ST R0, (offset) where offset = 0x6500
-    # 0x56 0x20 (ST RA, (IX))? No, using 0x56 is for complex.
-    # Simple ST R0, (addr16) is 0x11 addr_lo addr_hi
-    # Actually [0x56, 0x20, 0x00, 0x65, 0x10, 0x00] ? Let's check.
-    # Case 0x56: uint8_t arg = read_op(cpu); ... 
-    # [0x42, 0x00, 0x99, 0x56, 0x20, 0x00, 0x65, 0x10, 0x00, 0xf8]
-    # R0=99, IX=6500, ST R0, (IX)
-    results.append(tester.run_test("Memory Write Sync (C-Direct)", 
-        [0x42, 0x00, 0x99, 0x56, 0x10, 0x00, 0x65, 0x10, 0x00, 0xf8], None, verify_mem_sync))
+    def s9(): hd61700.set_reg(0,0x80)
+    check("ADC imm chk(C)", [0x48,0x00,0x80], s9, [cf(c=True)])
 
-    def setup_external_modify():
-        hd61700.write_mem(0x6600, 0x77)
+    def s10(): hd61700.set_reg(0,5)
+    check("SBC imm chk(Z)", [0x49,0x00,5], s10, [cf(z=True,c=False)])
 
-    def verify_external_read():
-        r3 = hd61700.get_reg(3)
-        if r3 != 0x77: return False, f"CPU read mismatch: exp 77, got {r3:02X}"
-        return True, ""
+    def s11(): hd61700.set_reg(0,0x15); hd61700.set_reg(1,0x27); hd61700.set_sreg(1,1)
+    check("ADB(15+27=42)", [0x0A,0x20], s11, [cr(0,0x42)])
 
-    # LD R3, (addr16) is 0x11 (lo) (hi) (reg)
-    # Wait, LD reg, (IX) is 0x10 (reg)
-    results.append(tester.run_test("Memory Read Sync (External Mod)", 
-        [0x56, 0x10, 0x00, 0x66, 0x10, 0x03, 0xf8], setup_external_modify, verify_external_read))
+    def s12(): hd61700.set_reg(0,0x42); hd61700.set_reg(1,0x15); hd61700.set_sreg(1,1)
+    check("SBB(42-15=27)", [0x0B,0x20], s12, [cr(0,0x27)])
 
-    return all(results)
+    def s13(): hd61700.set_reg(0,0x99)
+    check("ADB imm(99+01)", [0x4A,0x00,0x01], s13, [cr(0,0x00), cf(c=True)])
 
-# --- Functional Tests ---
+    # ── 8-bit Logic ──
+    print("\n[8-bit Logic]")
+    def l1(): hd61700.set_reg(0,0xAA); hd61700.set_reg(1,0x55); hd61700.set_sreg(1,1)
+    check("AN chk(AA&55=0)", [0x04,0x20], l1, [cf(z=True)])
 
-def test_arithmetic(tester):
-    results = []
-    # R0=5, R1=3. AD R0, R1 -> R0=8. (Op 0x08, SY selected by Arg 0x20)
-    results.append(tester.run_test("AD R0, R1 (5+3=8)", 
-        [0x42, 0x00, 0x05, 0x42, 0x01, 0x03, 0x08, 0x20, 0xf8], 
-        None, lambda: (hd61700.get_reg(0) == 8, f"got {hd61700.get_reg(0):02X}")))
-    return all(results)
+    def l2(): hd61700.set_reg(0,0xFF); hd61700.set_reg(1,0x0F); hd61700.set_sreg(1,1)
+    check("AN(FF&0F=0F)", [0x0C,0x20], l2, [cr(0,0x0F)])
 
-def test_logic(tester):
-    results = []
-    # AA & 55 = 0.
-    results.append(tester.run_test("AN R0, R1 (AA&55=0)", 
-        [0x42, 0x00, 0xAA, 0x42, 0x01, 0x55, 0x0C, 0x20, 0xf8], 
-        None, lambda: (hd61700.get_reg(0) == 0, f"got {hd61700.get_reg(0):02X}")))
-    return all(results)
+    def l3(): hd61700.set_reg(0,0xAA); hd61700.set_reg(1,0xFF); hd61700.set_sreg(1,1)
+    check("XR(AA^FF=55)", [0x0F,0x20], l3, [cr(0,0x55)])
 
-def test_load_store(tester):
-    results = []
-    def verify_st():
-        val = hd61700.read_mem(0x7FFF)
-        return (val == 0x42, f"got {val:02X}")
-    # IX=7FFF, ST R0, (IX)
-    results.append(tester.run_test("ST R0, (IX)", 
-        [0x42, 0x00, 0x42, 0x56, 0x10, 0xFF, 0x7F, 0x10, 0x00, 0xf8], None, verify_st))
-    return all(results)
+    def l4(): hd61700.set_reg(0,0xFF)
+    check("AN imm(FF&0F)", [0x4C,0x00,0x0F], l4, [cr(0,0x0F)])
 
-def test_bcd(tester):
-    results = []
-    # 19+7=26 BCD
-    results.append(tester.run_test("ADB R0, R1 (19+7=26)", 
-        [0x42, 0x00, 0x19, 0x42, 0x01, 0x07, 0x0A, 0x20, 0xf8], 
-        None, lambda: (hd61700.get_reg(0) == 0x26, f"got {hd61700.get_reg(0):02X}")))
-    return all(results)
+    def l5(): hd61700.set_reg(0,0xA0)
+    check("OR imm(A0|05)", [0x4E,0x00,0x05], l5, [cr(0,0xA5)])
 
-def test_control_flow(tester):
-    results = []
-    # JP 0x7080. Place landing loop at 0x7080.
-    target = 0x7080
-    def setup_target():
-        tester.load_code(target, [0x17, 0xFE]) # JR -2
-    results.append(tester.run_test(f"JP 0x{target:04X}", 
-        [0x37, target & 0xFF, (target >> 8) & 0xFF, 0xf8], setup_target, 
-        lambda: (hd61700.get_pc() == target, f"got {hd61700.get_pc():04X}")))
-    return all(results)
+    def l6(): hd61700.set_reg(0,0xFF)
+    check("XR imm(FF^FF)", [0x4F,0x00,0xFF], l6, [cr(0,0x00), cf(z=True)])
 
-def test_shift_rotate(tester):
-    results = []
-    # 0x80 >> 1 = 0x40
-    results.append(tester.run_test("BID R0 (Shift Right)", [0x42, 0x00, 0x80, 0x18, 0x40, 0xf8], None, 
-        lambda: (hd61700.get_reg(0) == 0x40, f"got {hd61700.get_reg(0):02X}")))
-    return all(results)
+    # ── Register Move ──
+    print("\n[Reg Move]")
+    def m1(): hd61700.set_reg(0,0); hd61700.set_reg(1,0xAB); hd61700.set_sreg(1,1)
+    check("LD R0,R1", [0x02,0x20], m1, [cr(0,0xAB)])
+    check("LD imm(55)", [0x42,0x00,0x55], None, [cr(0,0x55)])
+    check("LD R3,imm(CC)", [0x42,0x03,0xCC], None, [cr(3,0xCC)])
 
-def test_block_ops(tester):
-    results = []
-    def setup_bup():
-        hd61700.write_mem(0x6100, 0x11); hd61700.write_mem(0x6101, 0x22)
-    def verify_bup():
-        d0 = hd61700.read_mem(0x7100); d1 = hd61700.read_mem(0x7101)
-        return (d0 == 0x11 and d1 == 0x22, f"got [{d0:02X},{d1:02X}]")
-    # IX=6100, IY=6101, IZ=7100. BUP counter=2 -> [0xD8, 0x01]
-    # Actually BUP uses the counter in KY? 
-    # MAME: BUP uses arg to determine count if arg<32? No.
-    # BUP 0xD8: count from KY?
-    results.append(tester.run_test("BUP (Block Up)", 
-        [0x56, 0x10, 0x00, 0x61, 0x56, 0x30, 0x01, 0x61, 0x56, 0x50, 0x00, 0x71, 0x42, 0x05, 0x02, 0xD8, 0xf8], 
-        setup_bup, verify_bup))
-    return all(results)
+    # ── Shift/Rotate ──
+    print("\n[Shift/Rot]")
+    def sh1(): hd61700.set_reg(0,0x55)
+    check("BID(55>>1=2A)", [0x18,0x40], sh1, [cr(0,0x2A), cf(c=True)])
 
-def test_stack_ops(tester):
-    results = []
-    # PHS R2; PPS R3. SS=0x7F00.
-    results.append(tester.run_test("PHS/PPS R2->R3", 
-        [0x42, 0x02, 0x42, 0x56, 0x80, 0x00, 0x7F, 0x26, 0x02, 0x2E, 0x03, 0xf8], 
-        None, lambda: (hd61700.get_reg(3) == 0x42, f"got {hd61700.get_reg(3):02X}")))
-    return all(results)
+    def sh2(): hd61700.set_reg(0,0x80)
+    check("BIU(80<<1=00)", [0x18,0x60], sh2, [cr(0,0x00), cf(c=True)])
 
-def test_complex_arithmetic(tester):
-    results = []
-    # ADC (Check Only) FF+1 -> Z=1, C=1, LZ=1, UZ=1. 
-    # SY=1, R1=0x01.
-    results.append(tester.run_test("ADC (Check Only) FF+1", 
-        [0x42, 0x00, 0xFF, 0x42, 0x01, 0x01, 0x00, 0x20, 0xf8], 
-        None, lambda: check_flags(expected_z=True, expected_c=True)))
-    return all(results)
+    def sh3(): hd61700.set_reg(0,0xAB)
+    check("DID(AB>>4=0A)", [0x1A,0x00], sh3, [cr(0,0x0A)])
 
-def main():
-    tester = CPUTester()
-    print("Starting REFINED HD61700 CPU Regression Suite\n")
-    overall_pass = True
-    print("[Rigor & Integration Tests]")
-    overall_pass &= test_rigor_check_only(tester)
-    overall_pass &= test_rigor_memory(tester)
-    print("\n[Functional Tests]")
-    overall_pass &= test_arithmetic(tester)
-    overall_pass &= test_complex_arithmetic(tester)
-    overall_pass &= test_logic(tester)
-    overall_pass &= test_load_store(tester)
-    overall_pass &= test_bcd(tester)
-    overall_pass &= test_control_flow(tester)
-    overall_pass &= test_shift_rotate(tester)
-    overall_pass &= test_block_ops(tester)
-    overall_pass &= test_stack_ops(tester)
-    
-    print("\n-------------------------------------------")
-    if overall_pass: print("OVERALL RESULT: PASS")
-    else: print("OVERALL RESULT: FAIL")
-    print("-------------------------------------------")
+    def sh4(): hd61700.set_reg(0,0xAB)
+    check("DIU(AB<<4=B0)", [0x1A,0x20], sh4, [cr(0,0xB0)])
 
-if __name__ == "__main__":
-    main()
+    def sh5(): hd61700.set_reg(0,1)
+    check("CMP(~1+1=FF)", [0x1B,0x00], sh5, [cr(0,0xFF), cf(c=True)])
+
+    def sh6(): hd61700.set_reg(0,0x55)
+    check("INV(~55=AA)", [0x1B,0x40], sh6, [cr(0,0xAA), cf(c=True)])
+
+    # ── Memory Access via SIR ──
+    print("\n[Mem SIR]")
+    # SX=4 → R4. REG_GET16(4) = R4|(R5<<8) = address
+    def ms1():
+        hd61700.set_reg(0,0x42)
+        hd61700.set_reg(4,0x00); hd61700.set_reg(5,0x65)
+        hd61700.set_sreg(0,4)
+    check("ST R0,(R4:5)", [0x10,0x00], ms1, [cm(0x6500,0x42)])
+
+    def ms2():
+        hd61700.set_reg(4,0x00); hd61700.set_reg(5,0x65)
+        hd61700.set_sreg(0,4)
+        hd61700.write_mem(0x6500,0xBE)
+    check("LD R0,(R4:5)", [0x11,0x00], ms2, [cr(0,0xBE)])
+
+    def ms3():
+        hd61700.set_reg(4,0x00); hd61700.set_reg(5,0x65)
+        hd61700.set_sreg(0,4)
+    check("ST imm,(R4:5)", [0x50,0x00,0x7F], ms3, [cm(0x6500,0x7F)])
+
+    def ms4():
+        hd61700.set_reg(0,0x34); hd61700.set_reg(1,0x12)
+        hd61700.set_reg(4,0x00); hd61700.set_reg(5,0x65)
+        hd61700.set_sreg(0,4)
+    check("STW R0:1,(R4:5)", [0x90,0x00], ms4, [cm(0x6500,0x34), cm(0x6501,0x12)])
+
+    def ms5():
+        hd61700.set_reg(4,0x00); hd61700.set_reg(5,0x65)
+        hd61700.set_sreg(0,4)
+        hd61700.write_mem(0x6500,0xAB); hd61700.write_mem(0x6501,0xCD)
+    check("LDW R0:1,(R4:5)", [0x91,0x00], ms5, [cr(0,0xAB), cr(1,0xCD)])
+
+    # SY=6 → R6:R7
+    def ms6():
+        hd61700.set_reg(0,0x77)
+        hd61700.set_reg(6,0x00); hd61700.set_reg(7,0x66)
+        hd61700.set_sreg(1,6)
+    check("ST R0,(R6:7)", [0x10,0x20], ms6, [cm(0x6600,0x77)])
+
+    # D1 arg=0 → REG_PUT16(0) → R0:R1
+    check("LDW imm R0:R1", [0xD1,0x00,0x34,0x12], None, [cr(0,0x34), cr(1,0x12)])
+
+    # ── Indexed Mem via IX/IZ ──
+    print("\n[Idx Mem]")
+    # 0x20: ST (IX+offset), arg=0x20 (sec=1→SY=1→R1 as offset)
+    def ix1():
+        hd61700.set_reg(0,0x55); hd61700.set_reg(1,0)
+        hd61700.set_reg16(0,0x6500); hd61700.set_sreg(1,1)
+    check("ST (IX+),R0", [0x20,0x20], ix1, [cm(0x6500,0x55)])
+
+    def ix2():
+        hd61700.set_reg(0,0); hd61700.set_reg(1,0)
+        hd61700.set_reg16(0,0x6500); hd61700.set_sreg(1,1)
+        hd61700.write_mem(0x6500,0xAA)
+    check("LD R0,(IX+)", [0x28,0x20], ix2, [cr(0,0xAA)])
+
+    # ── Stack ──
+    print("\n[Stack]")
+    def sk1():
+        hd61700.set_reg(0,0xAB); hd61700.set_reg16(4,0x7F00)
+    check("PUSH/POP SS", [0x26,0x00,0x2E,0x00], sk1, [cr(0,0xAB)])
+
+    def sk2():
+        hd61700.set_reg(0,0xCD); hd61700.set_reg16(3,0x7E00)
+    check("PUSH/POP US", [0x27,0x00,0x2F,0x00], sk2, [cr(0,0xCD)])
+
+    # ── Jumps ──
+    print("\n[Jumps]")
+    tgt = 0x7080
+    def jp1(): t.lc(tgt, [0xF8])
+    check("JP uncond", [0x37,tgt&0xFF,tgt>>8], jp1, [cp(tgt+1)], stop=tgt+1)
+
+    def jp2(): hd61700.set_reg(0,1); t.lc(tgt,[0xF8])
+    check("JP Z skip", [0x30,0x80,0x70], jp2, [cp(TB+3)])
+
+    def jp3(): hd61700.set_reg(0,1); t.lc(tgt,[0xF8])
+    check("JP NZ taken", [0x34,0x80,0x70], jp3, [cp(tgt+1)], stop=tgt+1)
+
+    def jp4(): hd61700.set_reg16(4,0x7F00); t.lc(tgt,[0xF8])
+    check("CAL uncond", [0x77,0x80,0x70], jp4, [cp(tgt+1)], stop=tgt+1)
+
+    # CAL+RTN combined
+    def jp5():
+        hd61700.set_reg16(4,0x7F00)
+        t.lc(TB, [0x77,0x80,0x70])
+        t.lc(tgt, [0xF7])
+        t.lc(TB+3, [0xF8])
+    t.ex([0xF8], jp5, stop=TB+4)  # dummy code, setup overrides
+    ok = PC()==TB+4
+    print(f"  {'CAL+RTN':32} {'OK' if ok else 'NG'}")
+    if ok: total_p += 1
+    else: total_f += 1
+
+    # ── PRE/GRE ──
+    print("\n[PRE/GRE]")
+    def pr1(): hd61700.set_reg(0,0x34); hd61700.set_reg(1,0x12)
+    check("PRE IX", [0x96,0x00], pr1,
+        [lambda: (hd61700.get_reg16(0)==0x1234, f"IX={hd61700.get_reg16(0):04X}")])
+
+    check("PRE IX imm", [0xD6,0x00,0xCD,0xAB], None,
+        [lambda: (hd61700.get_reg16(0)==0xABCD, f"IX={hd61700.get_reg16(0):04X}")])
+
+    # GET_REG_IDX(0xD6,0x20) = ((0&1)<<2)|((0x20>>5)&3) = 0|1 = 1 → IY
+    check("PRE IY imm", [0xD6,0x20,0x56,0x78], None,
+        [lambda: (hd61700.get_reg16(1)==0x7856, f"IY={hd61700.get_reg16(1):04X}")])
+
+    def gr1(): hd61700.set_reg16(0,0x5678)
+    check("GRE IX→R0:R1", [0x9E,0x00], gr1, [cr(0,0x78), cr(1,0x56)])
+
+    # ── 16-bit Arith ──
+    print("\n[16-bit Arith]")
+    # arg=0x60 (sec=3,reg=0), src=2 → R2:R3
+    def w1():
+        hd61700.set_reg(0,0x01); hd61700.set_reg(1,0x00)
+        hd61700.set_reg(2,0x02); hd61700.set_reg(3,0x00)
+    check("ADW(1+2=3)", [0x88,0x60,0x02], w1, [cr(0,0x03), cr(1,0x00)])
+
+    def w2():
+        hd61700.set_reg(0,0x05); hd61700.set_reg(1,0x00)
+        hd61700.set_reg(2,0x03); hd61700.set_reg(3,0x00)
+    check("SBW(5-3=2)", [0x89,0x60,0x02], w2, [cr(0,0x02), cr(1,0x00)])
+
+    def w3():
+        hd61700.set_reg(0,0x01); hd61700.set_reg(1,0x00)
+    check("CMPW(~1+1=FFFF)", [0x9B,0x00], w3, [cr(0,0xFF), cr(1,0xFF)])
+
+    # ── GST/PST ──
+    print("\n[GST/PST]")
+    def gp1(): hd61700.set_reg(0,5)
+    check("PST SIR(R0→SX)", [0x15,0x00], gp1,
+        [lambda: (hd61700.get_sreg(0)==5, f"SX={hd61700.get_sreg(0)}")])
+
+    def gp2(): hd61700.set_sreg(0,7)
+    check("GST SIR(SX→R0)", [0x1D,0x00], gp2, [cr(0,7)])
+
+    # ── System ──
+    print("\n[System]")
+    check("NOP", [0xF8], None, [cp(TB+1)])
+    check("CLT", [0xF9], None, [cp(TB+1)])
+
+    print("\n" + "=" * 40)
+    print(f"Result: {total_p} OK, {total_f} NG")
+    print("=" * 40)
+
+run_tests()

@@ -60,21 +60,11 @@ def run_outac_once(system,update_step=100):
     #system.set_debug(True)
 
     print("Test Start")
-    # NOWFC(0x690E)=0 -> display device
-#     nowfc_addr = 0x690E
-#     if system.RAM_START <= nowfc_addr < system.SYS_ROM_START:
-#         system.ram[nowfc_addr - system.RAM_START] = 0x00
+
     outdv_addr = 0x690C
     if system.RAM_START <= outdv_addr < system.SYS_ROM_START:
         system.ram[outdv_addr - system.RAM_START] = 0x00
 
-    # Stub at RAM start:
-    #   LD  $16,#&H14   ; "A" for current LCD path
-    #   CAL &HFF9E      ; OUTAC
-    #   NOP
-    #   NOP
-    #   JP  self        ; hold
-    # stub_addr = system.RAM_START
     stub_addr = 0x7000
 # # print mark and Alpabet(upper)
 #     stub = bytes([
@@ -87,11 +77,11 @@ def run_outac_once(system,update_step=100):
 #     ])
 # print all char
     stub = bytes([
-            0x42,0x10,0x20, # LD      $16,&H1F
+            0x42,0x10,0x20, # LD      $16,&H20
             0x77,0x9E,0xFF, # CAL     OUTAC
             0x48,0x10,0x01, # AD      $16,1
             0xB1,0x87,      # JR      NC,LOOP
-            0xF7,           # RTN     
+            0xF7,           # RTN
     ])
 # print 1 char
 #     stub = bytes([
@@ -160,8 +150,8 @@ def run_outac_once(system,update_step=100):
             break
             
         total_steps += 2000
-        if total_steps % 10000 == 0:
-            print(".", end="")
+#         if total_steps % 10000 == 0:
+#             print(".", end="")
     print()
     elapsed_ms = time.ticks_diff(time.ticks_ms(), start_ms)
     print(f"cpu execute about {total_steps} cycles.")
@@ -205,4 +195,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

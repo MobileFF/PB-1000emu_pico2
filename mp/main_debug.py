@@ -99,6 +99,8 @@ def load_debug_config():
         "debug_sys": False,
         "debug_lcd": False,
         "debug_kb": False,
+        "debug_c_memory": None,
+        "debug_c_lcd": None,
     }
 
     ini_paths = ("debug.ini", "/debug.ini", "/mp/debug.ini")
@@ -183,6 +185,10 @@ def load_debug_config():
         cfg["debug_lcd"] = _to_bool(debug["lcd"])
     if "kb" in debug:
         cfg["debug_kb"] = _to_bool(debug["kb"])
+    if "c_memory" in debug:
+        cfg["debug_c_memory"] = _to_bool(debug["c_memory"])
+    if "c_lcd" in debug:
+        cfg["debug_c_lcd"] = _to_bool(debug["c_lcd"])
 
     return cfg
 
@@ -790,6 +796,8 @@ def main():
             "sys": config["debug_sys"],
             "lcd": config["debug_lcd"],
             "kb": config["debug_kb"],
+            "c_memory": config["debug_c_memory"],
+            "c_lcd": config["debug_c_lcd"],
         },
         restore_registers=False,
     )

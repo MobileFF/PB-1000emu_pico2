@@ -13,30 +13,99 @@ or:
 import time
 from ili9341 import ILI9341
 from pb1000 import PB1000System
-from main import init_display
+from main import init_display,draw_bezel
+try:
+    import os
+except ImportError:
+    import uos as os
+
+SPI_ID = 1
+SCK_PIN = 10
+MOSI_PIN = 11
+MISO_PIN = 12
+CS_PIN = 9
+DC_PIN = 8
+RST_PIN = 7
+BL_PIN = 22
 
 SCRIPT_VERSION = "cal-e2e-min-1plus2"
 
-STEP_CHUNK = 4000
+STEP_CHUNK = 512
 TIMER_TICK_STEPS = 40000
 BOOT_TIMEOUT_STEPS = 1_200_000
 POST_BOOT_SETTLE_STEPS = 200_000
 POST_INPUT_SETTLE_STEPS = 160_000
 KEY_HOLD_MS = 120
+KEY_HOLD_MAX_MS = 4000
 INTER_KEY_GAP_MS = 1000
 INPUT_LOOP_TIMEOUT_MS = 25_000
 KEY_START_TIMEOUT_MS = 600
 KEY_COMMIT_TIMEOUT_MS = 5_000
 KEY_SCAN_WINDOW_WAIT_MS = 3_000
+KEY_IDLE_WAIT_MS = 3_000
 MAX_RETRIES_PER_KEY = 6
 
 # 固定入力: 1 + 2 [EXE]
 KEY_SEQUENCE = [
-    ((9,2), "1"),
+    ((9,6), "1"),
 #     ((9,5), "+"),
 #     ((9,3), "2"),
 #     ((10, 4), "EXE"),
 ]
+
+
+def _to_bool(text):
+    return str(text).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _parse_ini(path):
+    data = {}
+    current = ""
+    with open(path, "r") as f:
+        for raw in f:
+            line = raw.strip()
+            if not line:
+                continue
+            if line.startswith("#") or line.startswith(";"):
+                continue
+            if line.startswith("[") and line.endswith("]"):
+                current = line[1:-1].strip().lower()
+                if current not in data:
+                    data[current] = {}
+                continue
+            if "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip().lower()
+            value = value.split(";", 1)[0].split("#", 1)[0].strip()
+            if current not in data:
+                data[current] = {}
+            data[current][key] = value
+    return data
+
+
+def _load_debug_overrides():
+    cfg = {"c_memory": None, "c_lcd": None}
+    ini_paths = ("debug.ini", "/debug.ini", "/mp/debug.ini")
+    ini_data = None
+    loaded = ""
+    for path in ini_paths:
+        try:
+            ini_data = _parse_ini(path)
+            loaded = path
+            break
+        except OSError:
+            pass
+    if not ini_data:
+        return cfg
+    debug = ini_data.get("debug", {})
+    if "c_memory" in debug:
+        cfg["c_memory"] = _to_bool(debug["c_memory"])
+    if "c_lcd" in debug:
+        cfg["c_lcd"] = _to_bool(debug["c_lcd"])
+    if loaded:
+        print(f"Debug overrides loaded: {loaded}")
+    return cfg
 
 
 def _step_runtime(system, steps, timer_accum):
@@ -47,6 +116,7 @@ def _step_runtime(system, steps, timer_accum):
             system.service_input_lines()
         if not system.is_sleeping:
             system.step(run)
+            #system.debug_step(pause=False,trace=True)
         else:
             time.sleep_ms(1)
         timer_accum += run
@@ -84,6 +154,38 @@ def _wait_key_enable(system):
     return False, timer_accum, done
 
 
+def _keybuf_snapshot(system):
+    base = 0x68D9 - system.RAM_START
+    return {
+        "kycnt": system.ram[base + 0],
+        "rd": system.ram[base + 1],
+        "wr": system.ram[base + 2],
+    }
+
+
+def _wait_key_idle(system, timer_accum, timeout_ms=KEY_IDLE_WAIT_MS):
+    started = time.ticks_ms()
+    settle_started = None
+    last_kycnt = None
+    while True:
+        now = time.ticks_ms()
+        kb = _keybuf_snapshot(system)
+        kycnt = kb["kycnt"]
+        no_pressed = (not system.keyboard.has_key_pressed()) if hasattr(system, "keyboard") else True
+        if no_pressed:
+            if last_kycnt is None or kycnt != last_kycnt:
+                last_kycnt = kycnt
+                settle_started = now
+            elif settle_started is not None and time.ticks_diff(now, settle_started) >= 300:
+                return True, timer_accum
+        else:
+            settle_started = None
+            last_kycnt = None
+        if time.ticks_diff(now, started) >= timeout_ms:
+            return False, timer_accum
+        timer_accum = _step_runtime(system, STEP_CHUNK, timer_accum)
+
+
 def _run_sequence_main_style(system, timer_accum, sequence):
     queue = [{"key": key, "label": label, "retry": 0} for key, label in sequence]
     active_key = None
@@ -96,6 +198,9 @@ def _run_sequence_main_style(system, timer_accum, sequence):
     base_keyin16 = 0x0080
     next_press_at_ms = 0
     active_key_started = False
+    active_buffered = False
+    base_kycnt = 0
+    hold_min_at_ms = 0
     started_ms = time.ticks_ms()
     scan_window_wait_from_ms = 0
 
@@ -111,21 +216,20 @@ def _run_sequence_main_style(system, timer_accum, sequence):
             committed = (keycm != base_keycm) or (keyin16 != base_keyin16)
             if committed:
                 active_committed = True
+            kb_now = _keybuf_snapshot(system)["kycnt"]
+            if kb_now != base_kycnt:
+                active_buffered = True
 
             if chata != 0x07 or keyin != 0x80:
                 active_key_started = True
 
             should_release = False
-            if active_key_started and committed:
-                if hasattr(system, "can_release_active_key"):
-                    should_release = system.can_release_active_key()
-                else:
-                    should_release = (chata == 0x20)
+            # Release primarily when keyboard buffer enqueue is observed.
+            # Releasing at CHATA/KEYCM milestones is too early and can drop keys.
+            if time.ticks_diff(now, hold_min_at_ms) >= 0 and active_buffered:
+                should_release = True
 
             scan_gated = bool(getattr(system, "key_interrupt_via_scan", False))
-            if scan_gated and active_key_started and committed and (not should_release):
-                if chata == 0x07 and keyin != 0x80:
-                    should_release = True
 
             timed_out = time.ticks_diff(now, release_at_ms) >= 0
             if scan_gated and not should_release:
@@ -134,7 +238,13 @@ def _run_sequence_main_style(system, timer_accum, sequence):
                 # observed for too long, force release and continue.
                 start_timed_out = time.ticks_diff(now, pressed_at_ms) >= KEY_START_TIMEOUT_MS
                 commit_timed_out = time.ticks_diff(now, pressed_at_ms) >= KEY_COMMIT_TIMEOUT_MS
-                timed_out = start_timed_out if (not active_key_started) else commit_timed_out
+                hold_timed_out = time.ticks_diff(now, release_at_ms) >= 0
+                if not active_key_started:
+                    timed_out = start_timed_out
+                elif active_buffered:
+                    timed_out = hold_timed_out
+                else:
+                    timed_out = commit_timed_out or hold_timed_out
 
             if timed_out and not should_release:
                 should_release = True
@@ -144,8 +254,19 @@ def _run_sequence_main_style(system, timer_accum, sequence):
                     print(f"WARN: no scan start observed for {active_label}; force release")
                 elif not active_committed:
                     print(f"WARN: no KEYCM/KEYIN commit observed for {active_label}; force release")
+                elif not active_buffered:
+                    print(f"WARN: no key-buffer enqueue observed for {active_label}; force release")
                 system.release_key(active_key)
                 print(f"[AUTO] release key: {active_label}")
+                idle_ok, timer_accum = _wait_key_idle(system, timer_accum)
+                if not idle_ok:
+                    st_idle = system.get_key_scan_state() if hasattr(system, "get_key_scan_state") else {}
+                    print(
+                        "WARN: key idle wait timeout: "
+                        f"CHATA={st_idle.get('chata', 0):02X} "
+                        f"KEYCM={st_idle.get('keycm', 0):02X} "
+                        f"KEYIN16={st_idle.get('keyin16', st_idle.get('keyin', 0)):04X}"
+                    )
                 if not active_committed and active_retry < MAX_RETRIES_PER_KEY:
                     next_retry = active_retry + 1
                     print(f"[AUTO] retry key: {active_label} ({next_retry}/{MAX_RETRIES_PER_KEY})")
@@ -155,6 +276,7 @@ def _run_sequence_main_style(system, timer_accum, sequence):
                 active_retry = 0
                 active_committed = False
                 active_key_started = False
+                active_buffered = False
                 next_press_at_ms = time.ticks_add(now, INTER_KEY_GAP_MS)
 
         if active_key is None and queue:
@@ -188,11 +310,14 @@ def _run_sequence_main_style(system, timer_accum, sequence):
                 active_label = label
                 active_committed = False
                 active_key_started = False
+                active_buffered = False
                 pressed_at_ms = now
                 st0 = system.get_key_scan_state() if hasattr(system, "get_key_scan_state") else None
                 base_keycm = st0.get("keycm", 0x00) if st0 else 0x00
                 base_keyin16 = st0.get("keyin16", st0.get("keyin", 0x80)) if st0 else 0x0080
-                release_at_ms = time.ticks_add(now, KEY_HOLD_MS)
+                base_kycnt = _keybuf_snapshot(system)["kycnt"]
+                hold_min_at_ms = time.ticks_add(now, KEY_HOLD_MS)
+                release_at_ms = time.ticks_add(now, KEY_HOLD_MAX_MS)
 
         timer_accum = _step_runtime(system, STEP_CHUNK, timer_accum)
 
@@ -204,6 +329,22 @@ def _run_sequence_main_style(system, timer_accum, sequence):
 
     return timer_accum
 
+def init_display():
+    spi = machine.SPI(
+        SPI_ID,
+        baudrate=40_000_000,
+        sck=machine.Pin(SCK_PIN),
+        mosi=machine.Pin(MOSI_PIN),
+        miso=machine.Pin(MISO_PIN),
+    )
+    cs = machine.Pin(CS_PIN, machine.Pin.OUT)
+    dc = machine.Pin(DC_PIN, machine.Pin.OUT)
+    rst = machine.Pin(RST_PIN, machine.Pin.OUT)
+    machine.Pin(BL_PIN, machine.Pin.OUT, value=1)
+
+    display = ILI9341(spi, cs, dc, rst, width=320, height=240)
+    display.fill_rect(0, 0, 320, 240, 0x0000)
+    return display
 
 def main():
     print(f"\n=== PB-1000 minimal key test ({SCRIPT_VERSION}) ===")
@@ -211,12 +352,25 @@ def main():
 #     try:
 #         display = ILI9341(use_framebuf=False)
 #     except TypeError:
-#         display = ILI9341()
 
+    display = init_display()
+
+    debug_overrides = _load_debug_overrides()
     system = PB1000System(
-        display=init_display(),
-        debug={"sys": True, "lcd": False, "kb": True},
+        display=display,
+        debug={
+            "sys": True,
+            "lcd": False,
+            "kb": True,
+            "c_memory": debug_overrides["c_memory"],
+            "c_lcd": debug_overrides["c_lcd"],
+        },
     )
+    
+    draw_bezel(display)
+    
+    print("Initialize")
+    system.step(40000)
 
     print(f"LCD backend: {getattr(system, '_LCD_BACKEND', 'unknown') if hasattr(system, '_LCD_BACKEND') else 'see pb1000.py'}")
 

@@ -70,6 +70,7 @@ _active_key_label = None
 _active_key_candidates = None
 _active_key_candidate_idx = 0
 _active_key_started = False
+_active_keybuf_base = None
 _release_at_ms = 0
 _release_hard_at_ms = 0
 _next_press_at_ms = 0
@@ -118,7 +119,7 @@ def _step_with_input_service(system, steps, chunk=STEP_SERVICE_CHUNK):
 
 def poll_keyboard(system):
     global _active_key, _active_key_label, _active_key_candidates, _active_key_candidate_idx
-    global _active_key_started, _release_at_ms, _release_hard_at_ms, _next_press_at_ms
+    global _active_key_started, _active_keybuf_base, _release_at_ms, _release_hard_at_ms, _next_press_at_ms
     global _typed_since_enter
 
     while _spoll.poll(0):
@@ -151,7 +152,7 @@ def poll_keyboard(system):
         should_release = False
         if _active_key_started:
             if hasattr(system, "can_release_active_key"):
-                should_release = system.can_release_active_key()
+                should_release = system.can_release_active_key(_active_keybuf_base)
             else:
                 should_release = (chata == 0x20)
 
@@ -174,6 +175,10 @@ def poll_keyboard(system):
                     print(f"Key Retry: {_active_key_label} -> {_active_key}")
                     system.press_key(_active_key)
                     _active_key_started = False
+                    if hasattr(system, "get_key_buffer_state"):
+                        _active_keybuf_base = system.get_key_buffer_state()
+                    else:
+                        _active_keybuf_base = None
                     _release_at_ms = time.ticks_add(now, KEY_HOLD_MS)
                     _release_hard_at_ms = time.ticks_add(now, KEY_RELEASE_HARD_TIMEOUT_MS)
                     return
@@ -186,6 +191,7 @@ def poll_keyboard(system):
             _active_key_candidates = None
             _active_key_candidate_idx = 0
             _active_key_started = False
+            _active_keybuf_base = None
             _next_press_at_ms = time.ticks_add(now, INTER_KEY_GAP_MS)
 
     if _active_key is None and _key_queue:
@@ -205,6 +211,10 @@ def poll_keyboard(system):
         _active_key_candidates = candidates
         _active_key_candidate_idx = 0
         _active_key_started = False
+        if hasattr(system, "get_key_buffer_state"):
+            _active_keybuf_base = system.get_key_buffer_state()
+        else:
+            _active_keybuf_base = None
         _release_at_ms = time.ticks_add(now, KEY_HOLD_MS)
         _release_hard_at_ms = time.ticks_add(now, KEY_RELEASE_HARD_TIMEOUT_MS)
 

@@ -81,6 +81,13 @@ class PB1000System:
         return {"sys": flag, "lcd": flag, "kb": flag}
 
     def __init__(self, display=None,debug=False, restore_registers=True):
+        direct_mem_override = None
+        direct_lcd_override = None
+        if isinstance(debug, dict):
+            if "c_memory" in debug:
+                direct_mem_override = bool(debug.get("c_memory"))
+            if "c_lcd" in debug:
+                direct_lcd_override = bool(debug.get("c_lcd"))
         self.debug_cfg = self._normalize_debug_config(debug)
         self.debug = self.debug_cfg["sys"]
         self._ram_is_c_managed = False
@@ -104,6 +111,9 @@ class PB1000System:
         self._key_commit_pulse_max = 64
         self._key_pulse_interval_ms = 25
         self._key_next_pulse_ms = 0
+        self._key_pulse_release_pending = False
+        self._key_post_release_pulses_remaining = 0
+        self._key_post_release_pulses_max = 16
         # True: assert KEY_INT only when IA/KY scan condition is met.
         # False: legacy behavior, assert KEY_INT immediately on key press.
         self.key_interrupt_via_scan = True
@@ -162,19 +172,19 @@ class PB1000System:
 
         # Enable high-performance C-to-C direct paths if supported
         if hasattr(cpu_core, "use_c_memory"):
-            direct_mem = not self.debug_cfg["sys"]
+            direct_mem = (not self.debug_cfg["sys"]) if direct_mem_override is None else bool(direct_mem_override)
             cpu_core.use_c_memory(direct_mem)
             if direct_mem:
                 print("C-side Memory Direct Access: ENABLED")
             else:
-                print("C-side Memory Direct Access: DISABLED (debug.sys=true)")
+                print("C-side Memory Direct Access: DISABLED")
         if hasattr(cpu_core, "use_c_lcd"):
-            direct_lcd = not self.debug_cfg["sys"]
+            direct_lcd = (not self.debug_cfg["sys"]) if direct_lcd_override is None else bool(direct_lcd_override)
             cpu_core.use_c_lcd(direct_lcd)
             if direct_lcd:
                 print("C-side LCD Direct Access: ENABLED")
             else:
-                print("C-side LCD Direct Access: DISABLED (debug.sys=true)")
+                print("C-side LCD Direct Access: DISABLED")
 
     def load_rom(self, path, slot=0):
         """Load ROM image into slot 0 (Internal) or 1 (System)."""
@@ -336,25 +346,55 @@ class PB1000System:
         # Allow KEY interrupt so scan can advance and KEYCM/KEYIN can latch.
         return ky != 0
 
+    def _key_scan_pending(self):
+        """Return True while key-scan state has not fully returned to idle."""
+        base = 0x68D2 - self.RAM_START
+        chata = self.ram[base + 1]  # 68D3
+        keycm = self.ram[base + 2]  # 68D4
+        # Idle is CHATA=20 and KEYCM=00 in current ROM flow.
+        return (chata != 0x20) or (keycm != 0x00)
+
     def service_input_lines(self):
         """Refresh level-sensitive input lines before CPU execution."""
         if self.key_interrupt_via_scan:
-            desired = 0
+            # Emit KEY interrupt as a short pulse (1 call high, next call low)
+            # instead of holding high. This matches ROM-side edge-like handling
+            # and avoids getting stuck in debounce paths.
+            if self._key_pulse_release_pending and self._key_line_state:
+                cpu_core.set_input(cpu_core.KEY_INT, 0)
+                self._key_line_state = 0
+                self._key_pulse_release_pending = False
+
+            pulse = 0
+            key_pressed = self.keyboard.has_key_pressed()
+
             if self.is_key_input_enabled():
                 ia = cpu_core.get_reg8(4) if hasattr(cpu_core, "get_reg8") else 0
+                now = time.ticks_ms()
                 # PB-1000 behavior: when IA bit7=0, KEY/Pulse interrupt is generated periodically.
                 # This periodic pulse drives keyboard scan service even before a key-specific gate is active.
                 if (ia & 0x80) == 0:
-                    now = time.ticks_ms()
                     if time.ticks_diff(now, self._key_next_pulse_ms) >= 0:
-                        desired = 1
+                        pulse = 1
                         self._key_next_pulse_ms = time.ticks_add(now, self._key_pulse_interval_ms)
-                elif self.keyboard.has_key_pressed() and self._key_interrupt_requested_by_scan():
-                    desired = 1
-            if desired != self._key_line_state:
-                cpu_core.set_input(cpu_core.KEY_INT, desired)
-                self._key_line_state = desired
-            if not self.keyboard.has_key_pressed():
+                elif key_pressed and self._key_interrupt_requested_by_scan():
+                    if time.ticks_diff(now, self._key_next_pulse_ms) >= 0:
+                        pulse = 1
+                        self._key_next_pulse_ms = time.ticks_add(now, self._key_pulse_interval_ms)
+                elif (not key_pressed) and (self._key_post_release_pulses_remaining > 0):
+                    if time.ticks_diff(now, self._key_next_pulse_ms) >= 0:
+                        pulse = 1
+                        self._key_post_release_pulses_remaining -= 1
+                        self._key_next_pulse_ms = time.ticks_add(now, self._key_pulse_interval_ms)
+            if pulse and not self._key_line_state:
+                cpu_core.set_input(cpu_core.KEY_INT, 1)
+                self._key_line_state = 1
+                self._key_pulse_release_pending = True
+            if (not key_pressed) and (self._key_post_release_pulses_remaining == 0):
+                if self._key_line_state:
+                    cpu_core.set_input(cpu_core.KEY_INT, 0)
+                self._key_line_state = 0
+                self._key_pulse_release_pending = False
                 self._chata_zero_since_ms = None
                 self._chata_stuck_logged = False
             return
@@ -521,17 +561,26 @@ class PB1000System:
         if not self.key_interrupt_via_scan:
             cpu_core.set_input(cpu_core.KEY_INT, 1)
             self._key_line_state = 1
+        else:
+            # Allow immediate first pulse after key press.
+            self._key_next_pulse_ms = time.ticks_ms()
         self._key_commit_pulse_sent = False
         self._key_commit_pulse_count = 0
-        self._key_next_pulse_ms = time.ticks_add(time.ticks_ms(), self._key_pulse_interval_ms)
+        if not self.key_interrupt_via_scan:
+            self._key_next_pulse_ms = time.ticks_add(time.ticks_ms(), self._key_pulse_interval_ms)
 
     def release_key(self, key):
         """Release a key on the virtual keyboard."""
         self.keyboard.key_release(key)
         if not self.keyboard.has_key_pressed():
+            if self._key_scan_pending():
+                self._key_post_release_pulses_remaining = self._key_post_release_pulses_max
+            else:
+                self._key_post_release_pulses_remaining = 0
             if self._key_line_state:
                 cpu_core.set_input(cpu_core.KEY_INT, 0)
             self._key_line_state = 0
+            self._key_pulse_release_pending = False
             self._key_commit_pulse_sent = False
             self._key_commit_pulse_count = 0
             self._key_next_pulse_ms = 0
@@ -641,11 +690,35 @@ class PB1000System:
             "kyrep": self.ram[base + 6],  # 0x68D8
         }
 
-    def can_release_active_key(self):
-        """Return True when current key press can be safely released."""
+    def get_key_buffer_state(self):
+        """Return keyboard buffer state (KYCND/RD/WR/first 16-byte shadow)."""
+        base = 0x68D9 - self.RAM_START
+        return {
+            "kycnt": self.ram[base + 0],  # 0x68D9 KYCND
+            "rd": self.ram[base + 1],     # 0x68DA
+            "wr": self.ram[base + 2],     # 0x68DB
+            "buf": bytes(self.ram[base + 6: base + 6 + 16]),  # 0x68DF..0x68EE shadow
+        }
+
+    def can_release_active_key(self, keybuf_base=None):
+        """Return True when current key press can be safely released.
+
+        If keybuf_base is provided, use composite enqueue detection:
+        KYCND or RD/WR change, or buffer shadow update.
+        """
         st = self.get_key_scan_state()
         chata = st["chata"]
-        return chata == 0x20
+        if keybuf_base is None:
+            return chata == 0x20
+
+        now = self.get_key_buffer_state()
+        buffered = (
+            now["kycnt"] != keybuf_base.get("kycnt", now["kycnt"]) or
+            now["rd"] != keybuf_base.get("rd", now["rd"]) or
+            now["wr"] != keybuf_base.get("wr", now["wr"]) or
+            now["buf"] != keybuf_base.get("buf", now["buf"])
+        )
+        return buffered
 
     def get_irq_scan_state(self):
         """Return key/interrupt related register snapshot for tracing."""
