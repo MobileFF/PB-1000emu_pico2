@@ -54,7 +54,7 @@ def _keypos(row, ki_col):
     return (row, ki_col)
 
 
-KEY_EXE = _keypos(10, 9)
+KEY_EXE = _keypos(10, 4)
 
 
 _KEY_CANDIDATES = {

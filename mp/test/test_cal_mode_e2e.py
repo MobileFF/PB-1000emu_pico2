@@ -14,10 +14,7 @@ import time
 from ili9341 import ILI9341
 from pb1000 import PB1000System
 from main import init_display,draw_bezel
-try:
-    import os
-except ImportError:
-    import uos as os
+from script_common import create_script_runtime
 
 SPI_ID = 1
 SCK_PIN = 10
@@ -48,65 +45,10 @@ MAX_RETRIES_PER_KEY = 6
 # 固定入力: 1 + 2 [EXE]
 KEY_SEQUENCE = [
     ((9,6), "1"),
-#     ((9,5), "+"),
-#     ((9,3), "2"),
-#     ((10, 4), "EXE"),
+    ((9,3), "+"),
+    ((9,5), "2"),
+    ((10, 4), "EXE"),
 ]
-
-
-def _to_bool(text):
-    return str(text).strip().lower() in ("1", "true", "yes", "on")
-
-
-def _parse_ini(path):
-    data = {}
-    current = ""
-    with open(path, "r") as f:
-        for raw in f:
-            line = raw.strip()
-            if not line:
-                continue
-            if line.startswith("#") or line.startswith(";"):
-                continue
-            if line.startswith("[") and line.endswith("]"):
-                current = line[1:-1].strip().lower()
-                if current not in data:
-                    data[current] = {}
-                continue
-            if "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            key = key.strip().lower()
-            value = value.split(";", 1)[0].split("#", 1)[0].strip()
-            if current not in data:
-                data[current] = {}
-            data[current][key] = value
-    return data
-
-
-def _load_debug_overrides():
-    cfg = {"c_memory": None, "c_lcd": None}
-    ini_paths = ("debug.ini", "/debug.ini", "/mp/debug.ini")
-    ini_data = None
-    loaded = ""
-    for path in ini_paths:
-        try:
-            ini_data = _parse_ini(path)
-            loaded = path
-            break
-        except OSError:
-            pass
-    if not ini_data:
-        return cfg
-    debug = ini_data.get("debug", {})
-    if "c_memory" in debug:
-        cfg["c_memory"] = _to_bool(debug["c_memory"])
-    if "c_lcd" in debug:
-        cfg["c_lcd"] = _to_bool(debug["c_lcd"])
-    if loaded:
-        print(f"Debug overrides loaded: {loaded}")
-    return cfg
-
 
 def _step_runtime(system, steps, timer_accum):
     remain = steps
@@ -347,66 +289,78 @@ def init_display():
     return display
 
 def main():
-    print(f"\n=== PB-1000 minimal key test ({SCRIPT_VERSION}) ===")
+    runtime = create_script_runtime("/log/trace_cal_mode_e2e.log")
+    logger = runtime["logger"]
+    logger.install_print_hook()
+    try:
+        if runtime["ini_path"]:
+            print(f"Debug config loaded: {runtime['ini_path']}")
+        if logger.trace_mode == "file":
+            print(f"Trace output mode=file path={logger.trace_path}")
+        else:
+            print("Trace output mode=console")
 
-#     try:
-#         display = ILI9341(use_framebuf=False)
-#     except TypeError:
+        banner = f"=== PB-1000 minimal key test ({SCRIPT_VERSION}) ==="
+        print(f"\n{banner}")
 
-    display = init_display()
+        display = init_display()
 
-    debug_overrides = _load_debug_overrides()
-    system = PB1000System(
-        display=display,
-        debug={
-            "sys": True,
-            "lcd": False,
-            "kb": True,
-            "c_memory": debug_overrides["c_memory"],
-            "c_lcd": debug_overrides["c_lcd"],
-        },
-    )
-    
-    draw_bezel(display)
-    
-    print("Initialize")
-    system.step(40000)
-
-    print(f"LCD backend: {getattr(system, '_LCD_BACKEND', 'unknown') if hasattr(system, '_LCD_BACKEND') else 'see pb1000.py'}")
-
-    if not _load_roms(system):
-        print("ERROR: ROM load failed")
-        return
-
-    enabled, timer_accum, boot_steps = _wait_key_enable(system)
-    if enabled:
-        print(f"Boot ready: KEY input enabled after {boot_steps} steps")
-    else:
-        print(f"WARN: KEY input not enabled within timeout ({boot_steps} steps)")
-
-    timer_accum = _step_runtime(system, POST_BOOT_SETTLE_STEPS, timer_accum)
-
-    timer_accum = _run_sequence_main_style(system, timer_accum, KEY_SEQUENCE)
-
-    timer_accum = _step_runtime(system, POST_INPUT_SETTLE_STEPS, timer_accum)
-
-    if hasattr(system, "get_key_scan_state"):
-        st = system.get_key_scan_state()
-        keyin16 = st.get("keyin16")
-        if keyin16 is None:
-            keyin16 = st.get("keyin", 0)
-        print(
-            "FINAL KEY STATE: "
-            f"KYSTA={st.get('kysta', 0):02X} "
-            f"CHATA={st.get('chata', 0):02X} "
-            f"KEYCM={st.get('keycm', 0):02X} "
-            f"KEYIN16={keyin16:04X}"
+        debug_overrides = runtime["debug_overrides"]
+        system = PB1000System(
+            display=display,
+            debug={
+                "sys": True,
+                "lcd": False,
+                "kb": True,
+                "c_memory": debug_overrides["c_memory"],
+                "c_lcd": debug_overrides["c_lcd"],
+            },
         )
+        
+        draw_bezel(display)
+        
+        print("Initialize")
+        system.step(40000)
 
-    print("EDTOP VRAM dump:")
-    system.dump_edtop_vram()
+        print(f"LCD backend: {getattr(system, '_LCD_BACKEND', 'unknown') if hasattr(system, '_LCD_BACKEND') else 'see pb1000.py'}")
 
-    print("Done: injected fixed sequence '1+2[EXE]'.")
+        if not _load_roms(system):
+            print("ERROR: ROM load failed")
+            return
+
+        enabled, timer_accum, boot_steps = _wait_key_enable(system)
+        if enabled:
+            print(f"Boot ready: KEY input enabled after {boot_steps} steps")
+        else:
+            print(f"WARN: KEY input not enabled within timeout ({boot_steps} steps)")
+
+        timer_accum = _step_runtime(system, POST_BOOT_SETTLE_STEPS, timer_accum)
+
+        timer_accum = _run_sequence_main_style(system, timer_accum, KEY_SEQUENCE)
+
+        timer_accum = _step_runtime(system, POST_INPUT_SETTLE_STEPS, timer_accum)
+
+        system.update_display()
+
+        if hasattr(system, "get_key_scan_state"):
+            st = system.get_key_scan_state()
+            keyin16 = st.get("keyin16")
+            if keyin16 is None:
+                keyin16 = st.get("keyin", 0)
+            print(
+                "FINAL KEY STATE: "
+                f"KYSTA={st.get('kysta', 0):02X} "
+                f"CHATA={st.get('chata', 0):02X} "
+                f"KEYCM={st.get('keycm', 0):02X} "
+                f"KEYIN16={keyin16:04X}"
+            )
+
+        print("EDTOP VRAM dump:")
+        system.dump_edtop_vram()
+
+        print("Done: injected fixed sequence '1+2[EXE]'.")
+    finally:
+        logger.close()
 
 
 if __name__ == "__main__":
