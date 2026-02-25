@@ -1,0 +1,13 @@
+
+cd ~/micropython/ports/rp2
+cmake -B build-RPI_PICO2 -G Ninja .
+
+# Set the path to the PB-1000 emulator source
+export USER_C_MODULES=~/projects/hd61700/src/micropython.cmake
+
+make BOARD=RPI_PICO2 USER_C_MODULES="$USER_C_MODULES" clean
+make BOARD=RPI_PICO2 USER_C_MODULES="$USER_C_MODULES" -j$(nproc)
+
+
+export MICROPY_CROSS=~/micropython/mpy-cross/mpy-cross
+
