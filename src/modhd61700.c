@@ -52,7 +52,16 @@ static mp_obj_t py_kb_write_cb = mp_const_none;
 static mp_obj_t py_port_read_cb = mp_const_none;
 static mp_obj_t py_port_write_cb = mp_const_none;
 
-static void anchor_callbacks(mp_obj_t obj) { (void)obj; }
+static mp_obj_t py_callback_anchor_list = mp_const_none;
+
+static void anchor_callbacks(mp_obj_t obj) {
+  if (obj == mp_const_none)
+    return;
+  if (py_callback_anchor_list == mp_const_none) {
+    py_callback_anchor_list = mp_obj_new_list(0, NULL);
+  }
+  mp_obj_list_append(py_callback_anchor_list, obj);
+}
 
 static uint8_t c_mem_read(void *ctx, uint8_t segment, uint32_t offset) {
   (void)ctx;
@@ -168,7 +177,6 @@ static uint8_t c_mem_direct_read(void *ctx, uint8_t segment, uint32_t offset) {
 static void c_mem_direct_write(void *ctx, uint8_t segment, uint32_t offset,
                                uint8_t data) {
   (void)ctx;
-  (void)segment;
   /* Only write to RAM area (0x6000-0x7FFF) */
   if (offset >= 0x6000 && offset < 0x8000) {
     ram_buf[offset - 0x6000] = data;
@@ -550,7 +558,12 @@ static MP_DEFINE_CONST_FUN_OBJ_1(mod_anchor_callbacks_obj,
                                  mod_anchor_callbacks);
 
 // Internal function to ensure anchor list is known to GC
-static mp_obj_t mod_init_anchor(void) { return mp_const_none; }
+static mp_obj_t mod_init_anchor(void) {
+  if (py_callback_anchor_list == mp_const_none) {
+    py_callback_anchor_list = mp_obj_new_list(0, NULL);
+  }
+  return py_callback_anchor_list;
+}
 static MP_DEFINE_CONST_FUN_OBJ_0(mod_init_anchor_obj, mod_init_anchor);
 
 /* ====== Module definition ====== */

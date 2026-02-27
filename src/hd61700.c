@@ -100,11 +100,11 @@ static uint8_t read_op(hd61700_state_t *cpu) {
 
 static void push(hd61700_state_t *cpu, uint16_t *offset, uint8_t data) {
   (*offset)--;
-  mem_writebyte(cpu, REG_UA >> 2, *offset, data);
+  mem_writebyte(cpu, REG_UA, *offset, data);
 }
 
 static uint8_t pop(hd61700_state_t *cpu, uint16_t *offset) {
-  uint8_t data = mem_readbyte(cpu, REG_UA >> 2, *offset);
+  uint8_t data = mem_readbyte(cpu, REG_UA, *offset);
   (*offset)++;
   return data;
 }

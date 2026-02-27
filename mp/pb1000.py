@@ -264,7 +264,7 @@ class PB1000System:
             # 8KB standard RAM
             ram_index = (offset - self.RAM_START) % len(self.ram)
             if self._ram_is_c_managed and hasattr(cpu_core, "write_mem"):
-                cpu_core.write_mem(offset & 0xFFFF, data & 0xFF)
+                cpu_core.write_mem(offset & 0xFFFF, data & 0xFF, segment)
             else:
                 self.ram[ram_index] = data
             if self._display_probe_active and (not self._display_probe_hit):
@@ -292,7 +292,7 @@ class PB1000System:
                 # Always sync C-side via API or proxy
                 if self._ram_is_c_managed and hasattr(cpu_core, "write_mem"):
                     # c_mem_direct_write knows about expanded RAM if segment is 1
-                    cpu_core.write_mem(offset & 0xFFFF, data & 0xFF)
+                    cpu_core.write_mem(offset & 0xFFFF, data & 0xFF, segment)
                 else:
                     self.exp_ram[exp_off] = data
 
