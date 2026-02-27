@@ -26,11 +26,12 @@ from keyboard import KeyboardMatrix
 
 class RAMView:
     """A writable wrapper for the C-side RAM buffer."""
-    def __init__(self, core, read_view, size, start_addr):
+    def __init__(self, core, read_view, size, start_addr, segment=0):
         self._core = core
         self._view = read_view
         self._size = size
         self._start = start_addr
+        self._segment = segment
     def __getitem__(self, i):
         return self._view[i]
     def __len__(self):
@@ -39,9 +40,9 @@ class RAMView:
         if isinstance(i, slice):
             r = range(*i.indices(self._size))
             for idx, val in zip(r, v):
-                self._core.write_mem(self._start + idx, val)
+                self._core.write_mem(self._start + idx, val, self._segment)
         else:
-            self._core.write_mem(self._start + i, v)
+            self._core.write_mem(self._start + i, v, self._segment)
     def __repr__(self):
         return f"<RAMView {self._size} bytes at 0x{self._start:04X}>"
 
@@ -56,6 +57,7 @@ class PB1000System:
     RAM_START        = 0x6000
     RAM_SIZE         = 0x2000   # 8KB
     SYS_ROM_START    = 0x8000   
+    EXP_RAM_SIZE     = 0x8000   # 32KB Expanded RAM
     _KEY_TRACE_ADDRS = {
         0x68D2: "KYSTA",
         0x68D3: "CHATA",
@@ -91,15 +93,30 @@ class PB1000System:
         self.debug_cfg = self._normalize_debug_config(debug)
         self.debug = self.debug_cfg["sys"]
         self._ram_is_c_managed = False
+
+        self.has_exp = self._file_exists(self._ram_path(1))
+        if hasattr(cpu_core, "set_has_exp_ram"):
+            cpu_core.set_has_exp_ram(self.has_exp)
+
         # Memory initialization
         if hasattr(cpu_core, "get_ram_view"):
             # Use C-side RAM buffer via a writable proxy
             raw_view = cpu_core.get_ram_view()
             self.ram = RAMView(cpu_core, memoryview(raw_view), self.RAM_SIZE, self.RAM_START)
             self._ram_is_c_managed = True
-            print("Using C-side RAM proxy (writable)")
+            
+            if self.has_exp and hasattr(cpu_core, "get_exp_ram_view"):
+                exp_raw_view = cpu_core.get_exp_ram_view()
+                # Wrap in RAMView with segment=1 so writes go to C bank 1
+                self.exp_ram = RAMView(cpu_core, memoryview(exp_raw_view), self.EXP_RAM_SIZE, self.SYS_ROM_START, segment=1)
+            else:
+                self.exp_ram = bytearray(self.EXP_RAM_SIZE)
+                
+            print(f"Using C-side RAM proxy (writable). Expansion RAM present: {self.has_exp}")
         else:
             self.ram = bytearray(self.RAM_SIZE)
+            self.exp_ram = bytearray(self.EXP_RAM_SIZE)
+            print(f"Using Python-side RAM buffer. Expansion RAM present: {self.has_exp}")
             
         self.rom0 = bytearray(0)  # Mirror for Python-side access if needed
         self.rom1 = bytearray(0)
@@ -144,7 +161,8 @@ class PB1000System:
             cpu_core.set_lcd_debug(self.debug_cfg["sys"] and self.debug_cfg["lcd"])
         if restore_registers:
             self._restore_registers_from_dump()
-        print("register loaded")
+        self.load_ram()
+        print("register and ram loaded")
         # Keep references to callbacks to prevent GC!
         # The C module stores these in non-root pointers, so Python must keep them alive.
         self._cb_mem_read = self._mem_read
@@ -225,20 +243,25 @@ class PB1000System:
                 return 0xFF
 
         # Banked memory area (0x8000-0xFFFF) - Segmented by UA
-        # We use UA bits 0-1 for banking here for System ROM
         bank = segment & 0x03
         if offset >= 0x8000:
-            # Mirror rom1 across banks for initial boot stability
-            rom_off = offset - 0x8000
-            if rom_off < len(self.rom1):
-                return self.rom1[rom_off]
-        
+            if bank == 0:
+                # System ROM
+                rom_off = offset - 0x8000
+                if rom_off < len(self.rom1):
+                    return self.rom1[rom_off]
+            elif bank == 1 and self.has_exp:
+                # Expanded RAM
+                exp_off = offset - 0x8000
+                if exp_off < len(self.exp_ram):
+                    return self.exp_ram[exp_off]
+
         return 0xFF
 
     def _mem_write(self, segment, offset, data):
         """Memory write callback for CPU."""
-        # Only allow writes to PB-1000 standard RAM area (0x6000-0x7FFF)
         if self.RAM_START <= offset < self.SYS_ROM_START:
+            # 8KB standard RAM
             ram_index = (offset - self.RAM_START) % len(self.ram)
             if self._ram_is_c_managed and hasattr(cpu_core, "write_mem"):
                 cpu_core.write_mem(offset & 0xFFFF, data & 0xFF)
@@ -261,6 +284,18 @@ class PB1000System:
                     print(f"KEY RAM WRITE: {name}[{offset:04X}] <= {data:02X}")
                 elif self._KEY_BUF_TRACE_START <= offset <= self._KEY_BUF_TRACE_END:
                     print(f"KEY BUF WRITE: [{offset:04X}] <= {data:02X}")
+                    
+        elif offset >= 0x8000 and (segment & 0x03) == 1 and self.has_exp:
+            # Bank 1 32KB Expanded RAM
+            exp_off = offset - 0x8000
+            if exp_off < len(self.exp_ram):
+                # Always sync C-side via API or proxy
+                if self._ram_is_c_managed and hasattr(cpu_core, "write_mem"):
+                    # c_mem_direct_write knows about expanded RAM if segment is 1
+                    cpu_core.write_mem(offset & 0xFFFF, data & 0xFF)
+                else:
+                    self.exp_ram[exp_off] = data
+
         # Port-mapped RAM or expanded RAM might exist in other segments
         # but for initial boot we stick to the primary 0x2000-0x7FFF range.
 
@@ -320,6 +355,74 @@ class PB1000System:
             return
         cpu_core.set_registers(data[:36])
         print(f"registers restored from {path}")
+
+    def _file_exists(self, path):
+        """Helper to check if a file exists (MicroPython compatible)."""
+        try:
+            os.stat(path)
+            return True
+        except OSError:
+            return False
+
+    def _ram_path(self, slot=0):
+        # reuse logic from _register_dump_path for consistency
+        path = self._register_dump_path()
+        base = path.rsplit("/", 1)[0]
+        return f"{base}/ram{slot}.bin"
+
+    def load_ram(self):
+        """Load standard and expanded RAM contents from file."""
+        # Load standard RAM (8KB)
+        path0 = self._ram_path(0)
+        try:
+            val = None
+            with open(path0, 'rb') as f:
+                val = f.read(self.RAM_SIZE)
+            if val:
+                # Use a loop to avoid memoryview slice assignment issues in some MP versions
+                for i in range(len(val)):
+                    self.ram[i] = val[i]
+                print(f"Standard RAM restored from {path0}")
+        except OSError:
+            print(f"Standard RAM file {path0} not found, starting clean.")
+
+        # Load expanded RAM (32KB)
+        if self.has_exp:
+            path1 = self._ram_path(1)
+            try:
+                val = None
+                with open(path1, 'rb') as f:
+                    val = f.read(self.EXP_RAM_SIZE)
+                if val:
+                    for i in range(len(val)):
+                        self.exp_ram[i] = val[i]
+                    print(f"Expanded RAM restored from {path1}")
+            except OSError:
+                print(f"Expanded RAM file {path1} not found.")
+
+    def save_ram(self):
+        """Save standard and expanded RAM contents to file."""
+        # Save standard RAM
+        path0 = self._ram_path(0)
+        try:
+            with open(path0, 'wb') as f:
+                # RAMView doesn't support buffer protocol directly, use the internal view
+                buf = self.ram._view if isinstance(self.ram, RAMView) else self.ram
+                f.write(buf)
+            print(f"Standard RAM saved to {path0}")
+        except OSError as e:
+            print(f"Failed to save standard RAM: {e}")
+
+        # Save expanded RAM
+        if self.has_exp:
+            path1 = self._ram_path(1)
+            try:
+                with open(path1, 'wb') as f:
+                    buf = self.exp_ram._view if isinstance(self.exp_ram, RAMView) else self.exp_ram
+                    f.write(buf)
+                print(f"Expanded RAM saved to {path1}")
+            except OSError as e:
+                print(f"Failed to save expanded RAM: {e}")
 
     def step(self, cycles=100, stop_pc=-1):
         """Execute CPU for given number of cycles, or until stop_pc is reached."""

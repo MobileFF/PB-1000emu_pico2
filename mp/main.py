@@ -270,6 +270,12 @@ def main():
 
     except KeyboardInterrupt:
         print("\nEmulator stopped by user.")
+    finally:
+        print("Saving RAM state...")
+        try:
+            system.save_ram()
+        except Exception as e:
+            print(f"Save failed: {e}")
 
 
 if __name__ == '__main__':

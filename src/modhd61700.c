@@ -23,7 +23,9 @@ static uint8_t rom0_buf[0x2000]; // 8KB Internal ROM
 static size_t rom0_size = 0;
 static uint8_t rom1_buf[0x8000]; // 32KB System ROM
 static size_t rom1_size = 0;
-static uint8_t ram_buf[0x2000]; // 8KB RAM (0x6000-0x7FFF)
+static uint8_t ram_buf[0x2000];     // 8KB RAM (0x6000-0x7FFF)
+static uint8_t exp_ram_buf[0x8000]; // 32KB Expanded RAM (Bank 1: 0x8000-0xFFFF)
+static bool has_exp_ram = false;
 
 /* Direct C mode flags */
 static bool use_c_mem = false;
@@ -50,9 +52,7 @@ static mp_obj_t py_kb_write_cb = mp_const_none;
 static mp_obj_t py_port_read_cb = mp_const_none;
 static mp_obj_t py_port_write_cb = mp_const_none;
 
-static void anchor_callbacks(mp_obj_t obj) {
-  (void)obj;
-}
+static void anchor_callbacks(mp_obj_t obj) { (void)obj; }
 
 static uint8_t c_mem_read(void *ctx, uint8_t segment, uint32_t offset) {
   (void)ctx;
@@ -147,17 +147,20 @@ static uint8_t c_mem_direct_read(void *ctx, uint8_t segment, uint32_t offset) {
   if (offset >= 0x6000 && offset < 0x8000) {
     return ram_buf[offset - 0x6000];
   }
-  /* 0x8000-0xFFFF: System ROM (ROM1) */
+  /* 0x8000-0xFFFF: Banked Memory */
   if (offset >= 0x8000) {
-    if (rom1_size == 0) {
-      return 0xFF;
-    }
     uint32_t bank = (uint32_t)(segment & 0x03u);
-    uint32_t off = (bank * 0x8000u) + (offset - 0x8000u);
-    if (off >= rom1_size) {
-      off %= rom1_size;
+    uint32_t off = offset - 0x8000u;
+    if (bank == 0) {
+      /* Bank 0: System ROM */
+      if (rom1_size == 0)
+        return 0xFF;
+      return rom1_buf[off % rom1_size];
+    } else if (bank == 1 && has_exp_ram) {
+      /* Bank 1: Expanded RAM */
+      return exp_ram_buf[off];
     }
-    return rom1_buf[off];
+    return 0xFF;
   }
   return 0xFF;
 }
@@ -179,6 +182,10 @@ static void c_mem_direct_write(void *ctx, uint8_t segment, uint32_t offset,
       mp_printf(&mp_plat_print, "KEY BUF WRITE: [%04X] <= %02X\n",
                 (unsigned int)offset, (unsigned int)data);
     }
+  }
+  /* Bank 1 Expanded RAM Write (0x8000-0xFFFF) */
+  else if (offset >= 0x8000 && (segment & 0x03) == 1 && has_exp_ram) {
+    exp_ram_buf[offset - 0x8000] = data;
   }
 }
 
@@ -500,21 +507,39 @@ static mp_obj_t mod_get_ram_view(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(mod_get_ram_view_obj, mod_get_ram_view);
 
-/* hd61700.read_mem(addr) */
-static mp_obj_t mod_read_mem(mp_obj_t addr_obj) {
-  uint32_t addr = (uint32_t)mp_obj_get_int(addr_obj);
-  return MP_OBJ_NEW_SMALL_INT(c_mem_direct_read(NULL, 0, addr));
+/* hd61700.get_exp_ram_view() */
+static mp_obj_t mod_get_exp_ram_view(void) {
+  return mp_obj_new_memoryview('B', sizeof(exp_ram_buf), exp_ram_buf);
 }
-static MP_DEFINE_CONST_FUN_OBJ_1(mod_read_mem_obj, mod_read_mem);
+static MP_DEFINE_CONST_FUN_OBJ_0(mod_get_exp_ram_view_obj,
+                                 mod_get_exp_ram_view);
 
-/* hd61700.write_mem(addr, data) */
-static mp_obj_t mod_write_mem(mp_obj_t addr_obj, mp_obj_t data_obj) {
-  uint32_t addr = (uint32_t)mp_obj_get_int(addr_obj);
-  uint8_t data = (uint8_t)mp_obj_get_int(data_obj);
-  c_mem_direct_write(NULL, 0, addr, data);
+/* hd61700.set_has_exp_ram(bool) */
+static mp_obj_t mod_set_has_exp_ram(mp_obj_t enable_obj) {
+  has_exp_ram = mp_obj_is_true(enable_obj);
   return mp_const_none;
 }
-static MP_DEFINE_CONST_FUN_OBJ_2(mod_write_mem_obj, mod_write_mem);
+static MP_DEFINE_CONST_FUN_OBJ_1(mod_set_has_exp_ram_obj, mod_set_has_exp_ram);
+
+/* hd61700.read_mem(addr, [segment]) */
+static mp_obj_t mod_read_mem(size_t n_args, const mp_obj_t *args) {
+  uint32_t addr = (uint32_t)mp_obj_get_int(args[0]);
+  uint8_t segment = (n_args > 1) ? (uint8_t)mp_obj_get_int(args[1]) : 0;
+  return MP_OBJ_NEW_SMALL_INT(c_mem_direct_read(NULL, segment, addr));
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(mod_read_mem_obj, 1, 2,
+                                           mod_read_mem);
+
+/* hd61700.write_mem(addr, data, [segment]) */
+static mp_obj_t mod_write_mem(size_t n_args, const mp_obj_t *args) {
+  uint32_t addr = (uint32_t)mp_obj_get_int(args[0]);
+  uint8_t data = (uint8_t)mp_obj_get_int(args[1]);
+  uint8_t segment = (n_args > 2) ? (uint8_t)mp_obj_get_int(args[2]) : 0;
+  c_mem_direct_write(NULL, segment, addr, data);
+  return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(mod_write_mem_obj, 2, 3,
+                                           mod_write_mem);
 
 /* hd61700._anchor_callbacks(obj) - internal use to prevent GC */
 static mp_obj_t mod_anchor_callbacks(mp_obj_t obj) {
@@ -525,9 +550,7 @@ static MP_DEFINE_CONST_FUN_OBJ_1(mod_anchor_callbacks_obj,
                                  mod_anchor_callbacks);
 
 // Internal function to ensure anchor list is known to GC
-static mp_obj_t mod_init_anchor(void) {
-  return mp_const_none;
-}
+static mp_obj_t mod_init_anchor(void) { return mp_const_none; }
 static MP_DEFINE_CONST_FUN_OBJ_0(mod_init_anchor_obj, mod_init_anchor);
 
 /* ====== Module definition ====== */
@@ -569,6 +592,10 @@ static const mp_rom_map_elem_t hd61700_module_globals_table[] = {
     {MP_ROM_QSTR(MP_QSTR_use_c_memory), MP_ROM_PTR(&mod_use_c_memory_obj)},
     {MP_ROM_QSTR(MP_QSTR_use_c_lcd), MP_ROM_PTR(&mod_use_c_lcd_obj)},
     {MP_ROM_QSTR(MP_QSTR_get_ram_view), MP_ROM_PTR(&mod_get_ram_view_obj)},
+    {MP_ROM_QSTR(MP_QSTR_get_exp_ram_view),
+     MP_ROM_PTR(&mod_get_exp_ram_view_obj)},
+    {MP_ROM_QSTR(MP_QSTR_set_has_exp_ram),
+     MP_ROM_PTR(&mod_set_has_exp_ram_obj)},
     {MP_ROM_QSTR(MP_QSTR_read_mem), MP_ROM_PTR(&mod_read_mem_obj)},
     {MP_ROM_QSTR(MP_QSTR_write_mem), MP_ROM_PTR(&mod_write_mem_obj)},
     {MP_ROM_QSTR(MP_QSTR__anchor_callbacks),
