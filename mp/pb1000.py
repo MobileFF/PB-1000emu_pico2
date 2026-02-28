@@ -6,6 +6,9 @@ import hd61700 as cpu_core
 import os
 import sys
 import time
+import machine
+from ili9341 import ILI9341
+
 # print(f"DEBUG IMPORTS: cpu_core={cpu_core}, type={type(cpu_core)}")
 # if 'execute' in dir(cpu_core):
 #     print(f"DEBUG IMPORTS: cpu_core.execute={cpu_core.execute}")
@@ -23,6 +26,38 @@ except ImportError as e:
 #from lcd_controller import LCDController
 print(f"LCD Controller is {_LCD_BACKEND}")
 from keyboard import KeyboardMatrix
+
+SPI_ID = 1
+SCK_PIN = 10
+MOSI_PIN = 11
+MISO_PIN = 12
+CS_PIN = 9
+DC_PIN = 8
+RST_PIN = 7
+BL_PIN = 22
+
+def init_display():
+    spi = machine.SPI(
+        SPI_ID,
+        baudrate=40_000_000,
+        sck=machine.Pin(SCK_PIN),
+        mosi=machine.Pin(MOSI_PIN),
+        miso=machine.Pin(MISO_PIN),
+    )
+    cs = machine.Pin(CS_PIN, machine.Pin.OUT)
+    dc = machine.Pin(DC_PIN, machine.Pin.OUT)
+    rst = machine.Pin(RST_PIN, machine.Pin.OUT)
+    machine.Pin(BL_PIN, machine.Pin.OUT, value=1)
+
+    display = ILI9341(spi, cs, dc, rst, width=320, height=240)
+    display.fill_rect(0, 0, 320, 240, 0x0000)
+    return display
+
+
+def draw_bezel(display):
+    display.fill_rect(12, 36, 296, 72, 0x4228)
+    display.fill_rect(14, 38, 292, 68, 0x8410)
+    display.fill_rect(16, 40, 288, 64, 0xB5E6)
 
 class RAMView:
     """A writable wrapper for the C-side RAM buffer."""
@@ -174,20 +209,26 @@ class PB1000System:
         self._cb_kb_write = self.keyboard.kb_write
         self._cb_port_read = self._port_read
         self._cb_port_write = self._port_write
+        print("callbacks set to instance fields")
 
         # Register all callbacks
         cpu_core.set_mem_callbacks(self._cb_mem_read, self._cb_mem_write)
+        print("set_mem_callbacks")
         cpu_core.set_lcd_callbacks(
             self._cb_lcd_read,
             self._cb_lcd_write,
             self._cb_lcd_ctrl
         )
+        print("set_lcd_callbacks")
         cpu_core.set_kb_callbacks(
             self._cb_kb_read,
             self._cb_kb_write
         )
+        print("set_kb_callbacks")
         cpu_core.set_port_callbacks(self._cb_port_read, self._cb_port_write)
-
+        print("set_port_callbacks")
+        print("all callbacks set")
+        
         # Enable high-performance C-to-C direct paths if supported
         if hasattr(cpu_core, "use_c_memory"):
             direct_mem = (not self.debug_cfg["sys"]) if direct_mem_override is None else bool(direct_mem_override)
@@ -204,18 +245,27 @@ class PB1000System:
             else:
                 print("C-side LCD Direct Access: DISABLED")
 
-    def load_rom(self, path, slot=0):
-        """Load ROM image into slot 0 (Internal) or 1 (System)."""
+    def load_rom(self, path, slot=0, keep_copy=False):
+        """Load ROM image into slot 0 (Internal) or 1 (System).
+
+        ``keep_copy`` defaults to ``False`` so that the Python object holding the
+        bytes is discarded immediately.  This gives the *smallest* heap
+        footprint on devices such as the Pico.  If your code needs to examine
+        the ROM contents directly (e.g. accessing ``system.rom0`` or invoking
+        ``_mem_read_impl``), pass ``keep_copy=True`` and a mirror will be
+        retained.
+        """
         try:
             with open(path, 'rb') as f:
                 data = f.read()
                 if slot == 0:
-                    self.rom0 = data
+                    # optionally keep a Python copy for _mem_read_impl
+                    self.rom0 = data if keep_copy else None
                     if hasattr(cpu_core, "load_rom"):
                         cpu_core.load_rom(0, data)
                     print(f"Internal ROM loaded: {len(data)} bytes")
                 else:
-                    self.rom1 = data
+                    self.rom1 = data if keep_copy else None
                     if hasattr(cpu_core, "load_rom"):
                         cpu_core.load_rom(1, data)
                     print(f"System ROM loaded: {len(data)} bytes")
@@ -234,8 +284,14 @@ class PB1000System:
         if offset < 0x8000:
             # 0x0000-0x1FFF: Internal ROM (rom0.bin, 8KB)
             if offset < 0x2000:
-                if offset < len(self.rom0):
-                    return self.rom0[offset]
+                # internal ROM read; prefer Python copy if present, otherwise
+                # fall back to the C core (read_mem is always defined when
+                # the ROM has been loaded in C).
+                if self.rom0 is not None:
+                    if offset < len(self.rom0):
+                        return self.rom0[offset]
+                elif hasattr(cpu_core, "read_mem"):
+                    return cpu_core.read_mem(offset, segment)
             # 0x6000-0x7FFF: RAM (8KB, PB-1000 standard)
             elif offset >= self.RAM_START:
                 return self.ram[(offset - self.RAM_START) % len(self.ram)]
@@ -248,8 +304,11 @@ class PB1000System:
             if bank == 0:
                 # System ROM
                 rom_off = offset - 0x8000
-                if rom_off < len(self.rom1):
-                    return self.rom1[rom_off]
+                if self.rom1 is not None:
+                    if rom_off < len(self.rom1):
+                        return self.rom1[rom_off]
+                elif hasattr(cpu_core, "read_mem"):
+                    return cpu_core.read_mem(offset, segment)
             elif bank == 1 and self.has_exp:
                 # Expanded RAM
                 exp_off = offset - 0x8000
@@ -260,6 +319,7 @@ class PB1000System:
 
     def _mem_write(self, segment, offset, data):
         """Memory write callback for CPU."""
+        if self.debug: print(f"_mem_write: seg={segment} off={hex(offset)} data={hex(data)}")
         if self.RAM_START <= offset < self.SYS_ROM_START:
             # 8KB standard RAM
             ram_index = (offset - self.RAM_START) % len(self.ram)
@@ -289,6 +349,7 @@ class PB1000System:
             # Bank 1 32KB Expanded RAM
             exp_off = offset - 0x8000
             if exp_off < len(self.exp_ram):
+                if self.debug: print(f"  -> Writing to Expand RAM (C-managed: {self._ram_is_c_managed})")
                 # Always sync C-side via API or proxy
                 if self._ram_is_c_managed and hasattr(cpu_core, "write_mem"):
                     # c_mem_direct_write knows about expanded RAM if segment is 1
@@ -605,7 +666,7 @@ class PB1000System:
         printer("LEDTP VRAM (0x6201-0x6850)")
         self.dump_ledtp_vram(bytes_per_line=bytes_per_line, printer=printer)
 
-    def debug_step(self,pause=True,trace=True,trace_index=None,out=None):
+    def debug_step(self,pause=True,trace=True,prt=True,trace_index=None,out=None):
         """Execute one instruction and print disassembly."""
         if trace==False:
             return cpu_core.step()
@@ -651,8 +712,9 @@ class PB1000System:
                 else:
                     break
         else:
-            out(f"{prefix}[{pc:04X}] {hex_str:<10} | F:{f_str} | {mnemonic} ")
-        return mnemonic
+            out(f"{prefix}[{pc:04X}] {hex_str:<10} | F:{f_str} | {mnemonic} ") if prt
+        #return mnemonic
+        return f"{prefix}[{pc:04X}] {hex_str:<10} | F:{f_str} | {mnemonic} "
             
     def update_display(self, x_offset=24, y_offset=40):
         """Render LCD to physical display."""

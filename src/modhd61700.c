@@ -192,8 +192,10 @@ static void c_mem_direct_write(void *ctx, uint8_t segment, uint32_t offset,
     }
   }
   /* Bank 1 Expanded RAM Write (0x8000-0xFFFF) */
-  else if (offset >= 0x8000 && (segment & 0x03) == 1 && has_exp_ram) {
-    exp_ram_buf[offset - 0x8000] = data;
+  else if (offset >= 0x8000 && (segment & 0x03) == 1) {
+    if (has_exp_ram) {
+      exp_ram_buf[offset - 0x8000] = data;
+    }
   }
 }
 

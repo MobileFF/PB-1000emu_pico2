@@ -100,6 +100,7 @@ def test_pb1000_bank_callback_fix():
     class DummyDisplay:
         def fill_rect(self, *args): pass
         def pixel(self, *args): pass
+        def _auto_setup_hw(self): pass
     
     # Create a dummy ram1.bin to trigger expansion
     try:
@@ -111,9 +112,12 @@ def test_pb1000_bank_callback_fix():
         #pass
         
         
-    print("PB1000System()")
+    print("PB1000System(debug=True)")
     sys_emu = PB1000System(DummyDisplay(), debug=False)
     sys_emu.has_exp = True # Force enable
+    if hasattr(hd61700, "set_has_exp_ram"):
+        print("  Forcing hd61700.set_has_exp_ram(True)")
+        hd61700.set_has_exp_ram(True)
     
     # Simulate a write from C to Bank 1, Offset 0x8000
     # In a real scenario, UA=1 and CPU does write_mem.
@@ -128,10 +132,109 @@ def test_pb1000_bank_callback_fix():
 
     # Simulate a write from Python (via RAMView) to C
     # We want to check if the segment is passed to C's write_mem.
-    # We can't easily check C side state without a custom C module or debug.
-    # But we can verify the API call signature in our mind - we already added segment.
-    print("  (Note: Python-to-C segment passing depends on updated C module which we just modified)")
+    print("  Testing 16-bit Word access...")
+    sys_emu.ram[0] = 0xAA
+    sys_emu.ram[1] = 0x55
+    if sys_emu.ram[0] == 0xAA and sys_emu.ram[1] == 0x55:
+        print("  PASS: Standard RAM 0x6000 writable.")
+    else:
+        print(f"  FAIL: Standard RAM 0x6000 write failed ({hex(sys_emu.ram[0])}, {hex(sys_emu.ram[1])})")
+
+def test_memory_instructions():
+    print("\nTesting HD61700 Memory Instructions (LDB, STB, LDW, STW)...")
+    tester = BankTest()
+    # ensure callbacks still used even if previous tests enabled C memory
+    if hasattr(hd61700, "use_c_memory"):
+        hd61700.use_c_memory(False)
+    hd61700.set_mem_callbacks(tester.mem_read, tester.mem_write)
+    hd61700.reset()
+    
+    # 1. STB A, (IX) where IX=0x6100, UA=0
+    # 2. STB B, (IY) where IY=0x8100, UA=1
+    # 3. STW R0, (IZ) where IZ=0x6200, UA=0
+    # 4. LDW (IZ), R2
+    
+    # Code:
+    # PRE IX, 0x6100  (D6 00 00 61)
+    # LD R0, 0x55     (00 55)
+    # STB R0, (IX)    (F0 00) -> [UA=0, ADDR=0x6100] <= 0x55
+    # PST UA, #1      (56 60 01)
+    # PRE IY, 0x8100  (D6 20 00 81)
+    # LD R0, 0xAA     (00 AA)
+    # STB R0, (IY)    (F0 10) -> [UA=1, ADDR=0x8100] <= 0xAA
+    # PST UA, #0      (56 60 00)
+    # PRE IZ, 0x6200  (D6 40 00 62)
+    # LD R0, 0x34     (00 34)
+    # LD R1, 0x12     (01 12)
+    # STW R0, (IZ)    (F2 20) -> [UA=0, ADDR=0x6200] <= 0x34, 0x12
+    # NOP             (F8)
+    
+    test_code = bytearray([
+        0x42, 0x1F, 0x00,       # LD $31,0
+        0x55, 0x1F,             # PSR SX, &H1F
+        0xD6, 0x00, 0x00, 0x61, # PRE IX, 0x6100
+        0x42, 0x00, 0x55,       # LD  $0, 0x55
+        0x20, 0x00,             # ST  $0, (IX+$SX)
+        0x56, 0x60, 0x01,       # PST UA, 1
+        0xD6, 0x00, 0x00, 0x81, # PRE IX, 0x8100
+        0x42, 0x00, 0xAA,       # LD  $0, 0xAA
+        0x20, 0x00,             # ST  $0, (IX+$SX)
+        0x56, 0x60, 0x00,       # PST UA, 0
+        0xD6, 0x40, 0x00, 0x62, # PRE IX, 0x6200
+        0x42, 0x00, 0x34,       # LD  $0, 0x34
+        0x42, 0x01, 0x12,       # LD  $1, 0x12
+        0xA0, 0x00,             # STW $0, (IZ)
+        0xF8                    # NOP
+    ])
+    
+    TEST_ADDR = 0x7000
+    def memory_reader(seg, off):
+        if TEST_ADDR <= off < TEST_ADDR + len(test_code):
+            return test_code[off - TEST_ADDR]
+        return 0
+        
+    hd61700.set_mem_callbacks(memory_reader, tester.mem_write)
+    hd61700.set_pc(TEST_ADDR)
+    print(f"  Executing {len(test_code)} bytes of test code at {hex(TEST_ADDR)}...")
+    hd61700.execute_steps(41)
+    
+    print("  Checking recorded writes:")
+    stb_6100 = None
+    stb_8100 = None
+    stw_6200 = []
+    
+    for acc in tester.recorded_accesses:
+        if acc[0] == 'W':
+            _, seg, off, data = acc
+            if off == 0x6100:
+                stb_6100 = (seg, data)
+            if off == 0x8100:
+                stb_8100 = (seg, data)
+            if off in (0x6200, 0x6201):
+                stw_6200.append((seg, off, data))
+    
+    if stb_6100 == (0, 0x55):
+        print("  PASS: STB at 0x6100 (Bank 0) OK.")
+    else:
+        print(f"  FAIL: STB at 0x6100 failed. Got {stb_6100}")
+        print(f"    recorded={tester.recorded_accesses}")
+        
+    if stb_8100 == (1, 0xAA):
+        print("  PASS: STB at 0x8100 (Bank 1) OK.")
+    else:
+        print(f"  FAIL: STB at 0x8100 failed. Got {stb_8100}")
+        print(f"    recorded={tester.recorded_accesses}")
+        
+    # verify two byte-stores for STW
+    if (len(stw_6200) == 2 and
+        stw_6200[0][1] == 0x6200 and stw_6200[0][2] == 0x34 and
+        stw_6200[1][1] == 0x6201 and stw_6200[1][2] == 0x12):
+        print("  PASS: STW at 0x6200 (Bank 0) OK.")
+    else:
+        print(f"  FAIL: STW at 0x6200 failed. Got {stw_6200}")
+        print(f"    recorded={tester.recorded_accesses}")
 
 if __name__ == "__main__":
     test_stack_segment_fix()
     test_pb1000_bank_callback_fix()
+    test_memory_instructions()

@@ -5,17 +5,8 @@ import machine
 import sys
 import time
 import uselect
-from ili9341 import ILI9341
-from pb1000 import PB1000System
-
-SPI_ID = 1
-SCK_PIN = 10
-MOSI_PIN = 11
-MISO_PIN = 12
-CS_PIN = 9
-DC_PIN = 8
-RST_PIN = 7
-BL_PIN = 22
+from pb1000 import PB1000System,init_display,draw_bezel
+import force_gc
 
 KEY_HOLD_MS = 120
 KEY_RELEASE_HARD_TIMEOUT_MS = 1200
@@ -25,34 +16,8 @@ STEP_TIMER_TICK_STEPS = 40000
 FRAME_INTERVAL_MS = 1000
 AUTO_EXE_ON_ENTER = False
 
-
-def init_display():
-    spi = machine.SPI(
-        SPI_ID,
-        baudrate=40_000_000,
-        sck=machine.Pin(SCK_PIN),
-        mosi=machine.Pin(MOSI_PIN),
-        miso=machine.Pin(MISO_PIN),
-    )
-    cs = machine.Pin(CS_PIN, machine.Pin.OUT)
-    dc = machine.Pin(DC_PIN, machine.Pin.OUT)
-    rst = machine.Pin(RST_PIN, machine.Pin.OUT)
-    machine.Pin(BL_PIN, machine.Pin.OUT, value=1)
-
-    display = ILI9341(spi, cs, dc, rst, width=320, height=240)
-    display.fill_rect(0, 0, 320, 240, 0x0000)
-    return display
-
-
-def draw_bezel(display):
-    display.fill_rect(12, 36, 296, 72, 0x4228)
-    display.fill_rect(14, 38, 292, 68, 0x8410)
-    display.fill_rect(16, 40, 288, 64, 0xB5E6)
-
-
 def _keypos(row, ki_col):
     return (row, ki_col)
-
 
 KEY_EXE = _keypos(10, 4)
 

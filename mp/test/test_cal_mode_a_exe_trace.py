@@ -1,23 +1,42 @@
 """
-PB-1000 minimal key input test.
-
-固定シーケンス "1+2[EXE]" を入力するだけの簡易スクリプト。
-キーボード入力終了後に追加で1000ステップ分のトレースをファイルへ書き出すように
-変更してあります。
-推定/探索ロジックは含みません。
-
-Run on device:
-    %Run -c $EDITOR_CONTENT
-or:
-    import test_cal_mode_e2e as t; t.main()
+CAL モードでキー "A" を押し、続いて EXE を押した直後から 1000 ステップ分の
+トレースをファイルに残す簡易テストスクリプト。
 """
 
 import time
 from ili9341 import ILI9341
 from pb1000 import PB1000System
-from main import init_display,draw_bezel
+from main import init_display, draw_bezel
 from script_common import create_script_runtime
+import force_gc
 
+"""
+def init_display():
+    spi = machine.SPI(
+        SPI_ID,
+        baudrate=40_000_000,
+        sck=machine.Pin(SCK_PIN),
+        mosi=machine.Pin(MOSI_PIN),
+        miso=machine.Pin(MISO_PIN),
+    )
+    cs = machine.Pin(CS_PIN, machine.Pin.OUT)
+    dc = machine.Pin(DC_PIN, machine.Pin.OUT)
+    rst = machine.Pin(RST_PIN, machine.Pin.OUT)
+    machine.Pin(BL_PIN, machine.Pin.OUT, value=1)
+
+    display = ILI9341(spi, cs, dc, rst, width=320, height=240)
+    display.fill_rect(0, 0, 320, 240, 0x0000)
+    return display
+
+
+def draw_bezel(display):
+    display.fill_rect(12, 36, 296, 72, 0x4228)
+    display.fill_rect(14, 38, 292, 68, 0x8410)
+    display.fill_rect(16, 40, 288, 64, 0xB5E6)
+"""
+
+
+# --- copy relevant constants from existing script ---
 SPI_ID = 1
 SCK_PIN = 10
 MOSI_PIN = 11
@@ -26,8 +45,6 @@ CS_PIN = 9
 DC_PIN = 8
 RST_PIN = 7
 BL_PIN = 22
-
-SCRIPT_VERSION = "cal-e2e-min-1plus2"
 
 STEP_CHUNK = 512
 TIMER_TICK_STEPS = 40000
@@ -44,14 +61,13 @@ KEY_SCAN_WINDOW_WAIT_MS = 3_000
 KEY_IDLE_WAIT_MS = 3_000
 MAX_RETRIES_PER_KEY = 6
 
-# 固定入力: 1 + 2 [EXE]
+# キーシーケンス: A と EXE
 KEY_SEQUENCE = [
-    #((9,6), "1"),
-    #((9,3), "+"),
-    #((9,5), "2"),
-    ((4,4), "A"),
-    ((10, 4), "EXE"),
+    ((4, 4), "A"),      # 行4, 列4 は 'A' キー
+    ((10, 4), "EXE"),   # 以前のシーケンスで使った座標
 ]
+
+# 以下のヘルパー関数は元スクリプトと同じ
 
 def _step_runtime(system, steps, timer_accum):
     remain = steps
@@ -61,7 +77,6 @@ def _step_runtime(system, steps, timer_accum):
             system.service_input_lines()
         if not system.is_sleeping:
             system.step(run)
-            #system.debug_step(pause=False,trace=True)
         else:
             time.sleep_ms(1)
         timer_accum += run
@@ -69,6 +84,7 @@ def _step_runtime(system, steps, timer_accum):
             system.tick_timer()
             timer_accum -= TIMER_TICK_STEPS
         remain -= run
+        # print(".",end="")
     return timer_accum
 
 
@@ -79,7 +95,7 @@ def _load_roms(system):
     ]
     for r0, r1 in candidates:
         try:
-            # the test later inspects rom0/rom1 lengths, so keep a copy
+            # keep copy for later assertions
             system.load_rom(r0, slot=0, keep_copy=True)
             system.load_rom(r1, slot=1, keep_copy=True)
             if len(system.rom0) > 0 and len(system.rom1) > 0:
@@ -99,6 +115,8 @@ def _wait_key_enable(system):
             return True, timer_accum, done
     return False, timer_accum, done
 
+
+# 以下は元スクリプトと同一の補助関数群をそのままコピーしています
 
 def _keybuf_snapshot(system):
     base = 0x68D9 - system.RAM_START
@@ -170,8 +188,6 @@ def _run_sequence_main_style(system, timer_accum, sequence):
                 active_key_started = True
 
             should_release = False
-            # Release primarily when keyboard buffer enqueue is observed.
-            # Releasing at CHATA/KEYCM milestones is too early and can drop keys.
             if time.ticks_diff(now, hold_min_at_ms) >= 0 and active_buffered:
                 should_release = True
 
@@ -179,9 +195,6 @@ def _run_sequence_main_style(system, timer_accum, sequence):
 
             timed_out = time.ticks_diff(now, release_at_ms) >= 0
             if scan_gated and not should_release:
-                # In scan-gated mode, avoid early host-timeout release while
-                # ROM has not yet consumed the key. But if scan start is not
-                # observed for too long, force release and continue.
                 start_timed_out = time.ticks_diff(now, pressed_at_ms) >= KEY_START_TIMEOUT_MS
                 commit_timed_out = time.ticks_diff(now, pressed_at_ms) >= KEY_COMMIT_TIMEOUT_MS
                 hold_timed_out = time.ticks_diff(now, release_at_ms) >= 0
@@ -233,8 +246,6 @@ def _run_sequence_main_style(system, timer_accum, sequence):
                 if hasattr(system, "get_key_scan_state"):
                     stp = system.get_key_scan_state()
                     chata_p = stp.get("chata", 0x00)
-                    # Press only at CHATA=00. Starting at 0x07 is often too
-                    # early and can miss KEYCM/KEYIN commit for the first key.
                     if chata_p != 0x00:
                         if scan_window_wait_from_ms == 0:
                             scan_window_wait_from_ms = now
@@ -275,6 +286,7 @@ def _run_sequence_main_style(system, timer_accum, sequence):
 
     return timer_accum
 
+
 def init_display():
     spi = machine.SPI(
         SPI_ID,
@@ -292,11 +304,14 @@ def init_display():
     display.fill_rect(0, 0, 320, 240, 0x0000)
     return display
 
+
 def main():
-    # create the runtime (logger will be instantiated lazily)
-    runtime = create_script_runtime("/log/trace_cal_mode_e2e.log")
+    import gc
+    print('free', gc.mem_free(), 'alloc', gc.mem_alloc())
+    runtime = create_script_runtime("/log/trace_cal_a_exe.log")
+    import gc
+    print('free', gc.mem_free(), 'alloc', gc.mem_alloc())
     logger = runtime["logger"]
-    # logger is always created, but check anyway to satisfy type checkers
     if logger is not None:
         logger.install_print_hook()
     try:
@@ -307,7 +322,7 @@ def main():
         else:
             print("Trace output mode=console")
 
-        banner = f"=== PB-1000 minimal key test ({SCRIPT_VERSION}) ==="
+        banner = "=== PB-1000 CAL A[EXE] trace ==="
         print(f"\n{banner}")
 
         display = init_display()
@@ -316,12 +331,13 @@ def main():
         system = PB1000System(
             display=display,
             debug={
-                "sys": True,
+                "sys": False,
                 "lcd": False,
-                "kb": True,
-                "c_memory": debug_overrides["c_memory"],
-                "c_lcd": debug_overrides["c_lcd"],
+                "kb": False,
+                #"c_memory": debug_overrides["c_memory"],
+                #"c_lcd": debug_overrides["c_lcd"],
             },
+            restore_registers=False,
         )
         
         draw_bezel(display)
@@ -345,12 +361,27 @@ def main():
 
         timer_accum = _run_sequence_main_style(system, timer_accum, KEY_SEQUENCE)
 
-        # after the fixed key sequence has been completely entered, run
-        # an extra 1000 steps and let the trace logger record the execution
-        # that follows. this keeps the log file alive and makes it easier
-        # to inspect post‑input behaviour.
-        print("Sequence complete; stepping additional 1000 cycles for trace")
-        timer_accum = _step_runtime(system, 1000, timer_accum)
+        # after the sequence run 5000 debug_step operations and dump them
+        print("Sequence complete; collecting 5000-step debug trace")
+        # use the base filename supplied earlier rather than the rotated path
+        base_trace = "/log/trace_cal_a_exe.log"
+        if logger is not None and logger.trace_mode == "file":
+            if base_trace.endswith(".log"):
+                step_path = base_trace[:-4] + "_steps.log"
+            else:
+                step_path = base_trace + "_steps.log"
+        else:
+            step_path = "/log/step_trace.log"
+        try:
+            with open(step_path, "w") as f:
+                for i in range(1000):
+                    f.write(system.debug_step(pause=False, trace=True, prt=False))
+                    f.write("\n")
+            print(f"Wrote 1000-step debug trace to {step_path}")
+        except OSError as e:
+            print(f"Failed to write step trace: {e}")
+        # optionally advance a little more to let system settle before display
+        timer_accum = _step_runtime(system, POST_INPUT_SETTLE_STEPS, timer_accum)
 
         timer_accum = _step_runtime(system, POST_INPUT_SETTLE_STEPS, timer_accum)
 
@@ -372,10 +403,12 @@ def main():
         print("EDTOP VRAM dump:")
         system.dump_edtop_vram()
 
-        print("Done: injected fixed sequence '1+2[EXE]'.")
+        print("Done")
     finally:
         logger.close()
 
 
 if __name__ == "__main__":
     main()
+
+
