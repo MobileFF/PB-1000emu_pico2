@@ -63,8 +63,12 @@ def _map_input_char(char):
         return _keypos(7, 9), "&HFC"
     if char == "{":
         return _keypos(8, 9), "&HFD"
+    if char == "|":
+        return _keypos(9, 9), "&HFE"
     if char == "^":
         return _keypos(1, 1), "BRK"
+    if char == "}":
+        return _keypos(6, 6), "NEWALL"
     return None, None
 
 

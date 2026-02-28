@@ -318,7 +318,21 @@ class PB1000System:
         return 0xFF
 
     def _mem_write(self, segment, offset, data):
-        """Memory write callback for CPU."""
+        """Memory write callback for CPU.
+
+        Watch for writes to the two system‑variable addresses used for
+        the FOR stack.  When a write to SBOT (0x6933) or FORSK (0x6935)
+        occurs we print the current PC so that the emulator log can be
+        correlated with the ROM code that is manipulating the heap.
+        """
+        # SBOT/FORSK addresses (absolute RAM locations)
+        if 0x692F <= offset <= 0x6941:
+            pc = cpu_core.get_pc() if hasattr(cpu_core, "get_pc") else 0
+            print(f"[HEAPRANGE] write off={offset:04X} at PC={pc:04X} data={data:02X}")
+#         if offset in (0x6933, 0x6935):
+#             pc = cpu_core.get_pc() if hasattr(cpu_core, "get_pc") else 0
+#             name = "SBOT" if offset == 0x6933 else "FORSK"
+#             print(f"[HEAP] write to {name} at PC={pc:04X} val={data:02X}")
         if self.debug: print(f"_mem_write: seg={segment} off={hex(offset)} data={hex(data)}")
         if self.RAM_START <= offset < self.SYS_ROM_START:
             # 8KB standard RAM
@@ -712,7 +726,7 @@ class PB1000System:
                 else:
                     break
         else:
-            out(f"{prefix}[{pc:04X}] {hex_str:<10} | F:{f_str} | {mnemonic} ") if prt
+             if prt: out(f"{prefix}[{pc:04X}] {hex_str:<10} | F:{f_str} | {mnemonic} ")
         #return mnemonic
         return f"{prefix}[{pc:04X}] {hex_str:<10} | F:{f_str} | {mnemonic} "
             
@@ -819,7 +833,7 @@ class PB1000System:
         snap = {
             "pc": cpu_core.get_pc() if hasattr(cpu_core, "get_pc") else 0,
             "flags": cpu_core.get_flags() if hasattr(cpu_core, "get_flags") else 0,
-            "r": [cpu_core.get_reg(i) for i in range(32)] if hasattr(cpu_core, "get_reg") else [0] * 32,
+            "$": [cpu_core.get_reg(i) for i in range(32)] if hasattr(cpu_core, "get_reg") else [0] * 32,
             "ia": cpu_core.get_reg8(4) if hasattr(cpu_core, "get_reg8") else 0,
             "ib": cpu_core.get_reg8(2) if hasattr(cpu_core, "get_reg8") else 0,
             "ie": cpu_core.get_reg8(5) if hasattr(cpu_core, "get_reg8") else 0,

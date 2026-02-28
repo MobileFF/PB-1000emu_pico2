@@ -68,6 +68,7 @@ KEY_SEQUENCE = [
 ]
 
 # 以下のヘルパー関数は元スクリプトと同じ
+# 以下のヘルパー関数は元スクリプトと同じ
 
 def _step_runtime(system, steps, timer_accum):
     remain = steps
@@ -76,7 +77,11 @@ def _step_runtime(system, steps, timer_accum):
         if hasattr(system, "service_input_lines"):
             system.service_input_lines()
         if not system.is_sleeping:
-            system.step(run)
+            pc = system.pc
+            system.step(run,stop_pc=0x9A3C)
+            if pc==0x9A3C:
+                print(f"[{pc:04x}]",end="")
+                system.print_registers()
         else:
             time.sleep_ms(1)
         timer_accum += run
@@ -86,6 +91,89 @@ def _step_runtime(system, steps, timer_accum):
         remain -= run
         # print(".",end="")
     return timer_accum
+
+
+# def _step_runtime(system, steps, timer_accum, trace_file=None):
+#     """Advance ``steps`` ticks, optionally logging each step.
+# 
+#     ``trace_file`` may be a file-like object; if provided we switch to
+#     ``debug_step`` mode on each iteration and write the resulting text.
+#     This ensures no cycles are dropped when we perform long waits inside the
+#     run-sequence helpers.
+# 
+#     Additionally, when we're tracing we look for a few PC values that
+#     indicate imminent OM error (A8AA, 9A2F, 9A3C, ABBD) and emit a register
+#     snapshot with a bit of RAM context so that the failure conditions can be
+#     diagnosed more easily in the log.
+#     """
+#     interesting = {0xA8AA, 0x9A2F, 0x9A3C, 0xABBD}
+#     remain = steps
+#     while remain > 0:
+#         run = STEP_CHUNK if remain > STEP_CHUNK else remain
+#         if hasattr(system, "service_input_lines"):
+#             system.service_input_lines()
+#         if trace_file is not None:
+#             # slow but unavoidable when tracing every step
+#             for _ in range(run):
+#                 line = system.debug_step(pause=False, trace=True, prt=False)
+#                 try:
+#                     #trace_file.write(line)
+#                     #trace_file.write("\n")
+#                     pass
+#                 except OSError as e:
+#                     # disk full or other I/O error; stop tracing but continue
+#                     print(f"WARN: trace file write failed ({e}); disabling further logging")
+#                     # trace_file = None
+#                     break
+#                 # check PC from the returned string (``[hhhh]`` prefix)
+#                 try:
+#                     pc = int(line.split("]")[0].lstrip("["), 16)
+#                     #print(f"{pc:x}")
+#                 except Exception as e:
+#                     #import sys
+#                     #sys.print_exception(e)
+#                     pc = None
+#                 if pc in interesting:
+#                     #print(f"{pc:4x} in interesting")
+#                     # dump registers and a few RAM words around IZ+SX
+#                     snap = system.get_register_snapshot()
+#                     # always echo to console so we don't lose the info
+#                     #print(f"# snapshot at PC={pc:04X} {snap}")
+#                     # compute IZ+SX pointer
+#                     iz = snap.get("iz", 0)
+#                     sx = snap.get("sx", 0)
+#                     addr = (iz + sx) & 0xFFFF
+#                     if 0 <= addr - system.RAM_START < len(system.ram):
+#                         off = addr - system.RAM_START
+#                         chunk = bytes(system.ram[off:off+8])
+#                         #print(f"addr={addr:04X}")
+#                         print(f"# RAM[{addr:04X}..]=" + " ".join(f"{b:02X}" for b in chunk))
+#                     # attempt to write to trace file but ignore failures
+#                     #if trace_file is not None:
+#                     try:
+#                         trace_file.write(f"# snapshot at PC={pc:04X} {snap}\n")
+#                         print("snapshot")
+#                     except OSError:
+#                         # trace_file = None
+#                         print("file write failed")
+#                     else:
+#                         if 0 <= addr - system.RAM_START < len(system.ram):
+#                             #try:
+#                             trace_file.write(f"# RAM[{addr:04X}..]=" + " ".join(f"{b:02X}" for b in chunk) + "\n")
+#                             #except OSError:
+#                             #    trace_file = None
+#         else:
+#             if not system.is_sleeping:
+#                 system.step(run)
+#             else:
+#                 time.sleep_ms(1)
+#         timer_accum += run
+#         while timer_accum >= TIMER_TICK_STEPS:
+#             system.tick_timer()
+#             timer_accum -= TIMER_TICK_STEPS
+#         remain -= run
+#         # print(".",end="")
+#     return timer_accum
 
 
 def _load_roms(system):
@@ -127,7 +215,7 @@ def _keybuf_snapshot(system):
     }
 
 
-def _wait_key_idle(system, timer_accum, timeout_ms=KEY_IDLE_WAIT_MS):
+def _wait_key_idle(system, timer_accum, timeout_ms=KEY_IDLE_WAIT_MS, trace_file=None):
     started = time.ticks_ms()
     settle_started = None
     last_kycnt = None
@@ -147,11 +235,61 @@ def _wait_key_idle(system, timer_accum, timeout_ms=KEY_IDLE_WAIT_MS):
             last_kycnt = None
         if time.ticks_diff(now, started) >= timeout_ms:
             return False, timer_accum
+        # timer_accum = _step_runtime(system, STEP_CHUNK, timer_accum, trace_file)
         timer_accum = _step_runtime(system, STEP_CHUNK, timer_accum)
 
 
-def _run_sequence_main_style(system, timer_accum, sequence):
+def _run_sequence_main_style(
+    system,
+    timer_accum,
+    sequence,
+    *,
+    pre_trace_steps=0,
+    exe_trace_steps=0,
+    exe_trace_base=None,
+    key_hold_ms=None,
+    key_hold_max_ms=None,
+    key_commit_timeout_ms=None,
+    scan_window_wait_ms=None,
+    key_idle_wait_ms=None,
+):
+    """Run key sequence using main-style algorithm.
+
+    * ``pre_trace_steps`` – if >0, take this many debug steps
+      **before** the first key press and write them to the trace file.
+    * ``exe_trace_steps`` – number of steps to record **after** EXE is
+      pressed (the previous behaviour).
+    * ``exe_trace_base`` – base pathname used for both pieces of the trace;
+      ``_steps.log`` will be appended to it.
+    * ``key_hold_ms`` – how many milliseconds minimum to keep a key held
+      before attempting release; defaults to global ``KEY_HOLD_MS``.
+    * ``key_hold_max_ms`` – maximum hold time before forced release;
+      defaults to ``KEY_HOLD_MAX_MS``.
+    * ``key_commit_timeout_ms`` – timeout used when scanning; defaults to
+      ``KEY_COMMIT_TIMEOUT_MS``.
+
+    A single file handle is used for both pre‑ and post‑tracing so that the
+    output forms one continuous block.
+    """
+    """Run key sequence using main-style algorithm.
+
+    * ``pre_trace_steps`` – if >0, take this many debug steps
+      **before** the first key press and write them to the trace file.
+    * ``exe_trace_steps`` – number of steps to record **after** EXE is
+      pressed (the previous behaviour).
+    * ``exe_trace_base`` – base pathname used for both pieces of the trace;
+      ``_steps.log`` will be appended to it.
+
+    A single file handle is used for both pre‑ and post‑tracing so that the
+    output forms one continuous block.
+    """
     queue = [{"key": key, "label": label, "retry": 0} for key, label in sequence]
+    # list of PCs where we also want to log registers during the main loop
+    interesting = {0xA8AA, 0x9A2F, 0x9A3C, 0xABBD}
+    pre_file = None
+    pre_file = None
+    exe_tracing = False
+    exe_file = None
     active_key = None
     active_label = None
     active_retry = 0
@@ -167,6 +305,23 @@ def _run_sequence_main_style(system, timer_accum, sequence):
     hold_min_at_ms = 0
     started_ms = time.ticks_ms()
     scan_window_wait_from_ms = 0
+    hold_timed_out = 4000
+
+    # open trace file once if either phase requested
+    current_trace_file = None
+    if (pre_trace_steps or exe_trace_steps) and exe_trace_base:
+        # write all steps into the base path itself, not a _steps suffix
+        try:
+            pre_file = open(exe_trace_base, "w")
+            current_trace_file = pre_file
+        except OSError:
+            pre_file = None
+    # perform pre-trace before entering loop
+    if current_trace_file is not None and pre_trace_steps > 0:
+        for _ in range(pre_trace_steps):
+            current_trace_file.write(system.debug_step(pause=False, trace=True,prt=False))
+            current_trace_file.write("\n")
+        # leave file open for exe tracing
 
     while queue or active_key is not None:
         now = time.ticks_ms()
@@ -196,14 +351,10 @@ def _run_sequence_main_style(system, timer_accum, sequence):
             timed_out = time.ticks_diff(now, release_at_ms) >= 0
             if scan_gated and not should_release:
                 start_timed_out = time.ticks_diff(now, pressed_at_ms) >= KEY_START_TIMEOUT_MS
-                commit_timed_out = time.ticks_diff(now, pressed_at_ms) >= KEY_COMMIT_TIMEOUT_MS
-                hold_timed_out = time.ticks_diff(now, release_at_ms) >= 0
-                if not active_key_started:
-                    timed_out = start_timed_out
-                elif active_buffered:
-                    timed_out = hold_timed_out
-                else:
-                    timed_out = commit_timed_out or hold_timed_out
+                cto = key_commit_timeout_ms if key_commit_timeout_ms is not None else KEY_COMMIT_TIMEOUT_MS
+                commit_timed_out = time.ticks_diff(now, pressed_at_ms) >= cto
+            else:
+                timed_out = commit_timed_out or hold_timed_out
 
             if timed_out and not should_release:
                 should_release = True
@@ -217,7 +368,7 @@ def _run_sequence_main_style(system, timer_accum, sequence):
                     print(f"WARN: no key-buffer enqueue observed for {active_label}; force release")
                 system.release_key(active_key)
                 print(f"[AUTO] release key: {active_label}")
-                idle_ok, timer_accum = _wait_key_idle(system, timer_accum)
+                idle_ok, timer_accum = _wait_key_idle(system, timer_accum, trace_file=current_trace_file)
                 if not idle_ok:
                     st_idle = system.get_key_scan_state() if hasattr(system, "get_key_scan_state") else {}
                     print(
@@ -241,7 +392,7 @@ def _run_sequence_main_style(system, timer_accum, sequence):
         if active_key is None and queue:
             if time.ticks_diff(now, next_press_at_ms) >= 0:
                 if hasattr(system, "is_key_input_enabled") and not system.is_key_input_enabled():
-                    timer_accum = _step_runtime(system, STEP_CHUNK, timer_accum)
+                    timer_accum = _step_runtime(system, STEP_CHUNK, timer_accum, current_trace_file)
                     continue
                 if hasattr(system, "get_key_scan_state"):
                     stp = system.get_key_scan_state()
@@ -249,11 +400,11 @@ def _run_sequence_main_style(system, timer_accum, sequence):
                     if chata_p != 0x00:
                         if scan_window_wait_from_ms == 0:
                             scan_window_wait_from_ms = now
-                        elif time.ticks_diff(now, scan_window_wait_from_ms) >= KEY_SCAN_WINDOW_WAIT_MS:
+                        elif time.ticks_diff(now, scan_window_wait_from_ms) >= swms:
                             print(f"WARN: scan window wait timeout (CHATA={chata_p:02X}); press anyway")
                             scan_window_wait_from_ms = 0
                         else:
-                            timer_accum = _step_runtime(system, STEP_CHUNK, timer_accum)
+                            timer_accum = _step_runtime(system, STEP_CHUNK, timer_accum, current_trace_file)
                             continue
                     else:
                         scan_window_wait_from_ms = 0
@@ -273,9 +424,28 @@ def _run_sequence_main_style(system, timer_accum, sequence):
                 base_keycm = st0.get("keycm", 0x00) if st0 else 0x00
                 base_keyin16 = st0.get("keyin16", st0.get("keyin", 0x80)) if st0 else 0x0080
                 base_kycnt = _keybuf_snapshot(system)["kycnt"]
-                hold_min_at_ms = time.ticks_add(now, KEY_HOLD_MS)
-                release_at_ms = time.ticks_add(now, KEY_HOLD_MAX_MS)
+                # allow caller to override timing
+                hms = key_hold_ms if key_hold_ms is not None else KEY_HOLD_MS
+                hmax = key_hold_max_ms if key_hold_max_ms is not None else KEY_HOLD_MAX_MS
+                hold_min_at_ms = time.ticks_add(now, hms)
+                release_at_ms = time.ticks_add(now, hmax)
 
+        # check PC every iteration in case the interesting address is hit
+        try:
+            pc = system.get_register_snapshot().get("pc")
+        except Exception:
+            pc = None
+        if pc in interesting:
+            snap = system.get_register_snapshot()
+            print(f"# snapshot at PC={pc:04X} {snap}")
+            iz = snap.get("iz", 0)
+            sx = snap.get("sx", 0)
+            addr = (iz + sx) & 0xFFFF
+            if 0 <= addr - system.RAM_START < len(system.ram):
+                off = addr - system.RAM_START
+                chunk = bytes(system.ram[off:off+8])
+                print(f"# RAM[{addr:04X}..]=" + " ".join(f"{b:02X}" for b in chunk))
+        # timer_accum = _step_runtime(system, STEP_CHUNK, timer_accum, current_trace_file)
         timer_accum = _step_runtime(system, STEP_CHUNK, timer_accum)
 
         if time.ticks_diff(now, started_ms) >= INPUT_LOOP_TIMEOUT_MS:
@@ -284,6 +454,17 @@ def _run_sequence_main_style(system, timer_accum, sequence):
                 system.release_key(active_key)
             break
 
+    # if we exited loop before completing post‑EXE trace, continue now
+    while pre_file is not None and exe_trace_steps > 0:
+        try:
+            pre_file.write(system.debug_step(pause=False, trace=True,prt=False))
+            pre_file.write("\n")
+        except Exception:
+            pass
+        exe_trace_steps -= 1
+        timer_accum += 1
+    if pre_file is not None:
+        pre_file.close()
     return timer_accum
 
 
@@ -308,7 +489,22 @@ def init_display():
 def main():
     import gc
     print('free', gc.mem_free(), 'alloc', gc.mem_alloc())
-    runtime = create_script_runtime("/log/trace_cal_a_exe.log")
+    # create a timestamped base path for trace outputs
+    t = time.localtime()
+    stamp = "{:04d}{:02d}{:02d}{:02d}{:02d}{:02d}".format(
+        t[0], t[1], t[2], t[3], t[4], t[5]
+    )
+    trace_base = f"/log/trace_cal_a_exe_{stamp}.log"
+    runtime = create_script_runtime(trace_base)
+    # ensure INI cannot force a different trace file (e.g. trace_after_key)
+    if runtime.get("ini_data") and "trace" in runtime["ini_data"]:
+        tcfg = runtime["ini_data"]["trace"]
+        tcfg["trace_output"] = "file"
+        tcfg["trace_output_path"] = trace_base
+        tcfg["trace_output_rotate_per_run"] = False
+    # rebuild logger with updated configuration
+    from script_common import LazyLogger
+    runtime["logger"] = LazyLogger(runtime.get("ini_data"), trace_base)
     import gc
     print('free', gc.mem_free(), 'alloc', gc.mem_alloc())
     logger = runtime["logger"]
@@ -359,31 +555,32 @@ def main():
 
         timer_accum = _step_runtime(system, POST_BOOT_SETTLE_STEPS, timer_accum)
 
-        timer_accum = _run_sequence_main_style(system, timer_accum, KEY_SEQUENCE)
-
-        # after the sequence run 5000 debug_step operations and dump them
-        print("Sequence complete; collecting 5000-step debug trace")
-        # use the base filename supplied earlier rather than the rotated path
-        base_trace = "/log/trace_cal_a_exe.log"
-        if logger is not None and logger.trace_mode == "file":
-            if base_trace.endswith(".log"):
-                step_path = base_trace[:-4] + "_steps.log"
-            else:
-                step_path = base_trace + "_steps.log"
-        else:
-            step_path = "/log/step_trace.log"
+        # allow INI to override timing parameters for key hold/release
+        run_cfg = runtime.get("ini_data", {}).get("run", {}) or {}
         try:
-            with open(step_path, "w") as f:
-                for i in range(1000):
-                    f.write(system.debug_step(pause=False, trace=True, prt=False))
-                    f.write("\n")
-            print(f"Wrote 1000-step debug trace to {step_path}")
-        except OSError as e:
-            print(f"Failed to write step trace: {e}")
-        # optionally advance a little more to let system settle before display
-        timer_accum = _step_runtime(system, POST_INPUT_SETTLE_STEPS, timer_accum)
+            ihold = int(run_cfg.get("key_hold_ms", KEY_HOLD_MS))
+        except Exception:
+            ihold = KEY_HOLD_MS
+        try:
+            iholdmax = int(run_cfg.get("key_hold_max_ms", KEY_HOLD_MAX_MS))
+        except Exception:
+            iholdmax = KEY_HOLD_MAX_MS
+        try:
+            icto = int(run_cfg.get("key_commit_timeout_ms", KEY_COMMIT_TIMEOUT_MS))
+        except Exception:
+            icto = KEY_COMMIT_TIMEOUT_MS
 
-        timer_accum = _step_runtime(system, POST_INPUT_SETTLE_STEPS, timer_accum)
+        timer_accum = _run_sequence_main_style(
+            system,
+            timer_accum,
+            KEY_SEQUENCE,
+            exe_trace_steps=5000,
+            exe_trace_base=trace_base,
+            key_hold_ms=ihold,
+            key_hold_max_ms=iholdmax,
+            key_commit_timeout_ms=icto,
+        )
+
 
         system.update_display()
 

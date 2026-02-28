@@ -4,40 +4,8 @@ PB-1000 Emulator - Main Entry Point for Raspberry Pi Pico 2
 import machine
 import time
 from ili9341 import ILI9341
-from pb1000 import PB1000System
-
-# ---- Hardware Pin Configuration ----
-SPI_ID   = 1
-SCK_PIN  = 10
-MOSI_PIN = 11
-MISO_PIN = 12
-CS_PIN   = 9
-DC_PIN   = 8
-RST_PIN  = 7
-BL_PIN   = 22
-
-def init_display():
-    """Initialize ILI9341 TFT display."""
-    spi = machine.SPI(SPI_ID, baudrate=40_000_000,
-                      sck=machine.Pin(SCK_PIN),
-                      mosi=machine.Pin(MOSI_PIN),
-                      miso=machine.Pin(MISO_PIN))
-    cs  = machine.Pin(CS_PIN, machine.Pin.OUT)
-    dc  = machine.Pin(DC_PIN, machine.Pin.OUT)
-    rst = machine.Pin(RST_PIN, machine.Pin.OUT)
-    bl  = machine.Pin(BL_PIN, machine.Pin.OUT, value=1)
-
-    display = ILI9341(spi, cs, dc, rst, width=320, height=240)
-    display.fill_rect(0, 0, 320, 240, 0x0000)  # Black background
-    return display
-
-def draw_bezel(display):
-    """Draw PB-1000 style bezel around LCD area."""
-    # LCD viewport: 192*2=384 -> scale to fit 320px, use x=16, y=40
-    # Bezel border
-    display.fill_rect(12, 36, 296, 72, 0x4228)  # Dark gray bezel
-    display.fill_rect(14, 38, 292, 68, 0x8410)  # Medium gray inner
-    display.fill_rect(16, 40, 288, 64, 0xB5E6)  # LCD background (olive-green)
+from pb1000 import PB1000System,init_display,draw_bezel
+import force_gc
 
 system = None  # Global instance
 
@@ -139,18 +107,21 @@ def main():
 
     # Main emulation loop
     try:
-        steps = int(input("How many steps?>"))
+        steps_from = int(input("How many steps from?>"))
+        steps_to = int(input("How many steps to  ?>"))
         step_count = 1
         while True:
             # 1. Execute CPU
             if not system.is_sleeping:
                 # Execute exactly 1 second's worth of cycles per real second?
                 # For now, just run 20k cycles per loop
-                print(f"{step_count} ",end="")
-                if step_count < steps:
-                    system.debug_step(False)
+                if step_count < steps_from:
+                    system.debug_step(pause=False,trace=False,prt=False)    
+                elif steps_from <= step_count <= steps_to:
+                    print(f"{step_count} ",end="")
+                    system.debug_step(pause=False,trace=True,prt=True)
                 else:
-                    system.debug_step(True)
+                    system.debug_step(pause=True)
                 step_count += 1
             # else:
             #     time.sleep_ms(10)

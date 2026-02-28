@@ -78,8 +78,10 @@ def load_trace_config():
         "trace_trigger_label": "1",
         "trace_exit_on_finish": True,
         "trace_dump_on_finish": True,
+        # default to console output and avoid creating a file unless the
+        # configuration explicitly supplies one
         "trace_output": "console",
-        "trace_output_path": "/log/trace_after_key.log",
+        "trace_output_path": "",            # empty => no file
         "trace_output_rotate_per_run": True,
         "trace_force_on_no_commit": True,
         # 0: disable service_input_lines during instruction trace
@@ -116,6 +118,9 @@ def load_trace_config():
         cfg["trace_output"] = str(trace["trace_output"]).strip().lower()
     if "trace_output_path" in trace:
         cfg["trace_output_path"] = str(trace["trace_output_path"]).strip()
+    # if user set an explicit path but left it empty, fall back to console
+    if not cfg["trace_output_path"]:
+        cfg["trace_output"] = "console"
     if "trace_output_rotate_per_run" in trace:
         cfg["trace_output_rotate_per_run"] = _to_bool(trace["trace_output_rotate_per_run"])
     if "trace_force_on_no_commit" in trace:
