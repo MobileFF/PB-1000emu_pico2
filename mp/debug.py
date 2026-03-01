@@ -18,6 +18,8 @@ IR2_NAMES = ["SS", "KY", "KY", "KY"]
 ROT_NAMES = ["ROD", "ROU", "BID", "BIU"]
 ROT2_NAMES = ["DID", "DIU", "BYD", "BYU"]
 CMPINV_NAMES = ["CMP", "CMP?", "INV", "INV?"]
+# when op==0x9B or 0xDB we are dealing with word variants
+CMPINVW_NAMES = ["CMPW", "CMPW?", "INVW", "INVW?"]
 
 INT_ROM_WORDS = 0x0C00
 
@@ -83,7 +85,11 @@ def _parse_optional_jr(b, idx, arg, pc, inst_len):
             skip = 1
     off = _read_u8(b, idx + skip)
     if off is None:
-        return ", JR ?", idx
+        # no byte available for JR offset – show a question mark
+        if pc is None:
+            return ", JR ?", idx
+        # with PC we can indicate target is unknown
+        return ", JR ? -> &H????", idx
     signed = _fmt_signed7(off)
     if pc is None:
         return f", JR {signed:+d}", idx + skip + 1
@@ -211,14 +217,18 @@ def decode_basic(b, pc=None):
         if arg is None:
             return "CMP/INV ?"
         sec = (arg >> 5) & 0x03
-        mnem = CMPINV_NAMES[sec]
+        # choose word names when opcode belongs to word group
+        if op in (0x9B, 0xDB):
+            mnem_base = CMPINVW_NAMES[sec]
+        else:
+            mnem_base = CMPINV_NAMES[sec]
         if op in (0xDB,):
             ext = _read_u8(b, i + 1)
             if ext is None:
-                return f"{mnem} {_fmt_reg(arg)} , ?"
-            return f"{mnem} {_fmt_reg(arg)} , {((ext >> 5) & 0x07) + 1}"
+                return f"{mnem_base} {_fmt_reg(arg)} , ?"
+            return f"{mnem_base} {_fmt_reg(arg)} , {((ext >> 5) & 0x07) + 1}"
         jr, _ = _parse_optional_jr(b, i + 1, arg, pc, i + 2)
-        return f"{mnem} {_fmt_reg(arg)}{jr}"
+        return f"{mnem_base} {_fmt_reg(arg)}{jr}"
 
     if op in (0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D):
         arg = _read_u8(b, i)

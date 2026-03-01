@@ -1,6 +1,8 @@
 """HD61700 CPU Test Suite v6 - compact for MicroPython"""
 import hd61700
 import gc
+import force_gc
+
 
 TB = 0x7000
 _A = []
@@ -111,10 +113,12 @@ def run_tests():
     check("AD overflow", [0x08,0x20], s6, [cr(0,0), cf(z=True,c=True)])
 
     def s7(): hd61700.set_reg(0,10)
-    check("AD imm(10+20)", [0x40,0x00,20], s7, [cr(0,30)])
+    # use 0x48 to perform write-back
+    check("AD imm(10+20)", [0x48,0x00,20], s7, [cr(0,30)])
 
     def s8(): hd61700.set_reg(0,1)
-    check("SB imm(1-2)", [0x41,0x00,2], s8, [cr(0,0xFF), cf(c=True)])
+    # use 0x49 to perform write-back
+    check("SB imm(1-2)", [0x49,0x00,2], s8, [cr(0,0xFF), cf(c=True)])
 
     def s9(): hd61700.set_reg(0,0x80)
     check("ADC imm chk(C)", [0x48,0x00,0x80], s9, [cf(c=True)])
@@ -286,7 +290,15 @@ def run_tests():
 
     def gr1(): hd61700.set_reg16(0,0x5678)
     check("GRE IX→R0:R1", [0x9E,0x00], gr1, [cr(0,0x78), cr(1,0x56)])
-
+    # edge cases: target register pair crosses 0x?F boundary
+    def gr_edge1(): hd61700.set_reg16(0,0x1234)
+    # arg=0x0F means destination R15:R16; high‑byte sits in register 0x10
+    check("GRE IX→R15:R16", [0x9E,0x0F], gr_edge1,
+        [cr(15,0x34), cr(16,0x12)])
+    def gr_edge2(): hd61700.set_reg16(0,0xABCD)
+    # another boundary: arg=0x1F → R31:R00 (wrap wrap)
+    check("GRE IX→R31:R00", [0x9E,0x1F], gr_edge2,
+        [cr(31,0xCD), cr(0,0xAB)])
     # ── 16-bit Arith ──
     print("\n[16-bit Arith]")
     # arg=0x60 (sec=3,reg=0), src=2 → R2:R3
@@ -303,6 +315,22 @@ def run_tests():
     def w3():
         hd61700.set_reg(0,0x01); hd61700.set_reg(1,0x00)
     check("CMPW(~1+1=FFFF)", [0x9B,0x00], w3, [cr(0,0xFF), cr(1,0xFF)])
+
+    # regression test: LDW instruction must consume optional JR offset
+    def lj():
+        hd61700.set_reg(0,0); hd61700.set_reg(1,0)
+    # bytes: LDW r0:r1,r0 with JR+3, followed by two LD imm ops
+    code = [0x82, 0x80, 0x00, 0x03, 0x42, 0x00, 0xAA, 0x42, 0x00, 0x55]
+    check("LDW+JR consumes offset", code, lj, [cr(0,0x55)])
+
+    # ensure debugger shows '?' when JR byte missing
+    from debug import decode_basic
+    def dt():
+        pass
+    # supply only opcode and arg; no third byte available
+    small = [0x82, 0x80]
+    result = decode_basic(small, TB)
+    check("decode_missing_jr", [], dt, [lambda: ("JR ?" in result, f"got '{result}'")])
 
     # ── GST/PST ──
     print("\n[GST/PST]")

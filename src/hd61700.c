@@ -1776,6 +1776,8 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
         uint8_t src = get_sir_im8(cpu, arg);
         COPY_REG(arg, src);
         COPY_REG(arg + 1, src + 1);
+        /* missing JR handling was causing subsequent bytes to be mis-fetched */
+        check_optional_jr(cpu, arg);
         cpu->icount -= 8;
       } break;
       case 0x83: {

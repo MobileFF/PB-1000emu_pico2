@@ -813,7 +813,7 @@ class PB1000System:
         regs = [cpu_core.get_reg(i) for i in range(32)]
         printer("Registers:")
         for idx in range(0, 32, 4):
-            chunk = " ".join(f"${idx + j:02X}={regs[idx + j]:02X}" for j in range(4))
+            chunk = " ".join(f"${idx + j:02d}={regs[idx + j]:02X}" for j in range(4))
             printer(f"  {chunk}")
         if hasattr(cpu_core, "get_reg8"):
             ia = cpu_core.get_reg8(4)
