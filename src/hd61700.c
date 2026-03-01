@@ -145,12 +145,6 @@ static uint8_t make_logic(uint8_t type, uint8_t d1, uint8_t d2) {
   return 0;
 }
 
-static int get_im_7(uint8_t data) {
-  if (data & 0x80)
-    return 0x80 - data;
-  return data;
-}
-
 static uint8_t read_gst_value(hd61700_state_t *cpu, uint8_t idx) {
   switch (idx) {
   case 0:
@@ -217,10 +211,18 @@ static uint16_t make_bcd_sub(uint8_t arg1, uint8_t arg2) {
   return (uint16_t)ret;
 }
 
+static int get_im_7(uint8_t data) {
+  if (data & 0x80)
+    return 0x80 - data;
+  else
+    return data;
+}
+
 static void check_optional_jr(hd61700_state_t *cpu, uint8_t arg) {
   if (arg & 0x80) {
-    /* Internal ROM is word-aligned: skip padding byte before JR offset. */
-    if (cpu->pc < INT_ROM && WORD_ALIGNED(cpu->fetch_addr)) {
+    /* Internal ROM is word-aligned: skip padding byte before JR offset if
+     * fetch_addr is EVEN. */
+    if (cpu->pc < INT_ROM && ((cpu->fetch_addr & 0x01) == 0)) {
       (void)read_op(cpu);
     }
     uint8_t arg1 = read_op(cpu);
@@ -1296,6 +1298,7 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
         uint16_t off = REG_GET16(r);
         mem_writebyte(cpu, REG_UA, off, lo);
         mem_writebyte(cpu, REG_UA, (uint16_t)(off + 1), hi);
+        check_optional_jr(cpu, arg);
         cpu->icount -= 3;
       } break;
       case 0xd1: {
@@ -1303,6 +1306,7 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
         uint8_t lo = read_op(cpu);
         uint8_t hi = read_op(cpu);
         REG_PUT16(arg, (uint16_t)(lo | (hi << 8)));
+        check_optional_jr(cpu, arg);
         cpu->icount -= 3;
       } break;
       case 0x60:
@@ -1689,6 +1693,7 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
             cpu->lcd_write(cpu->cb_ctx, READ_REG(arg + n));
           cpu->icount -= 8;
         }
+        check_optional_jr(cpu, arg);
         cpu->icount -= 3;
       } break;
       case 0xd3: { /* LDLM */
@@ -1700,17 +1705,61 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
           WRITE_REG(arg + n, d);
           cpu->icount -= 8;
         }
-        cpu->icount -= 3;
-      } break;
-      case 0xd4: {
-        uint8_t arg = read_op(cpu);
-        (void)read_op(cpu);
         check_optional_jr(cpu, arg);
         cpu->icount -= 3;
       } break;
-      case 0xd5: {
+      case 0xd4: { /* PFLM */
         uint8_t arg = read_op(cpu);
-        (void)read_op(cpu);
+        uint8_t ext = read_op(cpu);
+        uint8_t cnt = GET_IM3(ext);
+        uint8_t idx = (arg >> 5) & 0x07;
+        for (uint8_t n = 0; n < cnt; n++) {
+          uint8_t data = READ_REG(arg + n);
+          uint8_t target_idx = (idx + n) & 0x07;
+          switch (target_idx) {
+          case 0:
+          case 1:
+            WRITE_REG8(target_idx, data);
+            if (target_idx == 1 && cpu->port_write)
+              cpu->port_write(cpu->cb_ctx, REG_PD & REG_PE);
+            break;
+          case 2:
+            REG_IB = (REG_IB & 0x1f) | (data & 0xe0);
+            break;
+          case 3:
+            REG_UA = data;
+            cpu->prev_ua = REG_UA;
+            break;
+          case 4:
+            if (cpu->kb_write)
+              cpu->kb_write(cpu->cb_ctx, data);
+            WRITE_REG8(target_idx, data);
+            break;
+          case 5:
+            REG_IB &= (uint8_t)(0xe0 | (data >> 3));
+            cpu->irq_status &= (uint8_t)(data >> 3);
+            REG_IE = data;
+            break;
+          case 6:
+            break;
+          case 7:
+            REG_TM = data;
+            break;
+          }
+          cpu->icount -= 8;
+        }
+        check_optional_jr(cpu, arg);
+        cpu->icount -= 3;
+      } break;
+      case 0xd5: { /* PSRM */
+        uint8_t arg = read_op(cpu);
+        uint8_t ext = read_op(cpu);
+        uint8_t cnt = GET_IM3(ext);
+        uint8_t idx = (arg >> 5) & 0x03;
+        for (uint8_t n = 0; n < cnt; n++) {
+          cpu->regsir[(idx + n) & 0x03] = READ_REG(arg + n) & 0x1f;
+          cpu->icount -= 8;
+        }
         check_optional_jr(cpu, arg);
         cpu->icount -= 3;
       } break;

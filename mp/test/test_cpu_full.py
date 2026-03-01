@@ -341,9 +341,51 @@ def run_tests():
     def gp2(): hd61700.set_sreg(0,7)
     check("GST SIR(SX→R0)", [0x1D,0x00], gp2, [cr(0,7)])
 
-    # ── System ──
-    print("\n[System]")
-    check("NOP", [0xF8], None, [cp(TB+1)])
+    # ── 0xD instructions ──
+    print("\n[0xD instructions]")
+    def d_setup():
+        hd61700.set_reg(0, 0x11); hd61700.set_reg(1, 0x12); hd61700.set_reg(2, 0x13)
+        hd61700.set_sreg(0, 0); hd61700.set_sreg(1, 0); hd61700.set_sreg(2, 0)
+    
+    # PFLM R0, 3 (idx=0) -> R0->PE, R1->PD, R2->IB
+    # 0xD4 ARG(00) EXT(40 -> count 3)
+    check("PFLM R0,3", [0xD4, 0x00, 0x40], d_setup,
+        [lambda: (hd61700.get_reg8(0)==0x11, f"PE={hd61700.get_reg8(0):02X}"),
+         lambda: (hd61700.get_reg8(1)==0x12, f"PD={hd61700.get_reg8(1):02X}")])
+
+    # PSRM R0, 3 (idx=0) -> R0->SX, R1->SY, R2->SZ
+    # 0xD5 ARG(00) EXT(40 -> count 3)
+    check("PSRM R0,3", [0xD5, 0x00, 0x40], d_setup,
+        [lambda: (hd61700.get_sreg(0)==0x11 & 0x1f, f"SX={hd61700.get_sreg(0):02X}"),
+         lambda: (hd61700.get_sreg(1)==0x12 & 0x1f, f"SY={hd61700.get_sreg(1):02X}"),
+         lambda: (hd61700.get_sreg(2)==0x13 & 0x1f, f"SZ={hd61700.get_sreg(2):02X}")])
+
+    # LDW imm + JR (Positive)
+    # bytes: [D1 80 34 12 02] [F8] [F8] [42 00 55]
+    # TB..TB+4: Op, Arg, Lo, Hi, Offset(02)
+    # pc at end of read_op(Offset) is TB+5.
+    # new_pc = (TB+5) + 2 - 1 = TB+6.
+    # lands on index 6 (second F8). Skips index 5 (first F8).
+    # Then executes TB+7 (42 00 55) which loads R0.
+    code_jr_pos = [0xD1, 0x80, 0x34, 0x12, 0x02, 0xF8, 0xF8, 0x42, 0x00, 0x55]
+    check("LDW imm + JR positive", code_jr_pos, None, [cr(0, 0x55)])
+
+    # LDW imm + JR (Negative)
+    # Target: verify that it can jump back to a previously skipped section.
+    # Index 0..2:   LD R0, 0 (42 00 00)
+    # Index 3..5:   JP index 12 (37 0C 70) -> Skip index 6..11
+    # Index 6..8:   LD R0, 1 (42 00 01)  <-- Target of Negative Jump
+    # Index 9..11:  JP index 17 (37 11 70) -> Exit
+    # Index 12..16: LDW R2:3, 1234 + JR(-10) (D1 82 34 12 8A)
+    # Index 17:     NOP (F8)
+    # Calculation: offset = -10 (0x80 - 0x8A). PC after 0x8A is TB+17.
+    # new_pc = 17 + (-10) - 1 = index 6. Success!
+    code_jr_neg = [0x42, 0x00, 0x00, 0x37, 0x0C, 0x70, 
+                   0x42, 0x00, 0x01, 0x37, 0x11, 0x70, 
+                   0xD1, 0x82, 0x34, 0x12, 0x8A, 0xF8]
+    def setup_jr_neg(): hd61700.set_reg(0, 0xFF)
+    check("LDW imm + JR negative", code_jr_neg, setup_jr_neg, [cr(0, 0x01), cp(TB+18)])
+
     check("CLT", [0xF9], None, [cp(TB+1)])
 
     print("\n" + "=" * 40)
