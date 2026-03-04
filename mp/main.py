@@ -240,6 +240,10 @@ def main():
     except KeyboardInterrupt:
         print("\nEmulator stopped by user.")
     finally:
+        from workarea import peek_workarea,print_workarea,print_all_workarea
+        print_all_workarea(system)
+        print("dump 0x6000-0x7FFF")
+        system.dump_mem_range(0x6000,0x7FFF)
         print("Saving RAM state...")
         try:
             system.save_ram()

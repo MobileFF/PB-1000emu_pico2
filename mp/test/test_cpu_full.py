@@ -6,22 +6,31 @@ import force_gc
 
 TB = 0x7000
 _A = []
+USE_C_MEMORY=True
 
 class T:
     def __init__(self):
         _A.append(hd61700._init_anchor())
         self._mr = self._mem_read
         self._mw = self._mem_write
+        
         _A.extend([self._mr, self._mw])
         hd61700.set_mem_callbacks(self._mr, self._mw)
-        hd61700.use_c_memory(True)
+        # Disable C-side memory for this unit test file so Python callbacks
+        # control all accesses deterministically. The C core supports bank-1
+        # when enabled and has_exp_ram is true.
+        hd61700.use_c_memory(USE_C_MEMORY)
+        # standard 8KB RAM at 0x6000-0x7FFF
         self.ram = bytearray(0x2000)
+        # provide simple 32KB expanded RAM area for bank1 tests
+        self.exp_ram = bytearray(0x8000)
         _A.append(self.ram)
+        _A.append(self.exp_ram)
         self.rst()
 
     def rst(self):
         hd61700.reset(False)
-        hd61700.use_c_memory(True)
+        hd61700.use_c_memory(USE_C_MEMORY)
         hd61700.set_debug(False)
         hd61700.set_key_debug(False)
         hd61700.set_lcd_debug(False)
@@ -30,11 +39,25 @@ class T:
         for i in range(8): hd61700.set_reg16(i, 0)
 
     def _mem_read(self, seg, off):
-        if 0x6000 <= off < 0x8000: return self.ram[off - 0x6000]
+        # seg is bank index from UA >>4 (0-3); ignore for base RAM
+        if 0x6000 <= off < 0x8000:
+            return self.ram[off - 0x6000]
+        # bank1 expanded region
+        if off >= 0x8000 and (seg & 0x03) == 1:
+            idx = off - 0x8000
+            if idx < len(self.exp_ram):
+                return self.exp_ram[idx]
         return 0
 
     def _mem_write(self, seg, off, d):
-        if 0x6000 <= off < 0x8000: self.ram[off - 0x6000] = d & 0xFF
+        if 0x6000 <= off < 0x8000:
+            self.ram[off - 0x6000] = d & 0xFF
+            return
+        if off >= 0x8000 and (seg & 0x03) == 1:
+            idx = off - 0x8000
+            if idx < len(self.exp_ram):
+                self.exp_ram[idx] = d & 0xFF
+                return
 
     def lc(self, addr, code):
         for i, b in enumerate(code):
@@ -184,7 +207,7 @@ def run_tests():
 
     # ── Memory Access via SIR ──
     print("\n[Mem SIR]")
-    # SX=4 → R4. REG_GET16(4) = R4|(R5<<8) = address
+    # SX=4 ↁER4. REG_GET16(4) = R4|(R5<<8) = address
     def ms1():
         hd61700.set_reg(0,0x42)
         hd61700.set_reg(4,0x00); hd61700.set_reg(5,0x65)
@@ -214,14 +237,14 @@ def run_tests():
         hd61700.write_mem(0x6500,0xAB); hd61700.write_mem(0x6501,0xCD)
     check("LDW R0:1,(R4:5)", [0x91,0x00], ms5, [cr(0,0xAB), cr(1,0xCD)])
 
-    # SY=6 → R6:R7
+    # SY=6 ↁER6:R7
     def ms6():
         hd61700.set_reg(0,0x77)
         hd61700.set_reg(6,0x00); hd61700.set_reg(7,0x66)
         hd61700.set_sreg(1,6)
     check("ST R0,(R6:7)", [0x10,0x20], ms6, [cm(0x6600,0x77)])
 
-    # D1 arg=0 → REG_PUT16(0) → R0:R1
+    # D1 arg=0 ↁEREG_PUT16(0) ↁER0:R1
     check("LDW imm R0:R1", [0xD1,0x00,0x34,0x12], None, [cr(0,0x34), cr(1,0x12)])
 
     # ── Indexed Mem via IX/IZ ──
@@ -284,7 +307,7 @@ def run_tests():
     check("PRE IX imm", [0xD6,0x00,0xCD,0xAB], None,
         [lambda: (hd61700.get_reg16(0)==0xABCD, f"IX={hd61700.get_reg16(0):04X}")])
 
-    # GET_REG_IDX(0xD6,0x20) = ((0&1)<<2)|((0x20>>5)&3) = 0|1 = 1 → IY
+    # GET_REG_IDX(0xD6,0x20) = ((0&1)<<2)|((0x20>>5)&3) = 0|1 = 1 ↁEIY
     check("PRE IY imm", [0xD6,0x20,0x56,0x78], None,
         [lambda: (hd61700.get_reg16(1)==0x7856, f"IY={hd61700.get_reg16(1):04X}")])
 
@@ -296,12 +319,12 @@ def run_tests():
     check("GRE IX→R15:R16", [0x9E,0x0F], gr_edge1,
         [cr(15,0x34), cr(16,0x12)])
     def gr_edge2(): hd61700.set_reg16(0,0xABCD)
-    # another boundary: arg=0x1F → R31:R00 (wrap wrap)
+    # another boundary: arg=0x1F ↁER31:R00 (wrap wrap)
     check("GRE IX→R31:R00", [0x9E,0x1F], gr_edge2,
         [cr(31,0xCD), cr(0,0xAB)])
     # ── 16-bit Arith ──
     print("\n[16-bit Arith]")
-    # arg=0x60 (sec=3,reg=0), src=2 → R2:R3
+    # arg=0x60 (sec=3,reg=0), src=2 ↁER2:R3
     def w1():
         hd61700.set_reg(0,0x01); hd61700.set_reg(1,0x00)
         hd61700.set_reg(2,0x02); hd61700.set_reg(3,0x00)
@@ -331,6 +354,23 @@ def run_tests():
     small = [0x82, 0x80]
     result = decode_basic(small, TB)
     check("decode_missing_jr", [], dt, [lambda: ("JR ?" in result, f"got '{result}'")])
+
+    # ── UA/bank switching regression ──
+    print("\n[UA banking]")
+    def bankp():
+        pass
+    # PST UA,#$10 ; PRE IX,#$FF70 ; LD R0,#$AA ; ST (IX+),R0 ; PRE IX,#$FF70 ; LD R0,(IX+)
+    # PRE IX (0xD6) uses GET_REG_IDX(op,arg)=0 when arg bits 5-6 are 0b00.
+    # Therefore arg=0x00 selects IX.
+    bank_prog = [0x56,0x60,0x10,       # PST	UA,&H10
+                 0xD6,0x00,0x70,0xFF,  # PRE	IX,&HFF70
+                 0x42,0x00,0xAA,       # LD		$0,&HAA
+                 0x20,0x00,            # ST		$0,(IX+$31)
+                 0xD6,0x00,0x70,0xFF,  # PRE	IX,&HFF70
+                 0x28,0x00             # LD		$0,(IX+$31)
+                 ]
+    check("UA bank1 write/read", bank_prog, bankp,
+          [lambda: (hd61700.get_reg(0)==0xAA, f"$0={hd61700.get_reg(0):02X}")])
 
     # ── GST/PST ──
     print("\n[GST/PST]")

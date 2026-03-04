@@ -1,4 +1,4 @@
-/*
+﻿/*
  * HD61700 CPU Emulator - Complete Implementation
  * Based on MAME hd61700.cpp by Sandro Ronco (BSD-3-Clause license)
  * Ported to standalone C for MicroPython integration on RP2350
@@ -37,15 +37,62 @@ static void cpu_log(hd61700_state_t *cpu, const char *fmt, ...) {
 
 static uint8_t mem_readbyte(hd61700_state_t *cpu, uint8_t segment,
                             uint32_t offset) {
+  /* Data-space accesses use UA bits 4-5 (IX/main bank). */
+  uint8_t bank = (segment >> 4) & 0x03;
   if (cpu->mem_read)
-    return cpu->mem_read(cpu->cb_ctx, segment, offset);
+    return cpu->mem_read(cpu->cb_ctx, bank, offset);
   return 0;
 }
 
 static void mem_writebyte(hd61700_state_t *cpu, uint8_t segment,
                           uint32_t offset, uint8_t data) {
+  /* Data-space accesses use UA bits 4-5 (IX/main bank). */
+  uint8_t bank = (segment >> 4) & 0x03;
   if (cpu->mem_write)
-    cpu->mem_write(cpu->cb_ctx, segment, offset, data);
+    cpu->mem_write(cpu->cb_ctx, bank, offset, data);
+}
+
+static uint8_t mem_readbyte_iz(hd61700_state_t *cpu, uint8_t segment,
+                               uint32_t offset) {
+  /* IZ accesses use UA bits 6-7. */
+  uint8_t bank = (segment >> 6) & 0x03;
+  if (cpu->mem_read)
+    return cpu->mem_read(cpu->cb_ctx, bank, offset);
+  return 0;
+}
+
+static void mem_writebyte_iz(hd61700_state_t *cpu, uint8_t segment,
+                             uint32_t offset, uint8_t data) {
+  /* IZ accesses use UA bits 6-7. */
+  uint8_t bank = (segment >> 6) & 0x03;
+  if (cpu->mem_write)
+    cpu->mem_write(cpu->cb_ctx, bank, offset, data);
+}
+
+static uint8_t mem_readbyte_stack(hd61700_state_t *cpu, uint8_t segment,
+                                  uint32_t offset) {
+  /* SSP/USP accesses use UA bits 2-3. */
+  uint8_t bank = (segment >> 2) & 0x03;
+  if (cpu->mem_read)
+    return cpu->mem_read(cpu->cb_ctx, bank, offset);
+  return 0;
+}
+
+static void mem_writebyte_stack(hd61700_state_t *cpu, uint8_t segment,
+                                uint32_t offset, uint8_t data) {
+  /* SSP/USP accesses use UA bits 2-3. */
+  uint8_t bank = (segment >> 2) & 0x03;
+  if (cpu->mem_write)
+    cpu->mem_write(cpu->cb_ctx, bank, offset, data);
+}
+
+static uint8_t prog_readbyte(hd61700_state_t *cpu, uint8_t segment,
+                             uint32_t offset) {
+  /* Program-space accesses use UA bits 0-1 (PC bank). */
+  uint8_t bank = segment & 0x03;
+  if (cpu->mem_read)
+    return cpu->mem_read(cpu->cb_ctx, bank, offset);
+  return 0;
 }
 
 /* Forward declaration */
@@ -53,8 +100,8 @@ static uint8_t read_op(hd61700_state_t *cpu);
 
 static uint8_t read_internal_rom_byte(hd61700_state_t *cpu, uint32_t addr) {
   uint32_t base = addr & ~1u;
-  uint8_t hi = mem_readbyte(cpu, cpu->prev_ua, base);
-  uint8_t lo = mem_readbyte(cpu, cpu->prev_ua, base + 1);
+  uint8_t hi = prog_readbyte(cpu, cpu->prev_ua, base);
+  uint8_t lo = prog_readbyte(cpu, cpu->prev_ua, base + 1);
   return (addr & 1) ? lo : hi;
 }
 
@@ -62,7 +109,7 @@ static uint8_t read_program_byte(hd61700_state_t *cpu, uint32_t addr) {
   if (addr < ((uint32_t)INT_ROM << 1)) {
     return read_internal_rom_byte(cpu, addr);
   }
-  return mem_readbyte(cpu, cpu->prev_ua, addr);
+  return prog_readbyte(cpu, cpu->prev_ua, addr);
 }
 
 /* Read a 16-bit immediate operand following an opcode.
@@ -84,7 +131,7 @@ static uint8_t read_op(hd61700_state_t *cpu) {
   uint32_t addr = cpu->fetch_addr;
   uint8_t data = read_program_byte(cpu, addr);
 
-  // 実行したオペコードを記録しておく
+  // 螳溯｡後＠縺溘が繝壹さ繝ｼ繝峨ｒ險倬鹸縺励※縺翫￥
   if (cpu->last_op_len < sizeof(cpu->last_opcodes)) {
     cpu->last_opcodes[cpu->last_op_len++] = data;
   }
@@ -100,11 +147,11 @@ static uint8_t read_op(hd61700_state_t *cpu) {
 
 static void push(hd61700_state_t *cpu, uint16_t *offset, uint8_t data) {
   (*offset)--;
-  mem_writebyte(cpu, REG_UA, *offset, data);
+  mem_writebyte_stack(cpu, REG_UA, *offset, data);
 }
 
 static uint8_t pop(hd61700_state_t *cpu, uint16_t *offset) {
-  uint8_t data = mem_readbyte(cpu, REG_UA, *offset);
+  uint8_t data = mem_readbyte_stack(cpu, REG_UA, *offset);
   (*offset)++;
   return data;
 }
@@ -777,7 +824,7 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
         uint16_t res;
         for (;;) {
           uint8_t tmp = mem_readbyte(cpu, REG_UA, REG_IX);
-          mem_writebyte(cpu, REG_UA, REG_IZ, tmp);
+          mem_writebyte_iz(cpu, REG_UA, REG_IZ, tmp);
           res = (uint16_t)(tmp - arg);
           if (REG_IX == REG_IY || !res)
             break;
@@ -842,7 +889,7 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
       case 0xd9: { /* BUP/BDN */
         for (;;) {
           uint8_t src = mem_readbyte(cpu, REG_UA, REG_IX);
-          mem_writebyte(cpu, REG_UA, REG_IZ, src);
+          mem_writebyte_iz(cpu, REG_UA, REG_IZ, src);
           if (REG_IX == REG_IY)
             break;
           REG_IX += (op & 1) ? -1 : +1;
@@ -950,7 +997,7 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
         uint8_t arg = read_op(cpu);
         uint16_t prev = REG_IZ;
         REG_IZ += get_sign_mreg(cpu, arg);
-        mem_writebyte(cpu, REG_UA, REG_IZ++, READ_REG(arg));
+        mem_writebyte_iz(cpu, REG_UA, REG_IZ++, READ_REG(arg));
         RESTORE_REG(op, REG_IZ, prev);
         cpu->icount -= 8;
       } break;
@@ -968,7 +1015,7 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
         uint8_t arg = read_op(cpu);
         uint16_t prev = REG_IZ;
         REG_IZ += get_sign_mreg(cpu, arg);
-        WRITE_REG(arg, mem_readbyte(cpu, REG_UA, REG_IZ++));
+        WRITE_REG(arg, mem_readbyte_iz(cpu, REG_UA, REG_IZ++));
         RESTORE_REG(op, REG_IZ, prev);
         cpu->icount -= 8;
       } break;
@@ -981,7 +1028,7 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
       case 0x2d: {
         uint8_t arg = read_op(cpu);
         REG_IZ += get_sign_mreg(cpu, arg);
-        WRITE_REG(arg, mem_readbyte(cpu, REG_UA, REG_IZ));
+        WRITE_REG(arg, mem_readbyte_iz(cpu, REG_UA, REG_IZ));
         cpu->icount -= 6;
       } break;
       case 0x26:
@@ -1052,13 +1099,20 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
       case 0x3e:
       case 0x3f: {
         uint8_t arg = read_op(cpu);
-        uint16_t addr = (op & 0x01) ? REG_IZ : REG_IX;
+        bool use_iz = (op & 0x01) != 0;
+        uint16_t addr = use_iz ? REG_IZ : REG_IX;
         addr = (uint16_t)(addr + get_sign_mreg(cpu, arg));
-        uint8_t src = mem_readbyte(cpu, REG_UA, addr);
+        uint8_t src =
+            use_iz ? mem_readbyte_iz(cpu, REG_UA, addr)
+                   : mem_readbyte(cpu, REG_UA, addr);
         uint16_t res =
             src + ((op & 0x02) ? -(int)READ_REG(arg) : +(int)READ_REG(arg));
-        if (op & 0x04)
-          mem_writebyte(cpu, REG_UA, addr, (uint8_t)res);
+        if (op & 0x04) {
+          if (use_iz)
+            mem_writebyte_iz(cpu, REG_UA, addr, (uint8_t)res);
+          else
+            mem_writebyte(cpu, REG_UA, addr, (uint8_t)res);
+        }
         CLEAR_FLAGS;
         CHECK_FLAG_Z((uint8_t)res);
         CHECK_FLAGB_UZ_LZ(res);
@@ -1107,11 +1161,11 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
       case 0x7f: {
         uint8_t arg = read_op(cpu);
         uint16_t addr = (uint16_t)(REG_IZ + get_sign_im8(cpu, arg));
-        uint8_t src = mem_readbyte(cpu, REG_UA, addr);
+        uint8_t src = mem_readbyte_iz(cpu, REG_UA, addr);
         uint16_t res = (uint16_t)(src + ((op & 0x02) ? -(int)READ_REG(arg)
                                                      : +(int)READ_REG(arg)));
         if (op & 0x04) {
-          mem_writebyte(cpu, REG_UA, addr, (uint8_t)res);
+          mem_writebyte_iz(cpu, REG_UA, addr, (uint8_t)res);
         }
         CLEAR_FLAGS;
         CHECK_FLAG_Z((uint8_t)res);
@@ -1260,7 +1314,6 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
           break;
         case 3:
           REG_UA = src;
-          cpu->prev_ua = REG_UA;
           break;
         case 4:
           if (cpu->debug_log && cpu->key_debug_log &&
@@ -1325,7 +1378,7 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
         uint8_t arg = read_op(cpu);
         uint16_t prev = REG_IZ;
         REG_IZ += get_sign_im8(cpu, arg);
-        mem_writebyte(cpu, REG_UA, REG_IZ++, READ_REG(arg));
+        mem_writebyte_iz(cpu, REG_UA, REG_IZ++, READ_REG(arg));
         RESTORE_REG(op, REG_IZ, prev);
         cpu->icount -= 8;
       } break;
@@ -1343,7 +1396,7 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
         uint8_t arg = read_op(cpu);
         uint16_t prev = REG_IZ;
         REG_IZ += get_sign_im8(cpu, arg);
-        WRITE_REG(arg, mem_readbyte(cpu, REG_UA, REG_IZ++));
+        WRITE_REG(arg, mem_readbyte_iz(cpu, REG_UA, REG_IZ++));
         RESTORE_REG(op, REG_IZ, prev);
         cpu->icount -= 8;
       } break;
@@ -1356,7 +1409,7 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
       case 0x6d: {
         uint8_t arg = read_op(cpu);
         REG_IZ += get_sign_im8(cpu, arg);
-        WRITE_REG(arg, mem_readbyte(cpu, REG_UA, REG_IZ));
+        WRITE_REG(arg, mem_readbyte_iz(cpu, REG_UA, REG_IZ));
         cpu->icount -= 6;
       } break;
       case 0xa0:
@@ -1374,8 +1427,8 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
         uint8_t arg = read_op(cpu);
         uint16_t prev = REG_IZ;
         REG_IZ += get_sign_mreg(cpu, arg);
-        mem_writebyte(cpu, REG_UA, REG_IZ++, READ_REG(arg));
-        mem_writebyte(cpu, REG_UA, REG_IZ++, READ_REG(arg + 1));
+        mem_writebyte_iz(cpu, REG_UA, REG_IZ++, READ_REG(arg));
+        mem_writebyte_iz(cpu, REG_UA, REG_IZ++, READ_REG(arg + 1));
         RESTORE_REG(op, REG_IZ, prev);
         cpu->icount -= 11;
       } break;
@@ -1389,8 +1442,8 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
       case 0xa5: {
         uint8_t arg = read_op(cpu);
         REG_IZ += get_sign_mreg(cpu, arg);
-        mem_writebyte(cpu, REG_UA, REG_IZ--, READ_REG(arg));
-        mem_writebyte(cpu, REG_UA, REG_IZ, READ_REG(arg - 1));
+        mem_writebyte_iz(cpu, REG_UA, REG_IZ--, READ_REG(arg));
+        mem_writebyte_iz(cpu, REG_UA, REG_IZ, READ_REG(arg - 1));
         cpu->icount -= 9;
       } break;
       case 0xa8:
@@ -1408,8 +1461,8 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
         uint8_t arg = read_op(cpu);
         uint16_t prev = REG_IZ;
         REG_IZ += get_sign_mreg(cpu, arg);
-        WRITE_REG(arg, mem_readbyte(cpu, REG_UA, REG_IZ++));
-        WRITE_REG(arg + 1, mem_readbyte(cpu, REG_UA, REG_IZ++));
+        WRITE_REG(arg, mem_readbyte_iz(cpu, REG_UA, REG_IZ++));
+        WRITE_REG(arg + 1, mem_readbyte_iz(cpu, REG_UA, REG_IZ++));
         RESTORE_REG(op, REG_IZ, prev);
         cpu->icount -= 11;
       } break;
@@ -1423,8 +1476,8 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
       case 0xad: {
         uint8_t arg = read_op(cpu);
         REG_IZ += get_sign_mreg(cpu, arg);
-        WRITE_REG(arg, mem_readbyte(cpu, REG_UA, REG_IZ--));
-        WRITE_REG(arg - 1, mem_readbyte(cpu, REG_UA, REG_IZ));
+        WRITE_REG(arg, mem_readbyte_iz(cpu, REG_UA, REG_IZ--));
+        WRITE_REG(arg - 1, mem_readbyte_iz(cpu, REG_UA, REG_IZ));
         cpu->icount -= 9;
       } break;
       case 0xe0:
@@ -1454,7 +1507,7 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
         uint16_t prev = REG_IZ;
         REG_IZ += off;
         for (uint8_t n = 0; n < count; n++) {
-          mem_writebyte(cpu, REG_UA, REG_IZ++, READ_REG(arg + n));
+          mem_writebyte_iz(cpu, REG_UA, REG_IZ++, READ_REG(arg + n));
         }
         RESTORE_REG(op, REG_IZ, prev);
         cpu->icount -= 8;
@@ -1487,7 +1540,7 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
         uint16_t prev = REG_IZ;
         REG_IZ += off;
         for (uint8_t n = 0; n < count; n++) {
-          WRITE_REG(arg + n, mem_readbyte(cpu, REG_UA, REG_IZ++));
+          WRITE_REG(arg + n, mem_readbyte_iz(cpu, REG_UA, REG_IZ++));
           cpu->icount -= 3;
         }
         RESTORE_REG(op, REG_IZ, prev);
@@ -1516,7 +1569,7 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
           off = -off;
         REG_IZ += off;
         for (uint8_t n = 0; n < count; n++) {
-          mem_writebyte(cpu, REG_UA, REG_IZ--, READ_REG(arg--));
+          mem_writebyte_iz(cpu, REG_UA, REG_IZ--, READ_REG(arg--));
         }
         REG_IZ++;
         cpu->icount -= 8;
@@ -1544,7 +1597,7 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
           off = -off;
         REG_IZ += off;
         for (uint8_t n = 0; n < count; n++) {
-          WRITE_REG(arg--, mem_readbyte(cpu, REG_UA, REG_IZ--));
+          WRITE_REG(arg--, mem_readbyte_iz(cpu, REG_UA, REG_IZ--));
         }
         REG_IZ++;
         cpu->icount -= 8;
@@ -1728,7 +1781,6 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
             break;
           case 3:
             REG_UA = data;
-            cpu->prev_ua = REG_UA;
             break;
           case 4:
             if (cpu->kb_write)
@@ -1947,16 +1999,26 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
       case 0xbe:
       case 0xbf: {
         uint8_t arg = read_op(cpu);
-        uint16_t addr = (op & 0x01) ? REG_IZ : REG_IX;
+        bool use_iz = (op & 0x01) != 0;
+        uint16_t addr = use_iz ? REG_IZ : REG_IX;
         addr = (uint16_t)(addr + get_sign_mreg(cpu, arg));
-        uint16_t m =
-            (uint16_t)(mem_readbyte(cpu, REG_UA, addr) |
-                       (mem_readbyte(cpu, REG_UA, (uint16_t)(addr + 1)) << 8));
+        uint8_t m0 = use_iz ? mem_readbyte_iz(cpu, REG_UA, addr)
+                            : mem_readbyte(cpu, REG_UA, addr);
+        uint8_t m1 = use_iz ? mem_readbyte_iz(cpu, REG_UA, (uint16_t)(addr + 1))
+                            : mem_readbyte(cpu, REG_UA, (uint16_t)(addr + 1));
+        uint16_t m = (uint16_t)(m0 | (m1 << 8));
         uint16_t r = REG_GET16(arg);
         uint32_t res = m + ((op & 0x02) ? -(int)r : +(int)r);
         if (op & 0x04) {
-          mem_writebyte(cpu, REG_UA, addr, (uint8_t)res);
-          mem_writebyte(cpu, REG_UA, (uint16_t)(addr + 1), (uint8_t)(res >> 8));
+          if (use_iz) {
+            mem_writebyte_iz(cpu, REG_UA, addr, (uint8_t)res);
+            mem_writebyte_iz(cpu, REG_UA, (uint16_t)(addr + 1),
+                             (uint8_t)(res >> 8));
+          } else {
+            mem_writebyte(cpu, REG_UA, addr, (uint8_t)res);
+            mem_writebyte(cpu, REG_UA, (uint16_t)(addr + 1),
+                          (uint8_t)(res >> 8));
+          }
         }
         CLEAR_FLAGS;
         CHECK_FLAG_Z((uint16_t)res);
@@ -2138,15 +2200,11 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
   return cycles - cpu->icount;
 }
 
-// 1命令分だけ実行する関数
 int hd61700_step(hd61700_state_t *cpu) {
-  cpu->last_op_len = 0; // 記録開始前にリセット
-  cpu->icount = 1;      // 1命令実行後にループを抜けるよう設定
-
-  // 既存の hd61700_execute のメインループ部分を1回分だけ実行
-  // ※内部で read_op が呼ばれるたびに cpu->last_opcodes に蓄積されます
+  cpu->last_op_len = 0;
+  /* Execute exactly one instruction worth of work.
+     read_op() appends fetched bytes into last_opcodes/last_op_len. */
   hd61700_execute(cpu, 1, -1);
-
   return cpu->last_op_len;
 }
 
@@ -2162,3 +2220,5 @@ int hd61700_execute_steps(hd61700_state_t *cpu, int steps) {
   }
   return total_cycles;
 }
+
+

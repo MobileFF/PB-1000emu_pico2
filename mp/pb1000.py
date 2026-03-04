@@ -72,12 +72,23 @@ class RAMView:
     def __len__(self):
         return self._size
     def __setitem__(self, i, v):
+        def _write_one(idx, val):
+            b = val & 0xFF
+            # Prefer direct memoryview write for C-managed buffers.
+            try:
+                self._view[idx] = b
+                return
+            except Exception:
+                pass
+            # Fallback path (older ports / non-writable views).
+            self._core.write_mem(self._start + idx, b, self._segment)
+
         if isinstance(i, slice):
             r = range(*i.indices(self._size))
             for idx, val in zip(r, v):
-                self._core.write_mem(self._start + idx, val, self._segment)
+                _write_one(idx, val)
         else:
-            self._core.write_mem(self._start + i, v, self._segment)
+            _write_one(i, v)
     def __repr__(self):
         return f"<RAMView {self._size} bytes at 0x{self._start:04X}>"
 
@@ -129,9 +140,12 @@ class PB1000System:
         self.debug = self.debug_cfg["sys"]
         self._ram_is_c_managed = False
 
-        self.has_exp = self._file_exists(self._ram_path(1))
+        self._exp_ram_path = self._ram_path(1)
+        self.has_exp = self._file_exists(self._exp_ram_path)
+        print(f"Expanded RAM detection: {'FOUND' if self.has_exp else 'NOT FOUND'} ({self._exp_ram_path})")
         if hasattr(cpu_core, "set_has_exp_ram"):
             cpu_core.set_has_exp_ram(self.has_exp)
+            print(f"HD61700 bank1 RAM: {'ENABLED' if self.has_exp else 'DISABLED'}")
 
         # Memory initialization
         if hasattr(cpu_core, "get_ram_view"):
@@ -463,7 +477,7 @@ class PB1000System:
 
         # Load expanded RAM (32KB)
         if self.has_exp:
-            path1 = self._ram_path(1)
+            path1 = self._exp_ram_path
             try:
                 val = None
                 with open(path1, 'rb') as f:
@@ -490,7 +504,7 @@ class PB1000System:
 
         # Save expanded RAM
         if self.has_exp:
-            path1 = self._ram_path(1)
+            path1 = self._exp_ram_path
             try:
                 with open(path1, 'wb') as f:
                     buf = self.exp_ram._view if isinstance(self.exp_ram, RAMView) else self.exp_ram
@@ -702,6 +716,7 @@ class PB1000System:
 
         op_bytes = cpu_core.step()
         if not op_bytes:
+            #print("not op_bytes")
             return None
 
         hex_str = "".join(f"{x:02X}" for x in op_bytes)
@@ -817,7 +832,9 @@ class PB1000System:
             printer(f"  {chunk}")
         if hasattr(cpu_core, "get_reg8"):
             ia = cpu_core.get_reg8(4)
-            printer(f"IA: IA={ia:02X}")
+            ua = cpu_core.get_reg8(3)
+            ie = cpu_core.get_reg8(5)
+            printer(f"IA: IA={ia:02X} UA={ua:02X} IE={ie:02X}")
         if hasattr(cpu_core, "get_sreg"):
             sx = cpu_core.get_sreg(0)
             sy = cpu_core.get_sreg(1)

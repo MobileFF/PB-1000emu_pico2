@@ -478,18 +478,18 @@ def decode_basic(b, pc=None):
 
     if op in (0x58, 0x59, 0x5C, 0x5D, 0xD8, 0xD9, 0xDC, 0xDD):
         if op in (0xD8, 0xD9):
-            return "SUP" if op == 0xD8 else "SDN"
+            return "BUP" if op == 0xD8 else "BDN"
         arg = _read_u8(b, i)
         if arg is None:
             return "UP/DN ?"
         if op == 0x58:
-            return f"BUPS {_fmt_reg(arg)}"
+            return f"BUPS &H{arg:02X}"
         if op == 0x59:
-            return f"BDNS {_fmt_reg(arg)}"
+            return f"BDNS &H{arg:02X}"
         if op == 0x5C:
-            return f"BUP  {_fmt_reg(arg)}"
+            return f"SUP  &H{arg:02X}"
         if op == 0x5D:
-            return f"BDN  {_fmt_reg(arg)}"
+            return f"SDN  &H{arg:02X}"
         if op == 0xDC:
             return f"SUP  {_fmt_reg(arg)}"
         return f"SDN  {_fmt_reg(arg)}"

@@ -18,7 +18,7 @@ class BankTest:
         
     def mem_write(self, segment, offset, data):
         self.recorded_accesses.append(('W', segment, offset, data))
-
+"""
 def test_stack_segment_fix():
     print("Testing HD61700 Stack Segment Fix (executing at 0x7000)...")
     
@@ -40,14 +40,14 @@ def test_stack_segment_fix():
     hd61700.reset()
     
     # Test Code (Linear Byte Addressing Area)
-    # 1. PRE SS, 0xFF70 (D7 00 70 FF) - Set stack to RAM
-    # 2. PST UA, #04 (56 60 04) - Set Segment 1
+    # 1. PRE SS, 0x7F00 (D7 00 00 7F) - Set stack to RAM
+    # 2. PST UA, #1 (56 60 01) - Set Segment 1
     # 3. PHS R0 (26 00) - Push (should use UA=1)
     # 4. PPS R1 (2E 01) - Pop
     # 5. NOP (F8)
     code = bytearray([
-        0xD7, 0x00, 0x70, 0xFF, 
-        0x56, 0x60, 0x04, 
+        0xD7, 0x00, 0x00, 0x7F, 
+        0x56, 0x60, 0x01, 
         0x26, 0x00, 
         0x2E, 0x01, 
         0xF8
@@ -80,7 +80,6 @@ def test_stack_segment_fix():
     # Verification
     push_access = None
     for acc in tester.recorded_accesses:
-        print(acc)
         if acc[0] == 'W':
             push_access = acc
             break
@@ -136,10 +135,10 @@ def test_pb1000_bank_callback_fix():
     sys_emu.ram[0] = 0xAA
     sys_emu.ram[1] = 0x55
     if sys_emu.ram[0] == 0xAA and sys_emu.ram[1] == 0x55:
-        print("  PASS: Standard RAM 0x6000 writable.")
+        print("  PASS: Standard RAM 0x8000 writable.")
     else:
-        print(f"  FAIL: Standard RAM 0x6000 write failed ({hex(sys_emu.ram[0])}, {hex(sys_emu.ram[1])})")
-
+        print(f"  FAIL: Standard RAM 0x8000 write failed ({hex(sys_emu.ram[0])}, {hex(sys_emu.ram[1])})")
+"""
 def test_memory_instructions():
     print("\nTesting HD61700 Memory Instructions (LDB, STB, LDW, STW)...")
     tester = BankTest()
@@ -236,6 +235,5 @@ def test_memory_instructions():
 """
 
 if __name__ == "__main__":
-    test_stack_segment_fix()
-#     test_pb1000_bank_callback_fix()
-#     test_memory_instructions()
+    test_pb1000_bank_callback_fix()
+

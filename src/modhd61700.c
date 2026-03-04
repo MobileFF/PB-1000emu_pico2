@@ -8,6 +8,7 @@
 #include "py/mphal.h"
 #include "py/obj.h"
 #include "py/runtime.h"
+#include <sys/stat.h>
 
 /* Static CPU state */
 static hd61700_state_t cpu_state;
@@ -26,6 +27,7 @@ static size_t rom1_size = 0;
 static uint8_t ram_buf[0x2000];     // 8KB RAM (0x6000-0x7FFF)
 static uint8_t exp_ram_buf[0x8000]; // 32KB Expanded RAM (Bank 1: 0x8000-0xFFFF)
 static bool has_exp_ram = false;
+static bool has_exp_ram_forced = false;
 
 /* Direct C mode flags */
 static bool use_c_mem = false;
@@ -53,6 +55,23 @@ static mp_obj_t py_port_read_cb = mp_const_none;
 static mp_obj_t py_port_write_cb = mp_const_none;
 
 static mp_obj_t py_callback_anchor_list = mp_const_none;
+
+/* Accept either bank index (0-3) or raw UA value (e.g. 0x10 for bank 1). */
+static inline uint8_t normalize_bank(uint8_t segment) {
+  return (segment <= 3) ? (segment & 0x03u) : ((segment >> 4) & 0x03u);
+}
+
+/* Auto-detect expanded RAM image from common paths. */
+static bool detect_exp_ram_file(void) {
+  struct stat st;
+  if (stat("/roms/ram1.bin", &st) == 0) {
+    return true;
+  }
+  if (stat("roms/ram1.bin", &st) == 0) {
+    return true;
+  }
+  return false;
+}
 
 static void anchor_callbacks(mp_obj_t obj) {
   if (obj == mp_const_none)
@@ -148,6 +167,7 @@ static void c_log_write(void *ctx, const char *msg) {
 
 static uint8_t c_mem_direct_read(void *ctx, uint8_t segment, uint32_t offset) {
   (void)ctx;
+  uint8_t bank = normalize_bank(segment);
   /* 0x0000-0x1FFF: Internal ROM */
   if (offset < 0x2000) {
     return (offset < rom0_size) ? rom0_buf[offset] : 0xFF;
@@ -158,14 +178,14 @@ static uint8_t c_mem_direct_read(void *ctx, uint8_t segment, uint32_t offset) {
   }
   /* 0x8000-0xFFFF: Banked Memory */
   if (offset >= 0x8000) {
-    uint32_t bank = (uint32_t)(segment & 0x03u);
+    uint32_t bank_u32 = (uint32_t)bank;
     uint32_t off = offset - 0x8000u;
-    if (bank == 0) {
+    if (bank_u32 == 0) {
       /* Bank 0: System ROM */
       if (rom1_size == 0)
         return 0xFF;
       return rom1_buf[off % rom1_size];
-    } else if (bank == 1 && has_exp_ram) {
+    } else if (bank_u32 == 1 && has_exp_ram) {
       /* Bank 1: Expanded RAM */
       return exp_ram_buf[off];
     }
@@ -177,6 +197,7 @@ static uint8_t c_mem_direct_read(void *ctx, uint8_t segment, uint32_t offset) {
 static void c_mem_direct_write(void *ctx, uint8_t segment, uint32_t offset,
                                uint8_t data) {
   (void)ctx;
+  uint8_t bank = normalize_bank(segment);
   /* Only write to RAM area (0x6000-0x7FFF) */
   if (offset >= 0x6000 && offset < 0x8000) {
     ram_buf[offset - 0x6000] = data;
@@ -192,7 +213,7 @@ static void c_mem_direct_write(void *ctx, uint8_t segment, uint32_t offset,
     }
   }
   /* Bank 1 Expanded RAM Write (0x8000-0xFFFF) */
-  else if (offset >= 0x8000 && (segment & 0x03) == 1) {
+  else if (offset >= 0x8000 && bank == 1) {
     if (has_exp_ram) {
       exp_ram_buf[offset - 0x8000] = data;
     }
@@ -226,6 +247,11 @@ static mp_obj_t mod_reset(size_t n_args, const mp_obj_t *args) {
   hd61700_set_debug(&cpu_state, cpu_debug_enabled);
   hd61700_set_key_debug(&cpu_state, cpu_debug_enabled && cpu_key_debug_enabled);
   hd61700_set_lcd_debug(&cpu_state, cpu_debug_enabled && cpu_lcd_debug_enabled);
+  /* Fallback auto-detection so C direct-memory mode also works without
+     explicit Python-side set_has_exp_ram(). */
+  if (!has_exp_ram_forced) {
+    has_exp_ram = detect_exp_ram_file();
+  }
   /* Register C callbacks */
   cpu_state.mem_read = use_c_mem ? c_mem_direct_read : c_mem_read;
   cpu_state.mem_write = use_c_mem ? c_mem_direct_write : c_mem_write;
@@ -408,6 +434,10 @@ static mp_obj_t mod_set_reg8(mp_obj_t idx_obj, mp_obj_t val_obj) {
     mp_raise_ValueError(MP_ERROR_TEXT("reg8 index must be 0..7"));
   }
   cpu_state.reg8bit[idx] = (uint8_t)mp_obj_get_int(val_obj);
+  if (idx == 3) {
+    /* Keep fetch bank source in sync when UA is changed via API. */
+    cpu_state.prev_ua = cpu_state.reg8bit[3];
+  }
   return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_2(mod_set_reg8_obj, mod_set_reg8);
@@ -527,6 +557,7 @@ static MP_DEFINE_CONST_FUN_OBJ_0(mod_get_exp_ram_view_obj,
 /* hd61700.set_has_exp_ram(bool) */
 static mp_obj_t mod_set_has_exp_ram(mp_obj_t enable_obj) {
   has_exp_ram = mp_obj_is_true(enable_obj);
+  has_exp_ram_forced = true;
   return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(mod_set_has_exp_ram_obj, mod_set_has_exp_ram);
@@ -535,7 +566,14 @@ static MP_DEFINE_CONST_FUN_OBJ_1(mod_set_has_exp_ram_obj, mod_set_has_exp_ram);
 static mp_obj_t mod_read_mem(size_t n_args, const mp_obj_t *args) {
   uint32_t addr = (uint32_t)mp_obj_get_int(args[0]);
   uint8_t segment = (n_args > 1) ? (uint8_t)mp_obj_get_int(args[1]) : 0;
-  return MP_OBJ_NEW_SMALL_INT(c_mem_direct_read(NULL, segment, addr));
+  uint8_t bank = normalize_bank(segment);
+  uint8_t data;
+  if (use_c_mem) {
+    data = c_mem_direct_read(NULL, bank, addr);
+  } else {
+    data = c_mem_read(NULL, bank, addr);
+  }
+  return MP_OBJ_NEW_SMALL_INT(data);
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(mod_read_mem_obj, 1, 2,
                                            mod_read_mem);
@@ -545,7 +583,12 @@ static mp_obj_t mod_write_mem(size_t n_args, const mp_obj_t *args) {
   uint32_t addr = (uint32_t)mp_obj_get_int(args[0]);
   uint8_t data = (uint8_t)mp_obj_get_int(args[1]);
   uint8_t segment = (n_args > 2) ? (uint8_t)mp_obj_get_int(args[2]) : 0;
-  c_mem_direct_write(NULL, segment, addr, data);
+  uint8_t bank = normalize_bank(segment);
+  if (use_c_mem) {
+    c_mem_direct_write(NULL, bank, addr, data);
+  } else {
+    c_mem_write(NULL, bank, addr, data);
+  }
   return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(mod_write_mem_obj, 2, 3,

@@ -201,7 +201,7 @@ def _all_trace_execute(system,steps=1000):
 def main():
     global STOP_PC
     print("PB-1000 Emulator Starting...")
-    STOP_PC = int(input("STOP PC (A652)?> "),16)
+    STOP_PC = int(input("STOP PC (8D3E)?> "),16)
     print(f"STOP_PC is {STOP_PC:04X}")
     display = init_display()
     try:
@@ -254,6 +254,10 @@ def main():
     except KeyboardInterrupt:
         print("\nEmulator stopped by user.")
     finally:
+        from workarea import peek_workarea,print_workarea,print_all_workarea
+        print_all_workarea(system)
+        print("dump 0x6000-0x7FFF")
+        system.dump_mem_range(0x6000,0x7FFF)
         print("Saving RAM state...")
         try:
             system.save_ram()
