@@ -15,11 +15,13 @@ STEP_SERVICE_CHUNK = 64
 STEP_TIMER_TICK_STEPS = 40000
 FRAME_INTERVAL_MS = 1000
 AUTO_EXE_ON_ENTER = False
+ON_INT_PULSE_MS = 30
 
 def _keypos(row, ki_col):
     return (row, ki_col)
 
 KEY_EXE = _keypos(10, 4)
+KEY_BREAK = _keypos(1, 1)
 
 
 _KEY_CANDIDATES = {
@@ -40,6 +42,8 @@ _release_at_ms = 0
 _release_hard_at_ms = 0
 _next_press_at_ms = 0
 _typed_since_enter = False
+_on_int_active = False
+_on_int_release_at_ms = 0
 
 
 def _resolve_key_candidates(key, label):
@@ -86,10 +90,39 @@ def _step_with_input_service(system, steps, chunk=STEP_SERVICE_CHUNK):
     return ran
 
 
+def _pulse_on_int(system, now_ms):
+    global _on_int_active, _on_int_release_at_ms
+    if _on_int_active:
+        return
+    print("[WAKE] BRK detected during sleep: before ON_INT pulse")
+    try:
+        system.print_registers()
+    except Exception:
+        pass
+    try:
+        system.set_on_int(True)
+    except Exception:
+        return
+    _on_int_active = True
+    _on_int_release_at_ms = time.ticks_add(now_ms, ON_INT_PULSE_MS)
+
+
 def poll_keyboard(system):
     global _active_key, _active_key_label, _active_key_candidates, _active_key_candidate_idx
     global _active_key_started, _active_keybuf_base, _release_at_ms, _release_hard_at_ms, _next_press_at_ms
-    global _typed_since_enter
+    global _typed_since_enter, _on_int_active, _on_int_release_at_ms
+
+    now = time.ticks_ms()
+    if _on_int_active and time.ticks_diff(now, _on_int_release_at_ms) >= 0:
+        try:
+            system.set_on_int(False)
+            print("[WAKE] ON_INT pulse released: after pulse")
+            try:
+                system.print_registers()
+            except Exception:
+                pass
+        finally:
+            _on_int_active = False
 
     while _spoll.poll(0):
         char = sys.stdin.read(1)
@@ -166,10 +199,17 @@ def poll_keyboard(system):
     if _active_key is None and _key_queue:
         if time.ticks_diff(now, _next_press_at_ms) < 0:
             return
-        if hasattr(system, "is_key_input_enabled") and not system.is_key_input_enabled():
+        pending_key, pending_label = _key_queue[0]
+        allow_sleep_break = (pending_label == "BRK" and getattr(system, "is_sleeping", False))
+        if (not allow_sleep_break and hasattr(system, "is_key_input_enabled")
+                and not system.is_key_input_enabled()):
             return
 
         key, label = _key_queue.pop(0)
+        # In OFF/sleep state, map BREAK key press to ON_INT wake pulse.
+        if label == "BRK" and getattr(system, "is_sleeping", False):
+            _pulse_on_int(system, now)
+            return
         candidates = _resolve_key_candidates(key, label)
         key = candidates[0]
         print(f"Key Press: {label}")
@@ -240,6 +280,9 @@ def main():
     except KeyboardInterrupt:
         print("\nEmulator stopped by user.")
     finally:
+        for i in range(100):
+            system.debug_step(pause=False,trace=True,prt=True,trace_index=i+1)
+            system.print_registers()
         from workarea import peek_workarea,print_workarea,print_all_workarea
         print_all_workarea(system)
         print("dump 0x6000-0x7FFF")

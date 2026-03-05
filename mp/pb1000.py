@@ -188,6 +188,10 @@ class PB1000System:
         # One-shot dump when CHATA remains 0x00 while a key is held.
         self._chata_zero_since_ms = None
         self._chata_stuck_logged = False
+        # Temporary watchdog: dump state once when key input appears unresponsive.
+        self._key_noresp_since_ms = None
+        self._key_noresp_logged = False
+        self._key_noresp_threshold_ms = 1200
         # One-shot probe: first LCD VRAM write after arming (e.g. EXE press).
         self._display_probe_active = False
         self._display_probe_label = ""
@@ -578,10 +582,24 @@ class PB1000System:
                         pulse = 1
                         self._key_post_release_pulses_remaining -= 1
                         self._key_next_pulse_ms = time.ticks_add(now, self._key_pulse_interval_ms)
+            else:
+                ia = cpu_core.get_reg8(4) if hasattr(cpu_core, "get_reg8") else 0
+                now = time.ticks_ms()
             if pulse and not self._key_line_state:
                 cpu_core.set_input(cpu_core.KEY_INT, 1)
                 self._key_line_state = 1
                 self._key_pulse_release_pending = True
+                self._key_noresp_since_ms = None
+                self._key_noresp_logged = False
+            elif key_pressed and not self._key_line_state:
+                # If a key is held but no KEY pulse is emitted for a while,
+                # dump diagnostics once to capture the stuck state.
+                if self._key_noresp_since_ms is None:
+                    self._key_noresp_since_ms = now
+                elif (not self._key_noresp_logged and
+                      time.ticks_diff(now, self._key_noresp_since_ms) >= self._key_noresp_threshold_ms):
+                    self._dump_key_unresponsive_state("scan_mode_no_pulse", ia=ia, pulse=pulse)
+                    self._key_noresp_logged = True
             if (not key_pressed) and (self._key_post_release_pulses_remaining == 0):
                 if self._key_line_state:
                     cpu_core.set_input(cpu_core.KEY_INT, 0)
@@ -589,11 +607,15 @@ class PB1000System:
                 self._key_pulse_release_pending = False
                 self._chata_zero_since_ms = None
                 self._chata_stuck_logged = False
+                self._key_noresp_since_ms = None
+                self._key_noresp_logged = False
             return
 
         if not self.keyboard.has_key_pressed():
             self._chata_zero_since_ms = None
             self._chata_stuck_logged = False
+            self._key_noresp_since_ms = None
+            self._key_noresp_logged = False
             return
         now = time.ticks_ms()
         chata = self.ram[0x68D3 - self.RAM_START]
@@ -785,6 +807,10 @@ class PB1000System:
         if hasattr(cpu_core, "set_pc"):
             cpu_core.set_pc(0x0001)
 
+    def set_on_int(self, state):
+        """Drive ON interrupt input line."""
+        cpu_core.set_input(cpu_core.ON_INT, 1 if state else 0)
+
     @property
     def pc(self):
         return cpu_core.get_pc()
@@ -832,9 +858,10 @@ class PB1000System:
             printer(f"  {chunk}")
         if hasattr(cpu_core, "get_reg8"):
             ia = cpu_core.get_reg8(4)
+            ib = cpu_core.get_reg8(2)
             ua = cpu_core.get_reg8(3)
             ie = cpu_core.get_reg8(5)
-            printer(f"IA: IA={ia:02X} UA={ua:02X} IE={ie:02X}")
+            printer(f"IA: IA={ia:02X} IB={ib:02X} UA={ua:02X} IE={ie:02X}")
         if hasattr(cpu_core, "get_sreg"):
             sx = cpu_core.get_sreg(0)
             sy = cpu_core.get_sreg(1)
@@ -925,3 +952,37 @@ class PB1000System:
             "ib": cpu_core.get_reg8(2),
             "ie": cpu_core.get_reg8(5),
         }
+
+    def _dump_key_unresponsive_state(self, reason, ia=0, pulse=0):
+        """Temporary debug dump for key-unresponsive incidents."""
+        snap = self.get_register_snapshot()
+        scan = self.get_key_scan_state()
+        buf = self.get_key_buffer_state()
+        ua = cpu_core.get_reg8(3) if hasattr(cpu_core, "get_reg8") else 0
+        head16 = "".join(f"{x:02X}" for x in buf["buf"])
+        print("[KEY-UNRESPONSIVE]")
+        print(f"  reason={reason} pulse={pulse} sleeping={self.is_sleeping}")
+        print(
+            f"  PC={snap['pc']:04X} F={snap['flags']:02X} "
+            f"IA={snap['ia']:02X} IB={snap['ib']:02X} IE={snap['ie']:02X} UA={ua:02X}"
+        )
+        print(
+            f"  IX={snap['ix']:04X} IY={snap['iy']:04X} IZ={snap['iz']:04X} "
+            f"US={snap['us']:04X} SS={snap['ss']:04X} KY={snap['ky']:04X}"
+        )
+        print(
+            f"  scan: KYSTA={scan['kysta']:02X} CHATA={scan['chata']:02X} "
+            f"KEYCM={scan['keycm']:02X} KEYIN={scan['keyin16']:04X} "
+            f"KEYMD={scan['keymd']:02X} KYREP={scan['kyrep']:02X}"
+        )
+        print(
+            f"  buf: KYCND={buf['kycnt']:02X} RD={buf['rd']:02X} WR={buf['wr']:02X} "
+            f"HEAD16={head16}"
+        )
+        print(
+            f"  input: key_pressed={self.keyboard.has_key_pressed()} "
+            f"key_via_scan={self.key_interrupt_via_scan} key_reassert={self.key_reassert_enabled} "
+            f"line_state={self._key_line_state} rel_pending={self._key_pulse_release_pending} "
+            f"post_rel={self._key_post_release_pulses_remaining} next_ms={self._key_next_pulse_ms} "
+            f"ia_local={ia:02X}"
+        )

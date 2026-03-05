@@ -1,5 +1,6 @@
 WORKAREA_DIC = {
     # name :(addr,len)
+    "KYSTA":(0x68D2,1),
     "IOBF" :(0x692F,2),
     "SSTOP":(0x6931,2),
     "SBOT" :(0x6933,2),

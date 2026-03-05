@@ -368,6 +368,10 @@ void hd61700_set_input(hd61700_state_t *cpu, int line, int state) {
 #define IRQ_ENABLED(line) ((REG_IE & (1u << ((line) + 3))) != 0)
   switch (line) {
   case HD61700_ON_INT:
+    if (state) {
+      /* Wake source: ON key should bring CPU out of OFF/SLP state. */
+      cpu->state &= ~CPU_SLP;
+    }
     if (IRQ_ENABLED(line) && state)
       REG_IB |= (1 << line);
     REG_KY = (REG_KY & 0xfdff) | ((state ? 1 : 0) << 9);
