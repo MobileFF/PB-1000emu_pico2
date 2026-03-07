@@ -38,6 +38,21 @@ static int mode_to_chip(uint8_t mode_byte) {
   return (mode_byte & 0x10) ? 1 : 0;
 }
 
+static void mark_all_dirty(lcd_state_t *lcd) {
+  lcd->dirty = true;
+  for (int i = 0; i < LCD_PAGES; i++) {
+    lcd->dirty_pages[i] = true;
+  }
+}
+
+static void set_display_on_state(lcd_state_t *lcd, bool enabled) {
+  if (lcd->display_on == enabled)
+    return;
+  lcd->display_on = enabled;
+  /* ON/OFF transition should be immediately visible on panel. */
+  mark_all_dirty(lcd);
+}
+
 static void write_vram_pixel_byte(lcd_state_t *lcd, int chip, int x_local,
                                   int y_page, uint8_t data) {
   if (y_page < 0 || y_page >= 4)
@@ -135,7 +150,7 @@ static void apply_lcdc_command(lcd_state_t *lcd, const uint8_t *cmd,
   st->mode = cmd_id;
 
   if (cmd_id == LCDC_CMD_DISPLAY_ON_OFF) {
-    lcd->display_on = (mode & 0x10) != 0;
+    set_display_on_state(lcd, (mode & 0x10) != 0);
     return;
   }
 
@@ -210,12 +225,12 @@ void lcd_clear(lcd_state_t *lcd) {
 void lcd_ctrl(lcd_state_t *lcd, uint8_t data) {
   /* Legacy direct-control commands */
   if (data == LCD_CMD_DISPLAY_ON) {
-    lcd->display_on = true;
+    set_display_on_state(lcd, true);
     lcd->legacy_mode = true;
     return;
   }
   if (data == LCD_CMD_DISPLAY_OFF) {
-    lcd->display_on = false;
+    set_display_on_state(lcd, false);
     lcd->legacy_mode = true;
     return;
   }
@@ -437,10 +452,35 @@ void lcd_render_to_display(lcd_state_t *lcd) {
   /* Pre-compute big-endian color values */
   uint16_t be_on = bswap16(LCD_COLOR_ON);
   uint16_t be_off = bswap16(LCD_COLOR_OFF);
+  uint16_t be_lcd_off = bswap16(LCD_COLOR_LCD_OFF);
 
   uint16_t row_buf[LCD_WIDTH * 4]; /* max scale=4 → 192*4 = 768 uint16 */
   if (s > 4)
     s = 4;
+
+  /* LCD OFF: render full panel background and skip VRAM pixels. */
+  if (!lcd->display_on) {
+    int idx = 0;
+    for (int col = 0; col < LCD_WIDTH; col++) {
+      for (int sx = 0; sx < s; sx++) {
+        row_buf[idx++] = be_lcd_off;
+      }
+    }
+    size_t row_bytes = (size_t)idx * 2;
+    ili_set_window(lcd, xo, yo, xo + pw - 1, yo + (LCD_HEIGHT * s) - 1);
+    gpio_put(lcd->pin_dc, 1);
+    gpio_put(lcd->pin_cs, 0);
+    for (int y = 0; y < LCD_HEIGHT * s; y++) {
+      spi_write_blocking((spi_inst_t *)lcd->spi_inst, (const uint8_t *)row_buf,
+                         row_bytes);
+    }
+    gpio_put(lcd->pin_cs, 1);
+    lcd->dirty = false;
+    for (int i = 0; i < LCD_PAGES; i++) {
+      lcd->dirty_pages[i] = false;
+    }
+    return;
+  }
 
   for (int page = 0; page < LCD_PAGES; page++) {
     if (!lcd->dirty_pages[page])

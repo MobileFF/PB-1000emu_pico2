@@ -74,6 +74,14 @@ class LCDController:
         self._legacy_mode = False
         self._charset = self._load_charset()
 
+    def _set_display_on(self, enabled):
+        val = bool(enabled)
+        if self.display_on == val:
+            return
+        self.display_on = val
+        # Force full redraw when LCD ON/OFF state changes.
+        self.dirty = True
+
     def _load_charset(self):
         # Preferred path in this project layout.
         for p in ("/roms/charset.bin", "roms/charset.bin"):
@@ -95,11 +103,11 @@ class LCDController:
             print(f"LCD CTRL: 0x{data:02X} (OP={op} CE1={ce1} CE2={ce2})")
         # Keep legacy direct-control behavior used by older tests/tools.
         if data == self.CMD_DISPLAY_ON:
-            self.display_on = True
+            self._set_display_on(True)
             self._legacy_mode = True
             return
         if data == self.CMD_DISPLAY_OFF:
-            self.display_on = False
+            self._set_display_on(False)
             self._legacy_mode = True
             return
         if (data & 0xF8) == self.CMD_SET_PAGE:
@@ -167,7 +175,7 @@ class LCDController:
             )
 
         if cmd_id == self.LCDC_CMD_DISPLAY_ON_OFF:
-            self.display_on = bool(mode & 0x10)
+            self._set_display_on(mode & 0x10)
             return
 
         if cmd_id == self.LCDC_CMD_SET_ROW_TOP_AND_WIDTH:
@@ -376,6 +384,17 @@ class LCDController:
         ps = self._pixel_size
         color_on  = 0x0000  # Black pixels (LCD on)
         color_off = 0xB5E6  # Olive-green background (like real PB-1000)
+        color_lcd_off = 0x8410  # Gray tint for LCD power-off state
+        if not self.display_on:
+            self.display.fill_rect(
+                x_offset,
+                y_offset,
+                self.WIDTH * ps,
+                self.HEIGHT * ps,
+                color_lcd_off,
+            )
+            self.dirty = False
+            return
 
         for page in range(4):
             for col in range(self.WIDTH):

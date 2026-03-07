@@ -309,7 +309,10 @@ static int get_sign_im8(hd61700_state_t *cpu, uint8_t arg) {
 static bool check_irqs(hd61700_state_t *cpu) {
 #define IRQ_ENABLED(line) ((REG_IE & (1u << ((line) + 3))) != 0)
   for (int i = 4; i >= 0; i--) {
-    if ((REG_IB & (1 << i)) && IRQ_ENABLED(i) &&
+    bool off_wake_on_int =
+        (i == HD61700_ON_INT) && (cpu->pc == 0x8F6A || cpu->pc == 0x8F6B);
+    bool irq_allowed = IRQ_ENABLED(i) || off_wake_on_int;
+    if ((REG_IB & (1 << i)) && irq_allowed &&
         !(cpu->irq_status & (1 << i))) {
       cpu->irq_status |= (1 << i);
       push(cpu, &REG_SS, (uint8_t)(cpu->pc >> 8));
@@ -371,15 +374,32 @@ void hd61700_set_input(hd61700_state_t *cpu, int line, int state) {
     if (state) {
       /* Wake source: ON key should bring CPU out of OFF/SLP state. */
       cpu->state &= ~CPU_SLP;
+      /* ON event should be pending even if IE is currently masked by OFF flow. */
+      REG_IB |= (1 << HD61700_ON_INT);
     }
     if (IRQ_ENABLED(line) && state)
       REG_IB |= (1 << line);
     REG_KY = (REG_KY & 0xfdff) | ((state ? 1 : 0) << 9);
     break;
   case HD61700_KEY_INT:
+    /* Real machine wakes from OFF by BRK event when SW flag is ON. */
+    if (state && (cpu->flags & FLAG_SW)) {
+      cpu->state &= ~CPU_SLP;
+      REG_IB |= (1 << HD61700_ON_INT);
+    }
     if (IRQ_ENABLED(line) && state) {
       uint8_t mask = (uint8_t)(1u << line);
       REG_IB |= mask;
+    }
+    break;
+  case HD61700_SW:
+    if (state) {
+      cpu->flags |= FLAG_SW;
+      /* Power switch ON event can wake from OFF/sleep. */
+      cpu->state &= ~CPU_SLP;
+      REG_IB |= (1 << HD61700_ON_INT);
+    } else {
+      cpu->flags &= (uint8_t)~FLAG_SW;
     }
     break;
   }
@@ -2183,6 +2203,15 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
         cpu->icount -= 3;
       } break;
       case 0xfe:
+        /* OFF behavior per HD61700 documentation:
+           PC=0, IX/IY/IZ=0, UA=0, IA=0, and IE bits 0,1,5,6,7 cleared. */
+        set_pc(cpu, 0x0000);
+        REG_IX = 0;
+        REG_IY = 0;
+        REG_IZ = 0;
+        REG_UA = 0;
+        REG_IA = 0;
+        REG_IE &= 0x1c;
         cpu->state |= CPU_SLP;
         cpu->icount -= 3;
         break; /* off */

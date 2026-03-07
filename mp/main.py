@@ -16,6 +16,59 @@ STEP_TIMER_TICK_STEPS = 40000
 FRAME_INTERVAL_MS = 1000
 AUTO_EXE_ON_ENTER = False
 ON_INT_PULSE_MS = 30
+WAKE_TRACE_STEPS = 40
+WAKE_TRACE_VECTOR_PC = 0x0032
+
+
+def _wake_diag_snapshot(system):
+    snap = {
+        "pc": None,
+        "flags": None,
+        "ia": None,
+        "ib": None,
+        "ie": None,
+        "ua": None,
+        "sleep": None,
+    }
+    try:
+        snap["pc"] = system.pc
+    except Exception:
+        pass
+    try:
+        if hasattr(system, "is_sleeping"):
+            snap["sleep"] = 1 if system.is_sleeping else 0
+    except Exception:
+        pass
+    try:
+        import hd61700 as cpu_core
+        if hasattr(cpu_core, "get_flags"):
+            snap["flags"] = cpu_core.get_flags() & 0xFF
+        if hasattr(cpu_core, "get_reg8"):
+            snap["ib"] = cpu_core.get_reg8(2) & 0xFF
+            snap["ua"] = cpu_core.get_reg8(3) & 0xFF
+            snap["ia"] = cpu_core.get_reg8(4) & 0xFF
+            snap["ie"] = cpu_core.get_reg8(5) & 0xFF
+    except Exception:
+        pass
+    return snap
+
+
+def _fmt_wake_diag(snap):
+    def hx(v, w):
+        return "--" if v is None else f"{v:0{w}X}"
+    return (
+        f"PC={hx(snap['pc'],4)} F={hx(snap['flags'],2)} "
+        f"IA={hx(snap['ia'],2)} IB={hx(snap['ib'],2)} IE={hx(snap['ie'],2)} "
+        f"UA={hx(snap['ua'],2)} SLP={snap['sleep'] if snap['sleep'] is not None else '-'}"
+    )
+
+
+def _wake_diag_changed(prev_snap, cur_snap):
+    for key in ("pc", "flags", "ia", "ib", "ie", "ua", "sleep"):
+        if prev_snap.get(key) != cur_snap.get(key):
+            return True
+    return False
+
 
 def _keypos(row, ki_col):
     return (row, ki_col)
@@ -44,6 +97,7 @@ _next_press_at_ms = 0
 _typed_since_enter = False
 _on_int_active = False
 _on_int_release_at_ms = 0
+_input_blocked_log_at_ms = 0
 
 
 def _resolve_key_candidates(key, label):
@@ -100,22 +154,66 @@ def _pulse_on_int(system, now_ms):
     except Exception:
         pass
     try:
+        print(f"[WAKE_DIAG] before_on_int {_fmt_wake_diag(_wake_diag_snapshot(system))}")
         system.set_on_int(True)
+        print(f"[WAKE_DIAG] after_on_int  {_fmt_wake_diag(_wake_diag_snapshot(system))}")
     except Exception:
         return
+    _trace_wake_path(system, reason="on_int_assert")
     _on_int_active = True
     _on_int_release_at_ms = time.ticks_add(now_ms, ON_INT_PULSE_MS)
+
+
+def _trace_wake_path(system, reason, steps=WAKE_TRACE_STEPS):
+    if steps <= 0:
+        return
+    try:
+        start_pc = system.pc
+    except Exception:
+        start_pc = 0
+    print(f"[WAKE_TRACE] start reason={reason} pc={start_pc:04X} steps={steps}")
+    saw_vector = False
+    for i in range(steps):
+        snap_before = _wake_diag_snapshot(system)
+        pc_before = snap_before.get("pc")
+        if pc_before == WAKE_TRACE_VECTOR_PC:
+            saw_vector = True
+        try:
+            if hasattr(system, "service_input_lines"):
+                system.service_input_lines()
+            trace_line = system.debug_step(pause=False, trace=True, prt=True, trace_index=i + 1)
+            if isinstance(trace_line, str) and f"[{WAKE_TRACE_VECTOR_PC:04X}]" in trace_line:
+                saw_vector = True
+        except Exception as e:
+            print(f"[WAKE_TRACE] aborted at step {i + 1}: {e}")
+            break
+        snap_after = _wake_diag_snapshot(system)
+        if _wake_diag_changed(snap_before, snap_after):
+            print(
+                f"[WAKE_TRACE_STATE] step={i + 1:02d} "
+                f"pre=({_fmt_wake_diag(snap_before)}) "
+                f"post=({_fmt_wake_diag(snap_after)})"
+            )
+    try:
+        end_pc = system.pc
+    except Exception:
+        end_pc = 0
+    if end_pc == WAKE_TRACE_VECTOR_PC:
+        saw_vector = True
+    print(f"[WAKE_TRACE] end pc={end_pc:04X} saw_vector={1 if saw_vector else 0}")
 
 
 def poll_keyboard(system):
     global _active_key, _active_key_label, _active_key_candidates, _active_key_candidate_idx
     global _active_key_started, _active_keybuf_base, _release_at_ms, _release_hard_at_ms, _next_press_at_ms
-    global _typed_since_enter, _on_int_active, _on_int_release_at_ms
+    global _typed_since_enter, _on_int_active, _on_int_release_at_ms, _input_blocked_log_at_ms
 
     now = time.ticks_ms()
     if _on_int_active and time.ticks_diff(now, _on_int_release_at_ms) >= 0:
         try:
+            print(f"[WAKE_DIAG] before_on_int_release {_fmt_wake_diag(_wake_diag_snapshot(system))}")
             system.set_on_int(False)
+            print(f"[WAKE_DIAG] after_on_int_release  {_fmt_wake_diag(_wake_diag_snapshot(system))}")
             print("[WAKE] ON_INT pulse released: after pulse")
             try:
                 system.print_registers()
@@ -137,6 +235,9 @@ def poll_keyboard(system):
             continue
         key, label = _map_input_char(char)
         if key is not None:
+            if getattr(system, "is_sleeping", False) and label != "BRK":
+                print(f"[QUEUE] dropped during sleep: {label}")
+                continue
             _key_queue.append((key, label))
             if key != KEY_EXE:
                 _typed_since_enter = True
@@ -199,10 +300,31 @@ def poll_keyboard(system):
     if _active_key is None and _key_queue:
         if time.ticks_diff(now, _next_press_at_ms) < 0:
             return
+        if getattr(system, "is_sleeping", False):
+            dropped = 0
+            kept = []
+            for item in _key_queue:
+                if item[1] == "BRK":
+                    kept.append(item)
+                else:
+                    dropped += 1
+            if dropped:
+                print(f"[QUEUE] dropped {dropped} non-BRK keys during sleep")
+            _key_queue[:] = kept
+            if not _key_queue:
+                return
         pending_key, pending_label = _key_queue[0]
         allow_sleep_break = (pending_label == "BRK" and getattr(system, "is_sleeping", False))
         if (not allow_sleep_break and hasattr(system, "is_key_input_enabled")
                 and not system.is_key_input_enabled()):
+            # Throttled diagnostic for "typed but not accepted" cases.
+            if time.ticks_diff(now, _input_blocked_log_at_ms) >= 0:
+                sleep_state = 1 if getattr(system, "is_sleeping", False) else 0
+                print(
+                    f"[INPUT_BLOCKED] label={pending_label} "
+                    f"sleep={sleep_state} key_enabled=0 queue_len={len(_key_queue)}"
+                )
+                _input_blocked_log_at_ms = time.ticks_add(now, 500)
             return
 
         key, label = _key_queue.pop(0)

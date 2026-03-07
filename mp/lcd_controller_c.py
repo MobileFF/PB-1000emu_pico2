@@ -43,6 +43,7 @@ class LCDControllerC:
         self._spi_rendering = False
         self._hw_params = None  # (spi_id, cs, dc)
         self._current_cfg = (None, None, None)  # (x, y, scale)
+        self._last_display_on = None
 
         # Initialize C module core
         lcd_c.init()
@@ -103,7 +104,14 @@ class LCDControllerC:
 
     def render_to_display(self, x_offset=0, y_offset=0):
         """Refreshes the physical display. Synchronizes offsets to C-side first."""
-        if not lcd_c.is_dirty():
+        disp_on = bool(lcd_c.is_display_on())
+        dirty = bool(lcd_c.is_dirty())
+        if self._last_display_on is None or self._last_display_on != disp_on:
+            print(f"[LCD_STATE] display_on={1 if disp_on else 0} dirty={1 if dirty else 0}")
+            self._last_display_on = disp_on
+        if not dirty:
+            if not disp_on:
+                print("[LCD_OFF] skip redraw: display_on=0 dirty=0")
             return
 
         # Synchronize offsets to C module if we have hardware control
@@ -121,6 +129,18 @@ class LCDControllerC:
 
         # Fallback slow path (Headless or HW discovery failed)
         if not self.display: return
+        if not disp_on:
+            print("[LCD_OFF] fill background in Python fallback path")
+            ps = self._pixel_size
+            self.display.fill_rect(
+                x_offset,
+                y_offset,
+                self.WIDTH * ps,
+                self.HEIGHT * ps,
+                0x8410,
+            )
+            lcd_c.clear_dirty()
+            return
         ps = self._pixel_size
         for page in range(4):
             for col in range(self.WIDTH):

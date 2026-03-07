@@ -17,6 +17,7 @@
 /* ILI9341 display colors (RGB565) */
 #define LCD_COLOR_ON 0x0000  /* Black pixel */
 #define LCD_COLOR_OFF 0xB5E6 /* Olive-green background */
+#define LCD_COLOR_LCD_OFF 0x8410 /* Gray tint when LCD is powered off */
 
 /* ILI9341 commands */
 #define ILI9341_CASET 0x2A
