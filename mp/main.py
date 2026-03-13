@@ -19,6 +19,22 @@ ON_INT_PULSE_MS = 30
 WAKE_TRACE_STEPS = 40
 WAKE_TRACE_VECTOR_PC = 0x0032
 
+# Input Configuration
+ENABLE_USB_KBD = True
+ENABLE_UART_KBD = True
+UART_BAUDRATE = 115200
+UART_TX_PIN = 0
+UART_RX_PIN = 1
+
+# Initialize explicit UART for keyboard
+_uart_kbd = None
+if ENABLE_UART_KBD:
+    try:
+        _uart_kbd = machine.UART(0, baudrate=UART_BAUDRATE, tx=machine.Pin(UART_TX_PIN), rx=machine.Pin(UART_RX_PIN))
+        print(f"UART Keyboard enabled: GP{UART_TX_PIN}(TX)/GP{UART_RX_PIN}(RX) @ {UART_BAUDRATE}bps")
+    except Exception as e:
+        print(f"Failed to init UART keyboard: {e}")
+
 
 def _wake_diag_snapshot(system):
     snap = {
@@ -148,18 +164,18 @@ def _pulse_on_int(system, now_ms):
     global _on_int_active, _on_int_release_at_ms
     if _on_int_active:
         return
-    print("[WAKE] BRK detected during sleep: before ON_INT pulse")
+    # print("[WAKE] BRK detected during sleep: before ON_INT pulse")
+    # try:
+    #     system.print_registers()
+    # except Exception:
+    #     pass
     try:
-        system.print_registers()
-    except Exception:
-        pass
-    try:
-        print(f"[WAKE_DIAG] before_on_int {_fmt_wake_diag(_wake_diag_snapshot(system))}")
+        # print(f"[WAKE_DIAG] before_on_int {_fmt_wake_diag(_wake_diag_snapshot(system))}")
         system.set_on_int(True)
-        print(f"[WAKE_DIAG] after_on_int  {_fmt_wake_diag(_wake_diag_snapshot(system))}")
+        # print(f"[WAKE_DIAG] after_on_int  {_fmt_wake_diag(_wake_diag_snapshot(system))}")
     except Exception:
         return
-    _trace_wake_path(system, reason="on_int_assert")
+    # _trace_wake_path(system, reason="on_int_assert")
     _on_int_active = True
     _on_int_release_at_ms = time.ticks_add(now_ms, ON_INT_PULSE_MS)
 
@@ -202,7 +218,6 @@ def _trace_wake_path(system, reason, steps=WAKE_TRACE_STEPS):
         saw_vector = True
     print(f"[WAKE_TRACE] end pc={end_pc:04X} saw_vector={1 if saw_vector else 0}")
 
-
 def poll_keyboard(system):
     global _active_key, _active_key_label, _active_key_candidates, _active_key_candidate_idx
     global _active_key_started, _active_keybuf_base, _release_at_ms, _release_hard_at_ms, _next_press_at_ms
@@ -211,36 +226,52 @@ def poll_keyboard(system):
     now = time.ticks_ms()
     if _on_int_active and time.ticks_diff(now, _on_int_release_at_ms) >= 0:
         try:
-            print(f"[WAKE_DIAG] before_on_int_release {_fmt_wake_diag(_wake_diag_snapshot(system))}")
+            # print(f"[WAKE_DIAG] before_on_int_release {_fmt_wake_diag(_wake_diag_snapshot(system))}")
             system.set_on_int(False)
-            print(f"[WAKE_DIAG] after_on_int_release  {_fmt_wake_diag(_wake_diag_snapshot(system))}")
-            print("[WAKE] ON_INT pulse released: after pulse")
-            try:
-                system.print_registers()
-            except Exception:
-                pass
+            # print(f"[WAKE_DIAG] after_on_int_release  {_fmt_wake_diag(_wake_diag_snapshot(system))}")
+            # print("[WAKE] ON_INT pulse released: after pulse")
+            # try:
+            #     system.print_registers()
+            # except Exception:
+            #     pass
         finally:
             _on_int_active = False
 
-    while _spoll.poll(0):
-        char = sys.stdin.read(1)
-        if not char:
-            break
-        if char == "\x03":  # Ctrl+C from Thonny
-            raise KeyboardInterrupt()
-        if char == "\r" or char == "\n":
-            if AUTO_EXE_ON_ENTER and _typed_since_enter:
-                _key_queue.append((KEY_EXE, "EXE"))
-                _typed_since_enter = False
-            continue
-        key, label = _map_input_char(char)
-        if key is not None:
-            if getattr(system, "is_sleeping", False) and label != "BRK":
-                print(f"[QUEUE] dropped during sleep: {label}")
+    # Poll external USB Host Keyboard if available
+    if ENABLE_USB_KBD and hasattr(system, 'keyboard') and hasattr(system.keyboard, 'poll_usb_host'):
+        usb_events = system.keyboard.poll_usb_host()
+        # If sleeping, check for ESC (BRK) to trigger wake pulse
+        if getattr(system, "is_sleeping", False) and usb_events:
+            for scancode, pressed in usb_events:
+                if scancode == 0x29 and pressed: # 0x29 = ESC
+                    _pulse_on_int(system, now)
+                    break
+
+    if ENABLE_UART_KBD and _uart_kbd is not None:
+        while _uart_kbd.any():
+            try:
+                char = _uart_kbd.read(1).decode('utf-8')
+            except Exception:
+                char = None
+            if not char:
+                break
+            if char == "\x03":  # Ctrl+C behavior? Usually handled by REPL, but we can intercept
+                print("\n[UART] Break received")
+                # We could raise KeyboardInterrupt, but let's just map it to PB-1000 BRK
+                char = "^" 
+            if char == "\r" or char == "\n":
+                if AUTO_EXE_ON_ENTER and _typed_since_enter:
+                    _key_queue.append((KEY_EXE, "EXE"))
+                    _typed_since_enter = False
                 continue
-            _key_queue.append((key, label))
-            if key != KEY_EXE:
-                _typed_since_enter = True
+            key, label = _map_input_char(char)
+            if key is not None:
+                if getattr(system, "is_sleeping", False) and label != "BRK":
+                    print(f"[QUEUE] dropped during sleep: {label}")
+                    continue
+                _key_queue.append((key, label))
+                if key != KEY_EXE:
+                    _typed_since_enter = True
 
     now = time.ticks_ms()
 
@@ -350,22 +381,78 @@ def poll_keyboard(system):
         _release_hard_at_ms = time.ticks_add(now, KEY_RELEASE_HARD_TIMEOUT_MS)
 
 
+_active_touch_key = None
+
+def poll_touch(system):
+    global _active_touch_key
+    if not hasattr(system, 'touch') or system.touch is None:
+        return
+        
+    if system.touch.is_pressed():
+        coords = system.touch.get_touch()
+        if coords is not None:
+            x, y = coords
+            # print(f"[DEBUG_TOUCH] x={x}, y={y}")
+            # Map coords to 4x4 grid within display bounds (x:16-304, y:40-104)
+            if 16 <= x <= 304 and 168 <= y <= 200:
+                col = (x - 16) // 72
+                row = (y - 40) // 16
+                # print(f"(col,row)=({col},{row}) -> ",end="")
+                col = max(0, min(3, col))
+                row = max(0, min(3, row))
+                
+                t_idx = row * 4 + col + 1
+                t_key = f"TK{t_idx}"
+
+                # print(f"(col,row)=({col},{row}) / t_idx = {t_idx}")
+
+                if _active_touch_key != t_key:
+                    if _active_touch_key is not None:
+                        system.release_key(_active_touch_key)
+                    system.press_key(t_key)
+                    _active_touch_key = t_key
+                    # print(f"[DN] {t_key}")
+                return
+            else:
+                # print(f"[OUT] x={x}, y={y} (Range: 16-304, 40-104)")
+                pass
+                
+    if _active_touch_key is not None:
+        system.release_key(_active_touch_key)
+        _active_touch_key = None
+
 def main():
     print("PB-1000 Emulator Starting...")
 
-    display = init_display()
+    ret = init_display()
+    if isinstance(ret, tuple):
+        display, touch = ret
+    else:
+        display = ret
+        touch = None
+        
     try:
         draw_bezel(display)
     except Exception:
         pass
 
     system = PB1000System(display, debug={"sys": False, "lcd": False, "kb": False}, restore_registers=False)
-
+    system.touch = touch
+    #system.set_lcd_scale(1.5)
+    
     try:
         system.load_rom('/roms/rom0.bin', slot=0)
         system.load_rom('/roms/rom1.bin', slot=1)
     except Exception as e:
         print(f"ROM load warning: {e}")
+
+    if ENABLE_USB_KBD:
+        try:
+            import usb_host
+            usb_host.init()
+            print("USB Host initialized.")
+        except Exception as e:
+            print(f"Failed to init USB Host: {e}")
 
     system.power_on()
 
@@ -388,6 +475,7 @@ def main():
 
             now = time.ticks_ms()
             poll_keyboard(system)
+            poll_touch(system)
 
             if time.ticks_diff(now, frame_time) >= FRAME_INTERVAL_MS:
                 system.update_display(x_offset=16, y_offset=40)

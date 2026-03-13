@@ -35,6 +35,8 @@ CS_PIN = 9
 DC_PIN = 8
 RST_PIN = 7
 BL_PIN = 22
+T_CS_PIN = 16
+T_IRQ_PIN = 17
 
 def init_display():
     spi = machine.SPI(
@@ -51,7 +53,15 @@ def init_display():
 
     display = ILI9341(spi, cs, dc, rst, width=320, height=240)
     display.fill_rect(0, 0, 320, 240, 0x0000)
-    return display
+    # Initialize Touch
+    touch = None
+    try:
+        from xpt2046 import XPT2046
+        touch = XPT2046(spi, T_CS_PIN, T_IRQ_PIN)
+    except Exception as e:
+        print("Touch panel init failed:", e)
+
+    return display, touch
 
 
 def draw_bezel(display):
@@ -770,6 +780,16 @@ class PB1000System:
     def update_display(self, x_offset=24, y_offset=40):
         """Render LCD to physical display."""
         self.lcd.render_to_display(x_offset, y_offset)
+
+    def set_lcd_bg_colors(self, on_bg, off_bg):
+        """Set LCD background colors (RGB565) for ON/OFF states."""
+        if hasattr(self.lcd, "set_bg_colors"):
+            self.lcd.set_bg_colors(on_bg, off_bg)
+
+    def set_lcd_scale(self, scale):
+        """Set LCD display scale. Supported: 1.0 and 1.5."""
+        if hasattr(self.lcd, "set_display_scale"):
+            self.lcd.set_display_scale(scale)
 
     def press_key(self, key):
         """Press a key on the virtual keyboard."""

@@ -395,6 +395,13 @@ static mp_obj_t mod_get_flags(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(mod_get_flags_obj, mod_get_flags);
 
+/* hd61700.set_flags(flags) */
+static mp_obj_t mod_set_flags(mp_obj_t flags_obj) {
+  cpu_state.flags = (uint8_t)mp_obj_get_int(flags_obj);
+  return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(mod_set_flags_obj, mod_set_flags);
+
 /* hd61700.is_sleeping() -> bool */
 static mp_obj_t mod_is_sleeping(void) {
   return mp_obj_new_bool(cpu_state.state & CPU_SLP);
@@ -633,6 +640,7 @@ static const mp_rom_map_elem_t hd61700_module_globals_table[] = {
     {MP_ROM_QSTR(MP_QSTR_get_pc), MP_ROM_PTR(&mod_get_pc_obj)},
     {MP_ROM_QSTR(MP_QSTR_set_pc), MP_ROM_PTR(&mod_set_pc_obj)},
     {MP_ROM_QSTR(MP_QSTR_get_flags), MP_ROM_PTR(&mod_get_flags_obj)},
+    {MP_ROM_QSTR(MP_QSTR_set_flags), MP_ROM_PTR(&mod_set_flags_obj)},
     {MP_ROM_QSTR(MP_QSTR_is_sleeping), MP_ROM_PTR(&mod_is_sleeping_obj)},
     {MP_ROM_QSTR(MP_QSTR_get_reg), MP_ROM_PTR(&mod_get_reg_obj)},
     {MP_ROM_QSTR(MP_QSTR_get_reg8), MP_ROM_PTR(&mod_get_reg8_obj)},

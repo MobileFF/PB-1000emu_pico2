@@ -34,6 +34,12 @@ class KeyboardMatrix:
         '8': (7, 6), '9': (7, 5),
         ' ': (10, 1), '.': (10, 6), '=': (2, 6),
         '+': (9, 3), '-': (10, 3), '*': (8, 3), '/': (7, 3),
+        
+        # Touch panel keys (T1-T16) mapping to KO7-KO10 and KI9-KI12
+        'tk1': (7, 12), 'tk2': (8, 12), 'tk3': (9, 12), 'tk4': (10, 12),
+        'tk5': (7, 11), 'tk6': (8, 11), 'tk7': (9, 11), 'tk8': (10, 11),
+        'tk9': (7, 10), 'tk10': (8, 10), 'tk11': (9, 10), 'tk12': (10, 10),
+        'tk13': (7, 9), 'tk14': (8, 9), 'tk15': (9, 9), 'tk16': (10, 9),
     }
 
     # Special key codes
@@ -49,6 +55,10 @@ class KeyboardMatrix:
     KEY_RIGHT  = (3, 9)   # Cursor Right
     KEY_UP     = (5, 9)   # Cursor Up
     KEY_DOWN   = (4, 9)   # Cursor Down
+    KEY_NEWALL = (6, 6)   # NEWALL
+    KEY_MENU   = (5,11)   # MENU
+    KEY_LCKEY  = (6,11)   # LCKEY
+    KEY_CAL    = (4,11)   # CAL
     TRACE_MIN_PRINT_MS = 120
 
     @staticmethod
@@ -96,11 +106,8 @@ class KeyboardMatrix:
         # 13: ALL KEY output
         if sel == 0x0D:
             return range(13)
-        # IA=0 means no KO selected in current emulator behavior.
-        if sel == 0:
-            return ()
-        # 1..12 selects one key-output row.
-        if 1 <= sel <= 12:
+        # 0..12 selects one key-output row.
+        if 0 <= sel <= 12:
             return (sel,)
         return ()
 
@@ -238,7 +245,7 @@ class KeyboardMatrix:
             0x2C: ' ',  # Space
             0x37: '.', 0x57: '+', 0x56: '-',
             0x55: '*', 0x54: '/',
-            0x67: '=',
+            0x2E: '=',
         }
         # Special keys
         special_usb_map = {
@@ -251,6 +258,16 @@ class KeyboardMatrix:
             0x52: self.KEY_UP,     # Up Arrow
             0x49: self.KEY_INS,    # Insert
             0x4C: self.KEY_DEL,    # Delete
+            0x45: self.KEY_NEWALL, # NEWALL(=F12)
+            0x3A: self.KEY_MAP['tk13'], # TK13(=F1)
+            0x3B: self.KEY_MAP['tk14'], # TK14(=F2)
+            0x3C: self.KEY_MAP['tk15'], # TK15(=F3)
+            0x3D: self.KEY_MAP['tk16'], # TK16(=F4)
+            0x3E: self.KEY_MENU,   # MENU(=F5)
+            0x3F: self.KEY_LCKEY,  # LCKEY(=F6)
+            0x40: self.KEY_CAL,    # CAL(=F7)
+            0xE1: self.KEY_SHIFT,  # Left Shift
+            0xE5: self.KEY_SHIFT,  # Right Shift
         }
 
         if scancode in usb_map:
@@ -265,4 +282,24 @@ class KeyboardMatrix:
                 self.key_press(pos)
             else:
                 self.key_release(pos)
+
+    def poll_usb_host(self):
+        """
+        Poll events from the native usb_host C module (if available)
+        and process them. This should be called in the main loop.
+        """
+        try:
+            import usb_host
+            # Ensure TinyUSB background task is run
+            usb_host.task()
+            
+            # Fetch pending keyboard events
+            events = usb_host.get_keyboard_events()
+            for scancode, pressed in events:
+                self.process_usb_key(scancode, pressed)
+            return events
+        except ImportError:
+            # usb_host module not built into this firmware
+            return []
+
     TRACE_SCAN = True

@@ -54,6 +54,10 @@ class LCDController:
         self.ctrl_reg = 0       # Last control register value
         self.display = display  # ILI9341 driver
         self.debug = bool(debug)
+        self._color_bg_on = 0xB5E6
+        self._color_bg_off = 0x8410
+        self._scale_num = 1
+        self._scale_den = 1
         self.clear()            # Ensure VRAM is empty on start
         self.dirty = True       # Flag: VRAM changed, needs redraw
         self._pixel_size = 1    # Scale factor for ILI9341 (1:1 for 192x32)
@@ -80,6 +84,22 @@ class LCDController:
             return
         self.display_on = val
         # Force full redraw when LCD ON/OFF state changes.
+        self.dirty = True
+
+    def set_bg_colors(self, on_bg, off_bg):
+        """Set LCD background colors (RGB565): ON-state and OFF-state."""
+        self._color_bg_on = int(on_bg) & 0xFFFF
+        self._color_bg_off = int(off_bg) & 0xFFFF
+        self.dirty = True
+
+    def set_display_scale(self, scale):
+        """Set display scale. Supported: 1.0 and 1.5."""
+        if scale == 1.5:
+            self._scale_num = 3
+            self._scale_den = 2
+        else:
+            self._scale_num = 1
+            self._scale_den = 1
         self.dirty = True
 
     def _load_charset(self):
@@ -381,32 +401,33 @@ class LCDController:
         if not self.display or not self.dirty:
             return
 
-        ps = self._pixel_size
+        out_w = (self.WIDTH * self._scale_num) // self._scale_den
+        out_h = (self.HEIGHT * self._scale_num) // self._scale_den
         color_on  = 0x0000  # Black pixels (LCD on)
-        color_off = 0xB5E6  # Olive-green background (like real PB-1000)
-        color_lcd_off = 0x8410  # Gray tint for LCD power-off state
+        color_off = self._color_bg_on
+        color_lcd_off = self._color_bg_off
         if not self.display_on:
             self.display.fill_rect(
                 x_offset,
                 y_offset,
-                self.WIDTH * ps,
-                self.HEIGHT * ps,
+                out_w,
+                out_h,
                 color_lcd_off,
             )
             self.dirty = False
             return
 
-        for page in range(4):
-            for col in range(self.WIDTH):
-                byte = self.vram[page * self.WIDTH + col]
-                for bit in range(8):
-                    pixel_on = bool(byte & (1 << bit))
-                    color = color_on if pixel_on else color_off
-                    # Scale coordinates by pixel_size
-                    # x -> col, y -> page*8 + bit
-                    px = x_offset + col * ps
-                    py = y_offset + (page * 8 + bit) * ps
-                    self.display.fill_rect(px, py, ps, ps, color)
+        for dy in range(out_h):
+            sy = (dy * self._scale_den) // self._scale_num
+            page = sy >> 3
+            bit = sy & 0x07
+            base = page * self.WIDTH
+            for dx in range(out_w):
+                sx = (dx * self._scale_den) // self._scale_num
+                byte = self.vram[base + sx]
+                pixel_on = bool(byte & (1 << bit))
+                color = color_on if pixel_on else color_off
+                self.display.fill_rect(x_offset + dx, y_offset + dy, 1, 1, color)
 
         self.dirty = False
 

@@ -134,6 +134,26 @@ static mp_obj_t mod_lcd_set_debug(mp_obj_t enabled_obj) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(mod_lcd_set_debug_obj, mod_lcd_set_debug);
 
+/* lcd_c.set_bg_colors(on_bg, off_bg) */
+static mp_obj_t mod_lcd_set_bg_colors(mp_obj_t on_bg_obj, mp_obj_t off_bg_obj) {
+  uint16_t on_bg = (uint16_t)mp_obj_get_int(on_bg_obj);
+  uint16_t off_bg = (uint16_t)mp_obj_get_int(off_bg_obj);
+  lcd_set_bg_colors(&lcd_state, on_bg, off_bg);
+  return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(mod_lcd_set_bg_colors_obj,
+                                 mod_lcd_set_bg_colors);
+
+/* lcd_c.set_scale(num, den=1) */
+static mp_obj_t mod_lcd_set_scale(size_t n_args, const mp_obj_t *args) {
+  uint8_t num = (uint8_t)mp_obj_get_int(args[0]);
+  uint8_t den = (n_args > 1) ? (uint8_t)mp_obj_get_int(args[1]) : 1;
+  lcd_set_scale_ratio(&lcd_state, num, den);
+  return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(mod_lcd_set_scale_obj, 1, 2,
+                                           mod_lcd_set_scale);
+
 /* lcd_c.setup_display(spi_id, cs_pin, dc_pin, scale, x_offset, y_offset) */
 static mp_obj_t mod_lcd_setup_display(size_t n_args, const mp_obj_t *args) {
   int spi_id = mp_obj_get_int(args[0]);
@@ -198,6 +218,9 @@ static const mp_rom_map_elem_t lcd_c_module_globals_table[] = {
      MP_ROM_PTR(&mod_lcd_set_draw_bitimage_reverse_obj)},
     {MP_ROM_QSTR(MP_QSTR_load_charset), MP_ROM_PTR(&mod_lcd_load_charset_obj)},
     {MP_ROM_QSTR(MP_QSTR_set_debug), MP_ROM_PTR(&mod_lcd_set_debug_obj)},
+    {MP_ROM_QSTR(MP_QSTR_set_bg_colors),
+     MP_ROM_PTR(&mod_lcd_set_bg_colors_obj)},
+    {MP_ROM_QSTR(MP_QSTR_set_scale), MP_ROM_PTR(&mod_lcd_set_scale_obj)},
     {MP_ROM_QSTR(MP_QSTR_set_page), MP_ROM_PTR(&mod_lcd_set_page_obj)},
     {MP_ROM_QSTR(MP_QSTR_set_column), MP_ROM_PTR(&mod_lcd_set_column_obj)},
     {MP_ROM_QSTR(MP_QSTR_setup_display),

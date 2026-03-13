@@ -44,10 +44,16 @@ class LCDControllerC:
         self._hw_params = None  # (spi_id, cs, dc)
         self._current_cfg = (None, None, None)  # (x, y, scale)
         self._last_display_on = None
+        self._color_bg_on = 0xB5E6
+        self._color_bg_off = 0x8410
+        self._scale_num = 1
+        self._scale_den = 1
 
         # Initialize C module core
         lcd_c.init()
         lcd_c.set_debug(self.debug)
+        if hasattr(lcd_c, "set_bg_colors"):
+            lcd_c.set_bg_colors(self._color_bg_on, self._color_bg_off)
 
         # Load charset into C-side buffer
         self._load_charset_data()
@@ -110,8 +116,8 @@ class LCDControllerC:
             print(f"[LCD_STATE] display_on={1 if disp_on else 0} dirty={1 if dirty else 0}")
             self._last_display_on = disp_on
         if not dirty:
-            if not disp_on:
-                print("[LCD_OFF] skip redraw: display_on=0 dirty=0")
+            # if not disp_on:
+            #     print("[LCD_OFF] skip redraw: display_on=0 dirty=0")
             return
 
         # Synchronize offsets to C module if we have hardware control
@@ -127,30 +133,53 @@ class LCDControllerC:
             lcd_c.render()
             return
 
-        # Fallback slow path (Headless or HW discovery failed)
+        # Fallback path (headless / fractional scaling)
         if not self.display: return
+        out_w = (self.WIDTH * self._scale_num) // self._scale_den
+        out_h = (self.HEIGHT * self._scale_num) // self._scale_den
         if not disp_on:
             print("[LCD_OFF] fill background in Python fallback path")
-            ps = self._pixel_size
             self.display.fill_rect(
                 x_offset,
                 y_offset,
-                self.WIDTH * ps,
-                self.HEIGHT * ps,
-                0x8410,
+                out_w,
+                out_h,
+                self._color_bg_off,
             )
             lcd_c.clear_dirty()
             return
-        ps = self._pixel_size
-        for page in range(4):
-            for col in range(self.WIDTH):
-                byte = lcd_c.get_vram_byte(page * self.WIDTH + col)
-                for bit in range(8):
-                    if byte & (1 << bit):
-                        self.display.fill_rect(x_offset + col*ps, y_offset + (page*8+bit)*ps, ps, ps, 0x0000)
-                    else:
-                        self.display.fill_rect(x_offset + col*ps, y_offset + (page*8+bit)*ps, ps, ps, 0xB5E6)
+        vram = lcd_c.get_vram()
+        for dy in range(out_h):
+            sy = (dy * self._scale_den) // self._scale_num
+            page = sy >> 3
+            bit = sy & 0x07
+            base = page * self.WIDTH
+            for dx in range(out_w):
+                sx = (dx * self._scale_den) // self._scale_num
+                byte = vram[base + sx]
+                color = 0x0000 if (byte & (1 << bit)) else self._color_bg_on
+                self.display.fill_rect(x_offset + dx, y_offset + dy, 1, 1, color)
         lcd_c.clear_dirty()
+
+    def set_display_scale(self, scale):
+        """Set display scale. Supported: 1.0 and 1.5."""
+        if scale == 1.5:
+            self._scale_num = 3
+            self._scale_den = 2
+        else:
+            self._scale_num = 1
+            self._scale_den = 1
+        if hasattr(lcd_c, "set_scale"):
+            lcd_c.set_scale(self._scale_num, self._scale_den)
+        else:
+            lcd_c.clear_dirty()
+
+    def set_bg_colors(self, on_bg, off_bg):
+        """Set LCD background colors (RGB565): ON-state and OFF-state."""
+        self._color_bg_on = int(on_bg) & 0xFFFF
+        self._color_bg_off = int(off_bg) & 0xFFFF
+        if hasattr(lcd_c, "set_bg_colors"):
+            lcd_c.set_bg_colors(self._color_bg_on, self._color_bg_off)
 
     def lcd_ctrl(self, data): lcd_c.ctrl(data)
     def lcd_write(self, data): lcd_c.write(data)

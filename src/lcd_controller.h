@@ -69,6 +69,10 @@ typedef struct {
   bool display_on;
   bool dirty;
   bool dirty_pages[LCD_PAGES];
+  /* Configurable RGB565 colors */
+  uint16_t color_on;
+  uint16_t color_off;
+  uint16_t color_lcd_off;
 
   /* Control register */
   uint8_t ctrl_reg;
@@ -107,6 +111,8 @@ typedef struct {
   uint8_t pin_dc;
   /* Pixel scale factor */
   uint8_t scale;
+  uint8_t scale_num;
+  uint8_t scale_den;
   /* Display offset */
   uint16_t disp_x_offset;
   uint16_t disp_y_offset;
@@ -122,11 +128,13 @@ bool lcd_get_pixel(lcd_state_t *lcd, int x, int y);
 void lcd_set_x_mirror(lcd_state_t *lcd, bool enabled);
 void lcd_set_draw_bitimage_reverse(lcd_state_t *lcd, bool enabled);
 void lcd_load_charset(lcd_state_t *lcd, const uint8_t *data, int len);
+void lcd_set_bg_colors(lcd_state_t *lcd, uint16_t on_bg, uint16_t off_bg);
 
 /* SPI display rendering (direct hardware access) */
 void lcd_setup_display(lcd_state_t *lcd, void *spi_inst, uint8_t pin_cs,
                        uint8_t pin_dc, uint8_t scale, uint16_t x_offset,
                        uint16_t y_offset);
+void lcd_set_scale_ratio(lcd_state_t *lcd, uint8_t num, uint8_t den);
 void lcd_render_to_display(lcd_state_t *lcd);
 
 #endif /* LCD_CONTROLLER_H */
