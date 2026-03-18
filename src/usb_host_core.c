@@ -5,8 +5,22 @@
 #include "tusb.h"
 #include "host/hcd.h"
 #include "pico/stdlib.h"
-#include "hardware/clocks.h" // missing header for clk_sys
+#include "hardware/clocks.h"
 #include <string.h>
+
+/* External: C keyboard event processing from modhd61700.c */
+extern void c_kb_process_usb_key_extern(uint8_t scancode, bool pressed);
+static bool c_kb_routing_enabled = false;
+
+/* Background timer for tuh_task() */
+static struct repeating_timer usb_bg_timer;
+static bool usb_bg_timer_active = false;
+
+static bool usb_bg_timer_callback(struct repeating_timer *t) {
+  (void)t;
+  tuh_task();
+  return true; /* keep repeating */
+}
 
 // TinyUSB debug string helpers
 char const *const tu_str_speed[] = {"Full", "Low", "High", "Unknown"};
@@ -70,6 +84,11 @@ static uint8_t kbd_head = 0;
 static uint8_t kbd_tail = 0;
 
 static void kbd_push_event(uint8_t scancode, bool pressed) {
+  /* Route directly to C keyboard matrix if enabled */
+  if (c_kb_routing_enabled) {
+    c_kb_process_usb_key_extern(scancode, pressed);
+    return;
+  }
   uint8_t next_head = (kbd_head + 1) % KBD_BUF_SIZE;
   if (next_head != kbd_tail) {
     kbd_buf[kbd_head] = (pressed ? 0x80 : 0x00) | (scancode & 0x7F);
@@ -164,4 +183,21 @@ void usb_host_core_init(void) {
 
 void usb_host_core_task(void) {
   tuh_task();
+}
+
+void usb_host_core_set_c_kb_routing(bool enabled) {
+  c_kb_routing_enabled = enabled;
+}
+
+void usb_host_core_start_bg_timer(int interval_ms) {
+  if (usb_bg_timer_active) return;
+  if (interval_ms < 1) interval_ms = 8;
+  add_repeating_timer_ms(-interval_ms, usb_bg_timer_callback, NULL, &usb_bg_timer);
+  usb_bg_timer_active = true;
+}
+
+void usb_host_core_stop_bg_timer(void) {
+  if (!usb_bg_timer_active) return;
+  cancel_repeating_timer(&usb_bg_timer);
+  usb_bg_timer_active = false;
 }

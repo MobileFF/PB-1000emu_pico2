@@ -101,6 +101,10 @@ class LCDController:
             self._scale_num = 1
             self._scale_den = 1
         self.dirty = True
+        
+        # Notify listener (e.g. system) to redraw bezel
+        if hasattr(self, "on_scale_change") and self.on_scale_change:
+            self.on_scale_change(scale)
 
     def _load_charset(self):
         # Preferred path in this project layout.

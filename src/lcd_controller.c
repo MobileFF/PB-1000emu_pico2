@@ -409,9 +409,11 @@ void lcd_setup_display(lcd_state_t *lcd, void *spi_inst, uint8_t pin_cs,
   lcd->spi_inst = spi_inst;
   lcd->pin_cs = pin_cs;
   lcd->pin_dc = pin_dc;
-  lcd->scale = scale > 0 ? scale : 1;
-  lcd->scale_num = lcd->scale;
-  lcd->scale_den = 1;
+  if (scale > 0 && scale != lcd->scale) {
+    lcd->scale = scale;
+    lcd->scale_num = scale;
+    lcd->scale_den = 1;
+  }
   lcd->disp_x_offset = x_offset;
   lcd->disp_y_offset = y_offset;
   lcd->spi_initialized = true;
@@ -424,6 +426,16 @@ void lcd_set_scale_ratio(lcd_state_t *lcd, uint8_t num, uint8_t den) {
     den = 1;
   lcd->scale_num = num;
   lcd->scale_den = den;
+  /* Sync integer scale for fallbacks/logic that checks scale directly */
+  if (den == 1) {
+    lcd->scale = num;
+  } else {
+    /* For fractional scale, we keep the integer 'scale' as 1 or the closest
+     * lower int. */
+    lcd->scale = num / den;
+    if (lcd->scale == 0)
+      lcd->scale = 1;
+  }
   lcd->dirty = true;
   for (int i = 0; i < LCD_PAGES; i++) {
     lcd->dirty_pages[i] = true;
@@ -517,28 +529,41 @@ void lcd_render_to_display(lcd_state_t *lcd) {
   }
 
   if (frac_scale) {
-    ili_set_window(lcd, xo, yo, xo + out_w - 1, yo + out_h - 1);
-    gpio_put(lcd->pin_dc, 1);
-    gpio_put(lcd->pin_cs, 0);
-    for (int dy = 0; dy < out_h; dy++) {
-      uint16_t sy = (uint16_t)((dy * scale_den) / scale_num);
-      uint16_t page = (uint16_t)(sy >> 3);
-      uint8_t bit = (uint8_t)(sy & 0x07);
-      int idx = 0;
-      int base = page * LCD_WIDTH;
-      for (int dx = 0; dx < out_w; dx++) {
-        uint16_t sx = (uint16_t)((dx * scale_den) / scale_num);
-        uint8_t vbyte = lcd->vram[base + sx];
-        row_buf[idx++] = (vbyte & (1 << bit)) ? be_on : be_off;
+    /* Fixed-point scale for coordinates (16.16) */
+    uint32_t step_fp = (uint32_t)(((uint32_t)scale_den << 16) / scale_num);
+
+    for (int page = 0; page < LCD_PAGES; page++) {
+      if (!lcd->dirty_pages[page])
+        continue;
+
+      /* Calculate target Y window for this source page */
+      uint16_t dy_start = (uint16_t)((page * 8 * scale_num) / scale_den);
+      uint16_t dy_end = (uint16_t)(((page + 1) * 8 * scale_num) / scale_den) - 1;
+
+      ili_set_window(lcd, xo, yo + dy_start, xo + out_w - 1, yo + dy_end);
+      gpio_put(lcd->pin_dc, 1);
+      gpio_put(lcd->pin_cs, 0);
+
+      for (int dy = dy_start; dy <= dy_end; dy++) {
+        uint16_t sy = (uint16_t)((dy * scale_den) / scale_num);
+        uint8_t bit = (uint8_t)(sy & 0x07);
+        int base = (sy >> 3) * LCD_WIDTH;
+
+        uint32_t sx_fp = 0;
+        for (int dx = 0; dx < out_w; dx++) {
+          uint16_t sx = (uint16_t)(sx_fp >> 16);
+          if (sx >= LCD_WIDTH) sx = LCD_WIDTH - 1;
+          uint8_t vbyte = lcd->vram[base + sx];
+          row_buf[dx] = (vbyte & (1 << bit)) ? be_on : be_off;
+          sx_fp += step_fp;
+        }
+        spi_write_blocking((spi_inst_t *)lcd->spi_inst, (const uint8_t *)row_buf,
+                           (size_t)out_w * 2);
       }
-      spi_write_blocking((spi_inst_t *)lcd->spi_inst, (const uint8_t *)row_buf,
-                         (size_t)idx * 2);
+      gpio_put(lcd->pin_cs, 1);
+      lcd->dirty_pages[page] = false;
     }
-    gpio_put(lcd->pin_cs, 1);
     lcd->dirty = false;
-    for (int i = 0; i < LCD_PAGES; i++) {
-      lcd->dirty_pages[i] = false;
-    }
     return;
   }
 

@@ -9,23 +9,21 @@ import time
 import machine
 from ili9341 import ILI9341
 
-# print(f"DEBUG IMPORTS: cpu_core={cpu_core}, type={type(cpu_core)}")
-# if 'execute' in dir(cpu_core):
-#     print(f"DEBUG IMPORTS: cpu_core.execute={cpu_core.execute}")
-# else:
-#     print(f"DEBUG IMPORTS: cpu_core has no execute attribute!")
-#     print(f"DEBUG IMPORTS: dir(cpu_core)={dir(cpu_core)}")
 try:
     from lcd_controller_c import LCDControllerC as LCDController
     _LCD_BACKEND = "C"
-except ImportError as e:
+except ImportError:
     from lcd_controller import LCDController
     _LCD_BACKEND = "Python"
-#     import sys
-#     sys.print_exception(e)
-#from lcd_controller import LCDController
-print(f"LCD Controller is {_LCD_BACKEND}")
+
 from keyboard import KeyboardMatrix
+
+# PIO UART for RS-232C passthrough (optional)
+try:
+    from pio_uart import PioUart
+    _HAS_PIO_UART = True
+except ImportError:
+    _HAS_PIO_UART = False
 
 SPI_ID = 1
 SCK_PIN = 10
@@ -53,7 +51,6 @@ def init_display():
 
     display = ILI9341(spi, cs, dc, rst, width=320, height=240)
     display.fill_rect(0, 0, 320, 240, 0x0000)
-    # Initialize Touch
     touch = None
     try:
         from xpt2046 import XPT2046
@@ -63,11 +60,25 @@ def init_display():
 
     return display, touch
 
-
-def draw_bezel(display):
-    display.fill_rect(12, 36, 296, 72, 0x4228)
-    display.fill_rect(14, 38, 292, 68, 0x8410)
-    display.fill_rect(16, 40, 288, 64, 0xB5E6)
+def draw_bezel(display, scale=1.0, x=16, y=40):
+    """Draws the PB-1000 LCD bezel scaled to fit the display."""
+    # Inner LCD area size
+    lw = int(192 * scale)
+    lh = int(32 * scale)
+    
+    # Margin and boarders (scaled or fixed?)
+    # Original: (12, 36, 296, 72, 0x4228) -> inner (16,40, 288,64)
+    # 288 width was exactly 192 * 1.5.
+    # Let's make it more general.
+    
+    padding = 4
+    
+    # Outer bezel (dark grey)
+    display.fill_rect(x - padding, y - padding, lw + padding*2, lh + padding*2, 0x4228)
+    # Middle bezel (bezel edge)
+    display.fill_rect(x - padding//2, y - padding//2, lw + padding, lh + padding, 0x8410)
+    # Inner background (olive-green)
+    display.fill_rect(x, y, lw, lh, 0xB5E6)
 
 class RAMView:
     """A writable wrapper for the C-side RAM buffer."""
@@ -82,33 +93,31 @@ class RAMView:
     def __len__(self):
         return self._size
     def __setitem__(self, i, v):
-        def _write_one(idx, val):
-            b = val & 0xFF
-            # Prefer direct memoryview write for C-managed buffers.
+        if isinstance(i, slice):
+            # Try fast slice assignment first
             try:
-                self._view[idx] = b
+                self._view[i] = v
+                return
+            except Exception:
+                 pass
+            
+            # Slow fallback: element-wise with write_mem
+            r = range(*i.indices(self._size))
+            for idx, val in zip(r, v):
+                self._core.write_mem(self._start + idx, val & 0xFF, self._segment)
+        else:
+            b = v & 0xFF
+            try:
+                self._view[i] = b
                 return
             except Exception:
                 pass
-            # Fallback path (older ports / non-writable views).
-            self._core.write_mem(self._start + idx, b, self._segment)
-
-        if isinstance(i, slice):
-            r = range(*i.indices(self._size))
-            for idx, val in zip(r, v):
-                _write_one(idx, val)
-        else:
-            _write_one(i, v)
+            self._core.write_mem(self._start + i, b, self._segment)
+            
     def __repr__(self):
         return f"<RAMView {self._size} bytes at 0x{self._start:04X}>"
 
 class PB1000System:
-    # ... (constants unchanged) ...
-    # Memory map (Linear Byte Addresses)
-    # Internal ROM: 0x0000 - 0x1FFF (rom0.bin)
-    # RAM:          0x6000 - 0x7FFF (8KB, PB-1000 standard)
-    # System ROM:   0x8000 - 0xFFFF (rom1.bin, 32KB)
-    
     INT_ROM_LIMIT    = 0x2000   
     RAM_START        = 0x6000
     RAM_SIZE         = 0x2000   # 8KB
@@ -138,7 +147,7 @@ class PB1000System:
         flag = bool(debug)
         return {"sys": flag, "lcd": flag, "kb": flag}
 
-    def __init__(self, display=None,debug=False, restore_registers=True):
+    def __init__(self, display=None, debug=False, restore_registers=True):
         direct_mem_override = None
         direct_lcd_override = None
         if isinstance(debug, dict):
@@ -155,29 +164,22 @@ class PB1000System:
         print(f"Expanded RAM detection: {'FOUND' if self.has_exp else 'NOT FOUND'} ({self._exp_ram_path})")
         if hasattr(cpu_core, "set_has_exp_ram"):
             cpu_core.set_has_exp_ram(self.has_exp)
-            print(f"HD61700 bank1 RAM: {'ENABLED' if self.has_exp else 'DISABLED'}")
 
-        # Memory initialization
         if hasattr(cpu_core, "get_ram_view"):
-            # Use C-side RAM buffer via a writable proxy
             raw_view = cpu_core.get_ram_view()
             self.ram = RAMView(cpu_core, memoryview(raw_view), self.RAM_SIZE, self.RAM_START)
             self._ram_is_c_managed = True
             
             if self.has_exp and hasattr(cpu_core, "get_exp_ram_view"):
                 exp_raw_view = cpu_core.get_exp_ram_view()
-                # Wrap in RAMView with segment=1 so writes go to C bank 1
                 self.exp_ram = RAMView(cpu_core, memoryview(exp_raw_view), self.EXP_RAM_SIZE, self.SYS_ROM_START, segment=1)
             else:
                 self.exp_ram = bytearray(self.EXP_RAM_SIZE)
-                
-            print(f"Using C-side RAM proxy (writable). Expansion RAM present: {self.has_exp}")
         else:
             self.ram = bytearray(self.RAM_SIZE)
             self.exp_ram = bytearray(self.EXP_RAM_SIZE)
-            print(f"Using Python-side RAM buffer. Expansion RAM present: {self.has_exp}")
             
-        self.rom0 = bytearray(0)  # Mirror for Python-side access if needed
+        self.rom0 = bytearray(0)
         self.rom1 = bytearray(0)
         self.rom_bank = 0
         self._key_trace_last = {}
@@ -190,31 +192,45 @@ class PB1000System:
         self._key_pulse_release_pending = False
         self._key_post_release_pulses_remaining = 0
         self._key_post_release_pulses_max = 16
-        # True: assert KEY_INT only when IA/KY scan condition is met.
-        # False: legacy behavior, assert KEY_INT immediately on key press.
         self.key_interrupt_via_scan = True
-        # Validation mode: keep KEY input edge-driven (one pulse on press).
         self.key_reassert_enabled = False
-        # One-shot dump when CHATA remains 0x00 while a key is held.
         self._chata_zero_since_ms = None
         self._chata_stuck_logged = False
-        # Temporary watchdog: dump state once when key input appears unresponsive.
         self._key_noresp_since_ms = None
         self._key_noresp_logged = False
         self._key_noresp_threshold_ms = 1200
-        # One-shot probe: first LCD VRAM write after arming (e.g. EXE press).
         self._display_probe_active = False
         self._display_probe_label = ""
         self._display_probe_hit = False
 
-        # LCD controller
         self.lcd = LCDController(display, debug=self.debug_cfg["lcd"])
-
-        # Keyboard
+        self._save_requested = False
+        self.lcd.on_scale_change = self._on_lcd_scale_change
         self.keyboard = KeyboardMatrix(debug=self.debug_cfg["kb"])
-
-        # Port state
+        self._disp_x = 16
+        self._disp_y = 40
         self.port_data = 0
+        self.console_uart = None  # Set externally from main.py
+        self.status_msg = ""
+        self.status_expiry_ms = 0
+        self._status_rendered_msg = None
+        self.pio_uart = None      # Set externally from main.py
+
+        # Raw UART Pins for bit-level passthrough
+        self._tx_pin = machine.Pin(6, machine.Pin.OUT, value=1)
+        self._rx_pin = machine.Pin(13, machine.Pin.IN, machine.Pin.PULL_UP)
+
+        # PIO UART for RS-232C (Reserved for high-level Python access)
+        # We now use this for MMIO 0x0C00-0x0C03 as well.
+        try:
+            # Note: main.py will replace this with a real PioUart instance if needed
+            print("PIO UART support enabled in system.")
+        except Exception as e:
+            print(f"PIO UART setup warning: {e}")
+
+        # LCD write state tracking for console mirror
+        self._lcd_cmd_state = 0     # 0=idle, 3=DRAW_CHAR pending
+        self._lcd_char_bytes = []   # Accumulate bytes for DRAW_CHAR
 
         # Initialize CPU
         cpu_core.reset(self.debug_cfg["sys"])
@@ -222,115 +238,78 @@ class PB1000System:
             cpu_core.set_key_debug(self.debug_cfg["sys"] and self.debug_cfg["kb"])
         if hasattr(cpu_core, "set_lcd_debug"):
             cpu_core.set_lcd_debug(self.debug_cfg["sys"] and self.debug_cfg["lcd"])
-        if restore_registers:
-            self._restore_registers_from_dump()
-        self.load_ram()
-        print("register and ram loaded")
-        # Keep references to callbacks to prevent GC!
-        # The C module stores these in non-root pointers, so Python must keep them alive.
+              
         self._cb_mem_read = self._mem_read
         self._cb_mem_write = self._mem_write
         self._cb_lcd_read = self.lcd.lcd_read
-        self._cb_lcd_write = self.lcd.lcd_write
-        self._cb_lcd_ctrl = self.lcd.lcd_ctrl
+        self._cb_lcd_write = self._intercept_lcd_write
+        self._cb_lcd_ctrl = self._intercept_lcd_ctrl
         self._cb_kb_read = self.keyboard.kb_read
         self._cb_kb_write = self.keyboard.kb_write
         self._cb_port_read = self._port_read
         self._cb_port_write = self._port_write
-        print("callbacks set to instance fields")
 
-        # Register all callbacks
         cpu_core.set_mem_callbacks(self._cb_mem_read, self._cb_mem_write)
-        print("set_mem_callbacks")
-        cpu_core.set_lcd_callbacks(
-            self._cb_lcd_read,
-            self._cb_lcd_write,
-            self._cb_lcd_ctrl
-        )
-        print("set_lcd_callbacks")
-        cpu_core.set_kb_callbacks(
-            self._cb_kb_read,
-            self._cb_kb_write
-        )
-        print("set_kb_callbacks")
+        cpu_core.set_lcd_callbacks(self._cb_lcd_read, self._cb_lcd_write, self._cb_lcd_ctrl)
+        cpu_core.set_kb_callbacks(self._cb_kb_read, self._cb_kb_write)
         cpu_core.set_port_callbacks(self._cb_port_read, self._cb_port_write)
-        print("set_port_callbacks")
-        print("all callbacks set")
         
-        # Enable high-performance C-to-C direct paths if supported
         if hasattr(cpu_core, "use_c_memory"):
             direct_mem = (not self.debug_cfg["sys"]) if direct_mem_override is None else bool(direct_mem_override)
             cpu_core.use_c_memory(direct_mem)
-            if direct_mem:
-                print("C-side Memory Direct Access: ENABLED")
-            else:
-                print("C-side Memory Direct Access: DISABLED")
         if hasattr(cpu_core, "use_c_lcd"):
             direct_lcd = (not self.debug_cfg["sys"]) if direct_lcd_override is None else bool(direct_lcd_override)
             cpu_core.use_c_lcd(direct_lcd)
-            if direct_lcd:
-                print("C-side LCD Direct Access: ENABLED")
-            else:
-                print("C-side LCD Direct Access: DISABLED")
-
+            
+        if restore_registers:
+            self.load_state()
+            
     def load_rom(self, path, slot=0, keep_copy=False):
-        """Load ROM image into slot 0 (Internal) or 1 (System).
-
-        ``keep_copy`` defaults to ``False`` so that the Python object holding the
-        bytes is discarded immediately.  This gives the *smallest* heap
-        footprint on devices such as the Pico.  If your code needs to examine
-        the ROM contents directly (e.g. accessing ``system.rom0`` or invoking
-        ``_mem_read_impl``), pass ``keep_copy=True`` and a mirror will be
-        retained.
-        """
         try:
             with open(path, 'rb') as f:
                 data = f.read()
                 if slot == 0:
-                    # optionally keep a Python copy for _mem_read_impl
                     self.rom0 = data if keep_copy else None
                     if hasattr(cpu_core, "load_rom"):
                         cpu_core.load_rom(0, data)
-                    print(f"Internal ROM loaded: {len(data)} bytes")
                 else:
                     self.rom1 = data if keep_copy else None
                     if hasattr(cpu_core, "load_rom"):
                         cpu_core.load_rom(1, data)
-                    print(f"System ROM loaded: {len(data)} bytes")
         except OSError as e:
             print(f"ROM load error ({path}): {e}")
 
     def _mem_read(self, segment, offset):
-        val = self._mem_read_impl(segment, offset)
-        if self.debug and offset >= 0x1FFD0:
-            print(f"READ {hex(offset)} -> {hex(val)}")
-        return val
+        return self._mem_read_impl(segment, offset)
 
     def _mem_read_impl(self, segment, offset):
-        """Memory read callback for CPU (Bank-based Mapping)."""
-        # Internal memory area (0x0000-0x7FFF) - Fixed to Internal ROM/RAM
         if offset < 0x8000:
-            # 0x0000-0x1FFF: Internal ROM (rom0.bin, 8KB)
             if offset < 0x2000:
-                # internal ROM read; prefer Python copy if present, otherwise
-                # fall back to the C core (read_mem is always defined when
-                # the ROM has been loaded in C).
                 if self.rom0 is not None:
+                    if offset == 0x0C00:
+                        # Status register: Bit 0=RX Ready, Bit 1=TX Ready
+                        status = 0x02 # TX Ready
+                        if self.pio_uart and self.pio_uart.any():
+                            status |= 0x01 # RX Ready
+                        return status
+                    if offset == 0x0C01:
+                        # RX Data Register
+                        if self.pio_uart:
+                            data = self.pio_uart.read(1)
+                            return data[0] if data else 0
+                        return 0
                     if offset < len(self.rom0):
                         return self.rom0[offset]
                 elif hasattr(cpu_core, "read_mem"):
                     return cpu_core.read_mem(offset, segment)
-            # 0x6000-0x7FFF: RAM (8KB, PB-1000 standard)
             elif offset >= self.RAM_START:
                 return self.ram[(offset - self.RAM_START) % len(self.ram)]
             else:
                 return 0xFF
 
-        # Banked memory area (0x8000-0xFFFF) - Segmented by UA
         bank = segment & 0x03
         if offset >= 0x8000:
             if bank == 0:
-                # System ROM
                 rom_off = offset - 0x8000
                 if self.rom1 is not None:
                     if rom_off < len(self.rom1):
@@ -338,69 +317,35 @@ class PB1000System:
                 elif hasattr(cpu_core, "read_mem"):
                     return cpu_core.read_mem(offset, segment)
             elif bank == 1 and self.has_exp:
-                # Expanded RAM
                 exp_off = offset - 0x8000
                 if exp_off < len(self.exp_ram):
                     return self.exp_ram[exp_off]
-
         return 0xFF
 
     def _mem_write(self, segment, offset, data):
-        """Memory write callback for CPU.
-
-        Watch for writes to the two system‑variable addresses used for
-        the FOR stack.  When a write to SBOT (0x6933) or FORSK (0x6935)
-        occurs we print the current PC so that the emulator log can be
-        correlated with the ROM code that is manipulating the heap.
-        """
-        # SBOT/FORSK addresses (absolute RAM locations)
-        if 0x692F <= offset <= 0x6941:
-            pc = cpu_core.get_pc() if hasattr(cpu_core, "get_pc") else 0
-            print(f"[HEAPRANGE] write off={offset:04X} at PC={pc:04X} data={data:02X}")
-#         if offset in (0x6933, 0x6935):
-#             pc = cpu_core.get_pc() if hasattr(cpu_core, "get_pc") else 0
-#             name = "SBOT" if offset == 0x6933 else "FORSK"
-#             print(f"[HEAP] write to {name} at PC={pc:04X} val={data:02X}")
-        if self.debug: print(f"_mem_write: seg={segment} off={hex(offset)} data={hex(data)}")
         if self.RAM_START <= offset < self.SYS_ROM_START:
-            # 8KB standard RAM
             ram_index = (offset - self.RAM_START) % len(self.ram)
             if self._ram_is_c_managed and hasattr(cpu_core, "write_mem"):
                 cpu_core.write_mem(offset & 0xFFFF, data & 0xFF, segment)
             else:
                 self.ram[ram_index] = data
-            if self._display_probe_active and (not self._display_probe_hit):
-                if self._is_lcd_vram_addr(offset):
-                    pc = cpu_core.get_pc() if hasattr(cpu_core, "get_pc") else 0
-                    print(
-                        f"[PROBE] {self._display_probe_label}: first LCD VRAM write "
-                        f"PC={pc:04X} ADDR={offset:04X} DATA={data:02X}"
-                    )
-                    self._display_probe_hit = True
-                    self._display_probe_active = False
-            if self.debug:
-                # Trace key-state bytes on every write (including same-value writes).
-                if offset in self._KEY_TRACE_ADDRS:
-                    self._key_trace_last[offset] = data
-                    name = self._KEY_TRACE_ADDRS.get(offset, "KEY")
-                    print(f"KEY RAM WRITE: {name}[{offset:04X}] <= {data:02X}")
-                elif self._KEY_BUF_TRACE_START <= offset <= self._KEY_BUF_TRACE_END:
-                    print(f"KEY BUF WRITE: [{offset:04X}] <= {data:02X}")
-                    
+        elif offset == 0x0C03:
+            # TX Data Register: Output character to pio_uart and console
+            if self.pio_uart:
+                self.pio_uart.write(data)
+            
+            char = chr(data & 0x7F)
+            if self.console_uart:
+                self.console_uart.write(char)
+            else:
+                print(char, end='')
         elif offset >= 0x8000 and (segment & 0x03) == 1 and self.has_exp:
-            # Bank 1 32KB Expanded RAM
             exp_off = offset - 0x8000
             if exp_off < len(self.exp_ram):
-                if self.debug: print(f"  -> Writing to Expand RAM (C-managed: {self._ram_is_c_managed})")
-                # Always sync C-side via API or proxy
                 if self._ram_is_c_managed and hasattr(cpu_core, "write_mem"):
-                    # c_mem_direct_write knows about expanded RAM if segment is 1
                     cpu_core.write_mem(offset & 0xFFFF, data & 0xFF, segment)
                 else:
                     self.exp_ram[exp_off] = data
-
-        # Port-mapped RAM or expanded RAM might exist in other segments
-        # but for initial boot we stick to the primary 0x2000-0x7FFF range.
 
     def _is_lcd_vram_addr(self, offset):
         return (0x6100 <= offset <= 0x61FF) or (0x6201 <= offset <= 0x6850)
@@ -410,57 +355,81 @@ class PB1000System:
         self._display_probe_hit = False
         self._display_probe_label = label
 
+    def _intercept_lcd_ctrl(self, data):
+        self.lcd.lcd_ctrl(data)
+        # Tracking for console mirror
+        self._lcd_op_command = (data & 0x01) != 0
+        self._lcd_cmd_buf = []
+
+    def _intercept_lcd_write(self, data):
+        self.lcd.lcd_write(data)
+        
+        if self.console_uart is None:
+            return
+
+        if self._lcd_op_command:
+            # Command mode (OP=1)
+            self._lcd_cmd_buf.append(data)
+            cmd_id = self._lcd_cmd_buf[0] & 0x0F
+            
+            # Command lengths: 0x03 (DRAW_CHAR) is 3 bytes
+            expected = 3 if cmd_id == 0x03 else 1
+            if len(self._lcd_cmd_buf) >= expected:
+                self._lcd_current_mode = cmd_id
+                self._lcd_cmd_buf = []
+        else:
+            # Data mode (OP=0)
+            if getattr(self, "_lcd_current_mode", 0) == 0x03:
+                # DRAW_CHAR mode - data is character code
+                decoded = self._decode_pb1000_char(data)
+                if decoded:
+                    self.console_uart.write(decoded)
+
+    def _decode_pb1000_char(self, data):
+        """Decode PB-1000 character code to ASCII for console mirror."""
+        # Nibble swap as used in HD61700 / LCD protocol
+        code = ((data & 0x0F) << 4) | (data >> 4)
+        
+        # Standard ASCII range
+        if 0x20 <= code <= 0x7E:
+            return chr(code)
+        if code == 0x0D or code == 0x0A:
+            return "\r\n"
+        if code == 0xFF: # PB-1000 often uses 0xFF as spacer or blank?
+            return None
+        return None
+
     def display_write_probe_hit(self):
         return self._display_probe_hit
 
     def _port_read(self):
-        """Port read callback."""
+        # Bit 3 is RXD for RS-232C bit-banging
+        rx_bit = self._rx_pin.value()
+        # Mirror RX bit into port_data bit 3
+        self.port_data = (self.port_data & ~0x08) | (rx_bit << 3)
         return self.port_data
 
     def _port_write(self, data):
-        """Port write callback."""
-        # print(f"PORT Write: Data={hex(data)}")
         self.port_data = data
+        # Bit 2 is TXD for RS-232C bit-banging
+        # Output the bit directly to the physical pin
+        self._tx_pin.value((data >> 2) & 1)
 
     def _register_dump_path(self):
-        if '__file__' in globals():
-            src = __file__
-        elif hasattr(os, "getcwd"):
-            src = os.getcwd()
-        else:
-            src = "/"
-
-        src = src.replace("\\", "/")
-        if "/" in src:
-            base = src.rsplit("/", 1)[0] or "/"
-        else:
-            base = "."
-
-        if base == "/":
-            return "/roms/register.bin"
-        if "/" in base:
-            parent = base.rsplit("/", 1)[0] or "/"
-        else:
-            parent = "."
-        return f"{parent}/roms/register.bin"
+        return "/roms/register.bin"
 
     def _restore_registers_from_dump(self):
-        print("_restore_registers_from_dump")
         path = self._register_dump_path()
         try:
             with open(path, 'rb') as f:
                 data = f.read(36)
-        except OSError as exc:
-            print(f"register.bin not loaded: {exc}")
-            return
-        if len(data) < 36:
-            print(f"register.bin too short ({len(data)} bytes): {path}")
-            return
-        cpu_core.set_registers(data[:36])
-        print(f"registers restored from {path}")
+            if len(data) >= 36:
+                cpu_core.set_registers(data[:36])
+                print(f"registers restored from {path}")
+        except OSError:
+            pass
 
     def _file_exists(self, path):
-        """Helper to check if a file exists (MicroPython compatible)."""
         try:
             os.stat(path)
             return True
@@ -468,32 +437,23 @@ class PB1000System:
             return False
 
     def _ram_path(self, slot=0):
-        # reuse logic from _register_dump_path for consistency
-        path = self._register_dump_path()
-        base = path.rsplit("/", 1)[0]
-        return f"{base}/ram{slot}.bin"
+        return f"/roms/ram{slot}.bin"
 
     def load_ram(self):
-        """Load standard and expanded RAM contents from file."""
-        # Load standard RAM (8KB)
         path0 = self._ram_path(0)
         try:
-            val = None
             with open(path0, 'rb') as f:
                 val = f.read(self.RAM_SIZE)
             if val:
-                # Use a loop to avoid memoryview slice assignment issues in some MP versions
                 for i in range(len(val)):
                     self.ram[i] = val[i]
                 print(f"Standard RAM restored from {path0}")
         except OSError:
-            print(f"Standard RAM file {path0} not found, starting clean.")
+            pass
 
-        # Load expanded RAM (32KB)
         if self.has_exp:
-            path1 = self._exp_ram_path
+            path1 = self._ram_path(1)
             try:
-                val = None
                 with open(path1, 'rb') as f:
                     val = f.read(self.EXP_RAM_SIZE)
                 if val:
@@ -501,43 +461,147 @@ class PB1000System:
                         self.exp_ram[i] = val[i]
                     print(f"Expanded RAM restored from {path1}")
             except OSError:
-                print(f"Expanded RAM file {path1} not found.")
+                pass
 
-    def save_ram(self):
-        """Save standard and expanded RAM contents to file."""
-        # Save standard RAM
-        path0 = self._ram_path(0)
+    def save_state(self, path=None):
+        import json
+        import gc
+        gc.collect()
+        if path is None:
+            path0 = "/roms/ram0.bin"
+            path1 = "/roms/ram1.bin"
+            reg_path = "/roms/regs.json"
+        else:
+            path0 = f"{path}/ram0.bin"
+            path1 = f"{path}/ram1.bin"
+            reg_path = f"{path}/regs.json"
+
         try:
-            with open(path0, 'wb') as f:
-                # RAMView doesn't support buffer protocol directly, use the internal view
+            with open(path0, "wb") as f:
                 buf = self.ram._view if isinstance(self.ram, RAMView) else self.ram
                 f.write(buf)
-            print(f"Standard RAM saved to {path0}")
-        except OSError as e:
-            print(f"Failed to save standard RAM: {e}")
-
-        # Save expanded RAM
-        if self.has_exp:
-            path1 = self._exp_ram_path
-            try:
-                with open(path1, 'wb') as f:
+            if self.has_exp:
+                with open(path1, "wb") as f:
                     buf = self.exp_ram._view if isinstance(self.exp_ram, RAMView) else self.exp_ram
                     f.write(buf)
-                print(f"Expanded RAM saved to {path1}")
-            except OSError as e:
-                print(f"Failed to save expanded RAM: {e}")
+        except Exception as e:
+            print(f"Error saving RAM: {e}")
+
+        try:
+            regs = {
+                "pc": int(cpu_core.get_pc()),
+                "flags": int(cpu_core.get_flags()),
+                "ia": int(cpu_core.get_reg8(4)),
+                "ib": int(cpu_core.get_reg8(2)),
+                "ie": int(cpu_core.get_reg8(5)),
+                "ua": int(cpu_core.get_reg8(3)),
+                "regmain": [int(cpu_core.get_reg(i)) for i in range(32)],
+                "regsir": [int(cpu_core.get_sreg(i)) for i in range(3)],
+                "reg16": [int(cpu_core.get_reg16(i)) for i in range(6)],
+            }
+            with open(reg_path, "w") as f:
+                json.dump(regs, f)
+            print(f"State saved to {reg_path}")
+        except Exception as e:
+            print(f"Error saving registers: {e}")
+
+    def save_ram(self):
+        """Compatibility alias for save_state."""
+        self.save_state()
+
+    def load_state(self, path=None):
+        import json
+        if path is None:
+            path0 = "/roms/ram0.bin"
+            path1 = "/roms/ram1.bin"
+            reg_path = "/roms/regs.json"
+            if not self._file_exists(path0):
+                path0 = "/ram0.bin"
+                path1 = "/ram1.bin"
+                reg_path = "/regs.json"
+                if not self._file_exists(reg_path):
+                    reg_path = "/roms/register.bin"
+        else:
+            path0 = f"{path}/ram0.bin"
+            path1 = f"{path}/ram1.bin"
+            reg_path = f"{path}/regs.json"
+
+        print(f"Loading state: RAM={path0}, EXP={path1}, REGS={reg_path}")
+        import gc
+        gc.collect()
+
+        def _load_to_ram(file_path, ram_target, slot):
+            if not self._file_exists(file_path):
+                 print(f"RAM file not found: {file_path}")
+                 return False
+            try:
+                with open(file_path, "rb") as f:
+                    if hasattr(cpu_core, "load_ram"):
+                        data = f.read()
+                        cpu_core.load_ram(slot, data)
+                        print(f"RAM slot {slot} restored via C-API from {file_path} ({len(data)} bytes)")
+                    else:
+                        # Fallback for old/generic core
+                        offset = 0
+                        total = 0
+                        while True:
+                            chunk = f.read(1024)
+                            if not chunk: break
+                            ram_target[offset:offset+len(chunk)] = chunk
+                            offset += len(chunk)
+                            total += len(chunk)
+                        print(f"RAM slot {slot} restored via Python loop from {file_path} ({total} bytes)")
+                return True
+            except Exception as e:
+                print(f"Error loading {file_path}: {e}")
+                return False
+
+        _load_to_ram(path0, self.ram, 0)
+        if self.has_exp:
+            _load_to_ram(path1, self.exp_ram, 1)
+
+        try:
+            if self._file_exists(reg_path):
+                if reg_path.endswith(".json"):
+                    with open(reg_path, "r") as f:
+                        regs = json.load(f)
+                    cpu_core.set_pc(0x0000) # User requested: resetting PC to 0x0000 after RAM load
+                    if hasattr(cpu_core, "set_flags"):
+                        cpu_core.set_flags(int(regs["flags"]))
+                    cpu_core.set_reg8(4, int(regs["ia"]))
+                    cpu_core.set_reg8(2, int(regs["ib"]))
+                    cpu_core.set_reg8(5, int(regs["IE"])) if "IE" in regs else cpu_core.set_reg8(5, int(regs.get("ie", 0)))
+                    cpu_core.set_reg8(3, int(regs["ua"]))
+                    for i, v in enumerate(regs["regmain"]):
+                        cpu_core.set_reg(i, int(v))
+                    for i, v in enumerate(regs["regsir"]):
+                        cpu_core.set_sreg(i, int(v))
+                    for i, v in enumerate(regs["reg16"]):
+                        cpu_core.set_reg16(i, int(v))
+                    print(f"Registers restored (RAM/Regs loaded, PC set to 0x0000 per request)")
+                else:
+                    self._restore_registers_from_dump()
+            else:
+                print(f"Register file not found: {reg_path}")
+        except Exception as e:
+            print(f"Error loading registers: {e}")
 
     def step(self, cycles=100, stop_pc=-1):
-        """Execute CPU for given number of cycles, or until stop_pc is reached."""
-        # Return consumed cycles
         return cpu_core.execute(cycles, stop_pc)
 
+    def reset_emulator(self):
+        """Perform a hardware-like reset (PC=0x0000)."""
+        print("Emulator Reset triggered (PC=0x0000)")
+        cpu_core.reset(self.debug_cfg["sys"])
+        self.set_status("SYSTEM RESET", 1500)
+        # Re-initialize basic state if needed but usually reset() is enough
+        # We might want to keep RAM as is (like a warm reset) or clear it?
+        # The user said "force PC to 0x0000", which is what reset() does.
+
     def tick_timer(self):
-        """Call once per second for RTC timer."""
         cpu_core.timer_tick()
 
     def _key_interrupt_requested_by_scan(self):
-        """Replicate PB-1000 KeyInterrupt gating with IA/KY conditions."""
         if not hasattr(cpu_core, "get_reg8"):
             return False
         ia = cpu_core.get_reg8(4) & 0xFF
@@ -547,25 +611,16 @@ class PB1000System:
         ky = self.keyboard.kb_read() & 0xF0FF
         if mask != 0 and (ky & mask) != 0:
             return True
-        # Fallback: some ROM phases/keyboard lines may not match the current
-        # mask table, but a non-zero KY still means a key is physically active.
-        # Allow KEY interrupt so scan can advance and KEYCM/KEYIN can latch.
         return ky != 0
 
     def _key_scan_pending(self):
-        """Return True while key-scan state has not fully returned to idle."""
         base = 0x68D2 - self.RAM_START
-        chata = self.ram[base + 1]  # 68D3
-        keycm = self.ram[base + 2]  # 68D4
-        # Idle is CHATA=20 and KEYCM=00 in current ROM flow.
+        chata = self.ram[base + 1]
+        keycm = self.ram[base + 2]
         return (chata != 0x20) or (keycm != 0x00)
 
     def service_input_lines(self):
-        """Refresh level-sensitive input lines before CPU execution."""
         if self.key_interrupt_via_scan:
-            # Emit KEY interrupt as a short pulse (1 call high, next call low)
-            # instead of holding high. This matches ROM-side edge-like handling
-            # and avoids getting stuck in debounce paths.
             if self._key_pulse_release_pending and self._key_line_state:
                 cpu_core.set_input(cpu_core.KEY_INT, 0)
                 self._key_line_state = 0
@@ -577,8 +632,6 @@ class PB1000System:
             if self.is_key_input_enabled():
                 ia = cpu_core.get_reg8(4) if hasattr(cpu_core, "get_reg8") else 0
                 now = time.ticks_ms()
-                # PB-1000 behavior: when IA bit7=0, KEY/Pulse interrupt is generated periodically.
-                # This periodic pulse drives keyboard scan service even before a key-specific gate is active.
                 if (ia & 0x80) == 0:
                     if time.ticks_diff(now, self._key_next_pulse_ms) >= 0:
                         pulse = 1
@@ -592,221 +645,128 @@ class PB1000System:
                         pulse = 1
                         self._key_post_release_pulses_remaining -= 1
                         self._key_next_pulse_ms = time.ticks_add(now, self._key_pulse_interval_ms)
-            else:
-                ia = cpu_core.get_reg8(4) if hasattr(cpu_core, "get_reg8") else 0
-                now = time.ticks_ms()
+            
             if pulse and not self._key_line_state:
                 cpu_core.set_input(cpu_core.KEY_INT, 1)
                 self._key_line_state = 1
                 self._key_pulse_release_pending = True
-                self._key_noresp_since_ms = None
-                self._key_noresp_logged = False
-            elif key_pressed and not self._key_line_state:
-                # If a key is held but no KEY pulse is emitted for a while,
-                # dump diagnostics once to capture the stuck state.
-                if self._key_noresp_since_ms is None:
-                    self._key_noresp_since_ms = now
-                elif (not self._key_noresp_logged and
-                      time.ticks_diff(now, self._key_noresp_since_ms) >= self._key_noresp_threshold_ms):
-                    self._dump_key_unresponsive_state("scan_mode_no_pulse", ia=ia, pulse=pulse)
-                    self._key_noresp_logged = True
+            
             if (not key_pressed) and (self._key_post_release_pulses_remaining == 0):
                 if self._key_line_state:
                     cpu_core.set_input(cpu_core.KEY_INT, 0)
                 self._key_line_state = 0
                 self._key_pulse_release_pending = False
-                self._chata_zero_since_ms = None
-                self._chata_stuck_logged = False
-                self._key_noresp_since_ms = None
-                self._key_noresp_logged = False
             return
 
-        if not self.keyboard.has_key_pressed():
-            self._chata_zero_since_ms = None
-            self._chata_stuck_logged = False
-            self._key_noresp_since_ms = None
-            self._key_noresp_logged = False
+    def service_pio_uart(self):
+        """Service PIO UART TX/RX buffers.
+        Only needed if pio_uart is active.
+        """
+        if self.pio_uart is not None and hasattr(self.pio_uart, "_sm_tx"):
+             # main.py already handles polling for MMIO, but we keep this for consistency
+             self.pio_uart.service_tx()
+             self.pio_uart.service_rx()
+
+    def update_display(self, x_offset=None, y_offset=None):
+        if x_offset is not None: self._disp_x = x_offset
+        if y_offset is not None: self._disp_y = y_offset
+        self.lcd.render_to_display(self._disp_x, self._disp_y)
+        self._render_status_bar()
+
+    def set_status(self, msg, duration_ms=2000):
+        self.status_msg = msg
+        self.status_expiry_ms = time.ticks_add(time.ticks_ms(), duration_ms)
+
+    def _render_status_bar(self):
+        if not hasattr(self.lcd, 'display') or self.lcd.display is None:
             return
+        
         now = time.ticks_ms()
-        chata = self.ram[0x68D3 - self.RAM_START]
-        # One-shot diagnostic dump when CHATA appears stuck at 0x00.
-        if chata == 0x00:
-            if self._chata_zero_since_ms is None:
-                self._chata_zero_since_ms = now
-            elif (not self._chata_stuck_logged and
-                  time.ticks_diff(now, self._chata_zero_since_ms) >= 500):
-                ia = cpu_core.get_reg8(4) if hasattr(cpu_core, "get_reg8") else 0
-                ib = cpu_core.get_reg8(2) if hasattr(cpu_core, "get_reg8") else 0
-                ie = cpu_core.get_reg8(5) if hasattr(cpu_core, "get_reg8") else 0
-                keyin = self.ram[0x68D5 - self.RAM_START]
-                kysta = self.ram[0x68D2 - self.RAM_START]
-                print(
-                    "KEY STUCK CHATA=00: "
-                    f"IA={ia:02X} IB={ib:02X} IE={ie:02X} "
-                    f"KYSTA={kysta:02X} KEYIN={keyin:02X}"
-                )
-                self._chata_stuck_logged = True
-        else:
-            self._chata_zero_since_ms = None
-            self._chata_stuck_logged = False
+        # Handle expiry
+        active_msg = self.status_msg
+        if active_msg and time.ticks_diff(self.status_expiry_ms, now) < 0:
+            active_msg = ""
+            self.status_msg = ""
 
-        if not self.key_reassert_enabled:
+        # Only redraw if the message has changed
+        if active_msg == self._status_rendered_msg:
             return
-        # Respect current IE mask state.
-        if hasattr(self, "is_key_input_enabled") and not self.is_key_input_enabled():
-            return
-        # Wait until prior KEY request has been consumed by OS/CPU.
-        if hasattr(cpu_core, "get_reg8") and (cpu_core.get_reg8(2) & 0x08):
-            return
-        if time.ticks_diff(now, self._key_next_pulse_ms) < 0:
-            return
-
-        # While CHATA is in key-debounce countdown (1..7), feed next KEY pulse.
-        if 1 <= chata <= 7:
-            cpu_core.set_input(cpu_core.KEY_INT, 1)
-            self._key_next_pulse_ms = time.ticks_add(now, self._key_pulse_interval_ms)
-            return
-        # CHATA==00 needs one more pulse to commit KEYIN in current ROM flow.
-        if chata == 0x00 and self._key_commit_pulse_count < self._key_commit_pulse_max:
-            cpu_core.set_input(cpu_core.KEY_INT, 1)
-            self._key_commit_pulse_sent = True
-            self._key_commit_pulse_count += 1
-            self._key_next_pulse_ms = time.ticks_add(now, self._key_pulse_interval_ms)
-            return
-        if chata == 0x20:
-            self._key_commit_pulse_sent = False
-            self._key_commit_pulse_count = 0
-
-#     def dump_mem(addr, length=16):
-#         """Dump memory (words) starting at byte addr."""
-#         print(f"Dump at {hex(addr)}:")
-#         for i in range(0, length * 2, 2):
-#             a = addr + i
-#             # Read low byte and high byte at the byte address
-#             low = cpu_core._mem_read(0, a)
-#             high = cpu_core._mem_read(0, a + 1)
-#             val = (high << 8) | low
-#             print(f"{hex(a)}: {hex(val)}")
-
-    def dump_mem_range(self, start, end, bytes_per_line=16, printer=print):
-        """Dump linear memory bytes [start..end] in hex."""
-        start &= 0xFFFF
-        end &= 0xFFFF
-        if end < start:
-            printer(f"Invalid range: {start:04X}-{end:04X}")
-            return
-
-        printer(f"MEM DUMP {start:04X}-{end:04X} ({end - start + 1} bytes)")
-        addr = start
-        while addr <= end:
-            line_end = addr + bytes_per_line - 1
-            if line_end > end:
-                line_end = end
-            vals = []
-            a = addr
-            while a <= line_end:
-                vals.append(f"{self._mem_read_impl(0, a):02X}")
-                a += 1
-            printer(f"{addr:04X}: {' '.join(vals)}")
-            addr += bytes_per_line
-
-    def dump_edtop_vram(self, bytes_per_line=16, printer=print):
-        """Dump EDTOP VRAM (0x6100-0x61FF)."""
-        self.dump_mem_range(0x6100, 0x61FF, bytes_per_line=bytes_per_line, printer=printer)
-
-    def dump_ledtp_vram(self, bytes_per_line=16, printer=print):
-        """Dump LEDTP VRAM (0x6201-0x6850)."""
-        self.dump_mem_range(0x6201, 0x6850, bytes_per_line=bytes_per_line, printer=printer)
-
-    def dump_vram_regions(self, bytes_per_line=16, printer=print):
-        """Dump both EDTOP and LEDTP VRAM regions."""
-        printer("EDTOP VRAM (0x6100-0x61FF)")
-        self.dump_edtop_vram(bytes_per_line=bytes_per_line, printer=printer)
-        printer("-" * 48)
-        printer("LEDTP VRAM (0x6201-0x6850)")
-        self.dump_ledtp_vram(bytes_per_line=bytes_per_line, printer=printer)
-
-    def debug_step(self,pause=True,trace=True,prt=True,trace_index=None,out=None):
-        """Execute one instruction and print disassembly."""
-        if trace==False:
-            return cpu_core.step()
-
-        if out is None:
-            out = print
         
-        pc = cpu_core.get_pc()
-        flags = cpu_core.get_flags()
+        y_pos = self._disp_y + int(32 * self.lcd.scale) + 12
+        display = self.lcd.display
         
-        # Decode flags: Z(80), C(40), LZ(20), UZ(10), SW(08), APO(04)
-        f_str = ""
-        f_str += "Z" if flags & 0x80 else "-"
-        f_str += "C" if flags & 0x40 else "-"
-        f_str += "L" if flags & 0x20 else "-"
-        f_str += "U" if flags & 0x10 else "-"
-        f_str += "S" if flags & 0x08 else "-"
-        f_str += "A" if flags & 0x04 else "-"
-
-        op_bytes = cpu_core.step()
-        if not op_bytes:
-            #print("not op_bytes")
-            return None
-
-        hex_str = "".join(f"{x:02X}" for x in op_bytes)
-        try:
-            from debug import decode_basic
-            mnemonic = decode_basic(op_bytes, pc)
-        except Exception as e:
-            mnemonic = f"Parse Error: {e}"
-
-        prefix = f"{trace_index:05d} : " if trace_index is not None else ""
-
-        if pause:
-            print(f"{prefix}[{pc:04X}] {hex_str:<10} | F:{f_str} | {mnemonic} | ",end="")
-            while True:
-                cmd = input(">")
-                if cmd and cmd.strip().upper().startswith("R"):
-                    self.print_registers()
-                elif cmd and cmd.strip().upper().startswith("D"):
-                    addr = int(input("address:"),16)
-                    from main import dump_mem
-                    dump_mem(addr,1,self)
-                else:
-                    break
-        else:
-             if prt: out(f"{prefix}[{pc:04X}] {hex_str:<10} | F:{f_str} | {mnemonic} ")
-        #return mnemonic
-        return f"{prefix}[{pc:04X}] {hex_str:<10} | F:{f_str} | {mnemonic} "
+        # Clear/Draw backdrop
+        display.fill_rect(self._disp_x, y_pos - 2, 200, 12, 0x0000)
+        
+        if active_msg:
+            self._draw_text(display, self._disp_x, y_pos, active_msg, 0x07FF) # Cyan text
             
-    def update_display(self, x_offset=24, y_offset=40):
-        """Render LCD to physical display."""
-        self.lcd.render_to_display(x_offset, y_offset)
+        self._status_rendered_msg = active_msg
 
-    def set_lcd_bg_colors(self, on_bg, off_bg):
-        """Set LCD background colors (RGB565) for ON/OFF states."""
-        if hasattr(self.lcd, "set_bg_colors"):
-            self.lcd.set_bg_colors(on_bg, off_bg)
+        # Draw status text below the bezel
+        # LCD height is 32 * scale. Bezel margin is ~4.
+        y_pos = self._disp_y + int(32 * self.lcd.scale) + 12
+        display = self.lcd.display
+        
+        # Simple backdrop for text
+        display.fill_rect(self._disp_x, y_pos - 2, 200, 12, 0x0000)
+        self._draw_text(display, self._disp_x, y_pos, self.status_msg, 0x07FF) # Cyan text
 
-    def set_lcd_scale(self, scale):
-        """Set LCD display scale. Supported: 1.0 and 1.5."""
-        if hasattr(self.lcd, "set_display_scale"):
-            self.lcd.set_display_scale(scale)
+    def _draw_text(self, display, x, y, text, color):
+        # Extremely minimal 5x7 font (subset for common labels)
+        font = {
+            'A':0x7E0909097E, 'B':0x7F49494936, 'C':0x3E41414122, 'D':0x7F4141413E,
+            'E':0x7F49494941, 'F':0x7F09090901, 'G':0x3E4149493A, 'H':0x7F0808087F,
+            'I':0x00417F4100, 'J':0x2041413F01, 'K':0x7F08142241, 'L':0x7F40404040,
+            'M':0x7F020C027F, 'N':0x7F0408107F, 'O':0x3E4141413E, 'P':0x7F09090906,
+            'Q':0x3E4151215E, 'R':0x7F09192946, 'S':0x4649494931, 'T':0x01017F0101,
+            'U':0x3F4040403F, 'V':0x1F2040201F, 'W':0x7F4038407F, 'X':0x6314081463,
+            'Y':0x0708700807, 'Z':0x6151494543, ' ':0x0000000000, '0':0x3E5149453E,
+            '1':0x00427F4000, '2':0x4261514946, '3':0x2141454B31, '4':0x1814127F10,
+            '5':0x2745454539, '6':0x3C4A494930, '7':0x0171090503, '8':0x3649494936,
+            '9':0x064949291E, '.':0x0060600000, '+':0x08083E0808, '-':0x0808080808,
+            '*':0x14083E0814, '/':0x2010080402, '=':0x2424242424, '<':0x0814224100,
+            '>':0x0041221408, '!':0x00005F0000, '^':0x0402010204, '&':0x3649552250,
+        }
+        curr_x = x
+        for char in text.upper():
+            bits = font.get(char, 0x7F7F7F7F7F) # Block for unknown
+            # Hex bytes are ordered MSB...LSB, so i=0 (left) should be MSB
+            for i in range(5):
+                col_bits = (bits >> ((4 - i) * 8)) & 0xFF
+                for j in range(8):
+                    if col_bits & (1 << j):
+                        display.fill_rect(curr_x + i, y + j, 1, 1, color)
+            curr_x += 6
+
+    def _on_lcd_scale_change(self, scale):
+        """Callback from LCDController when scale is changed."""
+        if hasattr(self.lcd, 'display') and self.lcd.display:
+            # Re-draw the bezel with new scale
+            draw_bezel(self.lcd.display, scale, self._disp_x, self._disp_y)
+            # Ensure the LCD content itself is marked dirty to fill the new bezel
+            if hasattr(self.lcd, 'dirty'):
+                self.lcd.dirty = True
 
     def press_key(self, key):
-        """Press a key on the virtual keyboard."""
         self.keyboard.key_press(key)
+        # Automatically show label on status bar
+        if hasattr(self, 'set_status'):
+            label = key
+            if isinstance(key, str):
+                if key.startswith("TK"):
+                    label = f"TOUCH {key[2:]}"
+                else:
+                    label = key.upper()
+            self.set_status(label)
+
         if not self.key_interrupt_via_scan:
             cpu_core.set_input(cpu_core.KEY_INT, 1)
             self._key_line_state = 1
         else:
-            # Allow immediate first pulse after key press.
             self._key_next_pulse_ms = time.ticks_ms()
-        self._key_commit_pulse_sent = False
-        self._key_commit_pulse_count = 0
-        if not self.key_interrupt_via_scan:
-            self._key_next_pulse_ms = time.ticks_add(time.ticks_ms(), self._key_pulse_interval_ms)
 
     def release_key(self, key):
-        """Release a key on the virtual keyboard."""
         self.keyboard.key_release(key)
         if not self.keyboard.has_key_pressed():
             if self._key_scan_pending():
@@ -817,192 +777,49 @@ class PB1000System:
                 cpu_core.set_input(cpu_core.KEY_INT, 0)
             self._key_line_state = 0
             self._key_pulse_release_pending = False
-            self._key_commit_pulse_sent = False
-            self._key_commit_pulse_count = 0
-            self._key_next_pulse_ms = 0
 
-    def power_on(self):
-        """Simulate power-on / SW press."""
+    def power_on(self, force=False):
         cpu_core.set_input(cpu_core.SW, 1)
         if hasattr(cpu_core, "set_pc"):
-            cpu_core.set_pc(0x0001)
+            current_pc = cpu_core.get_pc()
+            # If the user has explicitly loaded a state (which sets PC=0 in our new logic),
+            # or if it's a completely fresh start where we want the default vector 0x0001.
+            # But here the user specifically wants 0x0000 to be preserved.
+            
+            if force:
+                cpu_core.set_pc(0x0001)
+                print("System power on forced to reset vector (PC=0x0001)")
+            elif current_pc == 0x0001:
+                 # Already at reset vector, no change needed or just confirmation
+                 print("System power on at reset vector (PC=0x0001)")
+            elif current_pc == 0x0000:
+                 # Stick with 0x0000 if that's where we are (e.g. after load_state)
+                 print("System power on at PC=0x0000 (Preserved)")
+            else:
+                print(f"System resumed at PC={current_pc:#06x}")
 
     def set_on_int(self, state):
-        """Drive ON interrupt input line."""
         cpu_core.set_input(cpu_core.ON_INT, 1 if state else 0)
 
     @property
     def pc(self):
         return cpu_core.get_pc()
 
+    @property
+    def cpu(self):
+        return cpu_core
+    
     def set_debug(self, enabled):
-        """Enable/disable debug output.
-
-        Args:
-            enabled: bool or {"sys": bool, "lcd": bool, "kb": bool}
-        """
         self.debug_cfg = self._normalize_debug_config(enabled)
         self.debug = self.debug_cfg["sys"]
         if hasattr(cpu_core, "set_debug"):
             cpu_core.set_debug(self.debug_cfg["sys"])
-        if hasattr(cpu_core, "set_key_debug"):
-            cpu_core.set_key_debug(self.debug_cfg["sys"] and self.debug_cfg["kb"])
-        if hasattr(cpu_core, "set_lcd_debug"):
-            cpu_core.set_lcd_debug(self.debug_cfg["sys"] and self.debug_cfg["lcd"])
-        if hasattr(self.lcd, "debug"):
-            self.lcd.debug = self.debug_cfg["lcd"]
-        if hasattr(self.keyboard, "set_debug"):
-            self.keyboard.set_debug(self.debug_cfg["kb"])
-
-    def set_sys_debug_output_enabled(self, enabled):
-        """Enable/disable CPU core system debug output only."""
-        val = bool(enabled)
-        if hasattr(cpu_core, "set_debug"):
-            cpu_core.set_debug(val)
-        self.debug_cfg["sys"] = val
-        self.debug = val
-
-    def set_pc(self, addr):
-        """Set CPU PC (debug helper)."""
-        cpu_core.set_pc(addr & 0xFFFF)
 
     @property
     def is_sleeping(self):
         return cpu_core.is_sleeping()
 
-    def print_registers(self, printer=print):
-        regs = [cpu_core.get_reg(i) for i in range(32)]
-        printer("Registers:")
-        for idx in range(0, 32, 4):
-            chunk = " ".join(f"${idx + j:02d}={regs[idx + j]:02X}" for j in range(4))
-            printer(f"  {chunk}")
-        if hasattr(cpu_core, "get_reg8"):
-            ia = cpu_core.get_reg8(4)
-            ib = cpu_core.get_reg8(2)
-            ua = cpu_core.get_reg8(3)
-            ie = cpu_core.get_reg8(5)
-            printer(f"IA: IA={ia:02X} IB={ib:02X} UA={ua:02X} IE={ie:02X}")
-        if hasattr(cpu_core, "get_sreg"):
-            sx = cpu_core.get_sreg(0)
-            sy = cpu_core.get_sreg(1)
-            sz = cpu_core.get_sreg(2)
-            printer(f"SIR: SX={sx:02X} SY={sy:02X} SZ={sz:02X}")
-        pair_names = ["IX", "IY", "IZ", "US", "SS", "KY"]
-        pair_values = [cpu_core.get_reg16(i) for i in range(6)]
-        pairs = " ".join(f"{pair_names[i]}={pair_values[i]:04X}" for i in range(len(pair_names)))
-        printer(f"16-bit: {pairs}")
-
-    def get_register_snapshot(self):
-        """Return a compact CPU register snapshot for trace diffing."""
-        snap = {
-            "pc": cpu_core.get_pc() if hasattr(cpu_core, "get_pc") else 0,
-            "flags": cpu_core.get_flags() if hasattr(cpu_core, "get_flags") else 0,
-            "$": [cpu_core.get_reg(i) for i in range(32)] if hasattr(cpu_core, "get_reg") else [0] * 32,
-            "ia": cpu_core.get_reg8(4) if hasattr(cpu_core, "get_reg8") else 0,
-            "ib": cpu_core.get_reg8(2) if hasattr(cpu_core, "get_reg8") else 0,
-            "ie": cpu_core.get_reg8(5) if hasattr(cpu_core, "get_reg8") else 0,
-            "sx": cpu_core.get_sreg(0) if hasattr(cpu_core, "get_sreg") else 0,
-            "sy": cpu_core.get_sreg(1) if hasattr(cpu_core, "get_sreg") else 0,
-            "sz": cpu_core.get_sreg(2) if hasattr(cpu_core, "get_sreg") else 0,
-            "ix": cpu_core.get_reg16(0) if hasattr(cpu_core, "get_reg16") else 0,
-            "iy": cpu_core.get_reg16(1) if hasattr(cpu_core, "get_reg16") else 0,
-            "iz": cpu_core.get_reg16(2) if hasattr(cpu_core, "get_reg16") else 0,
-            "us": cpu_core.get_reg16(3) if hasattr(cpu_core, "get_reg16") else 0,
-            "ss": cpu_core.get_reg16(4) if hasattr(cpu_core, "get_reg16") else 0,
-            "ky": cpu_core.get_reg16(5) if hasattr(cpu_core, "get_reg16") else 0,
-        }
-        return snap
-
     def is_key_input_enabled(self):
-        """Return True when KEY interrupt is enabled (IE bit6)."""
         if hasattr(cpu_core, "get_reg8"):
-            return bool(cpu_core.get_reg8(5) & 0x40)  # IE register
+            return bool(cpu_core.get_reg8(5) & 0x40)
         return True
-
-    def get_key_scan_state(self):
-        """Return key-scan RAM bytes for input dispatch control."""
-        base = 0x68D2 - self.RAM_START
-        return {
-            "kysta": self.ram[base + 0],  # 0x68D2
-            "chata": self.ram[base + 1],  # 0x68D3
-            "keycm": self.ram[base + 2],  # 0x68D4
-            "keyin": self.ram[base + 3],  # 0x68D5
-            "keyinh": self.ram[base + 4], # 0x68D6
-            "keyin16": self.ram[base + 3] | (self.ram[base + 4] << 8),
-            "keymd": self.ram[base + 5],  # 0x68D7
-            "kyrep": self.ram[base + 6],  # 0x68D8
-        }
-
-    def get_key_buffer_state(self):
-        """Return keyboard buffer state (KYCND/RD/WR/first 16-byte shadow)."""
-        base = 0x68D9 - self.RAM_START
-        return {
-            "kycnt": self.ram[base + 0],  # 0x68D9 KYCND
-            "rd": self.ram[base + 1],     # 0x68DA
-            "wr": self.ram[base + 2],     # 0x68DB
-            "buf": bytes(self.ram[base + 6: base + 6 + 16]),  # 0x68DF..0x68EE shadow
-        }
-
-    def can_release_active_key(self, keybuf_base=None):
-        """Return True when current key press can be safely released.
-
-        If keybuf_base is provided, use composite enqueue detection:
-        KYCND or RD/WR change, or buffer shadow update.
-        """
-        st = self.get_key_scan_state()
-        chata = st["chata"]
-        if keybuf_base is None:
-            return chata == 0x20
-
-        now = self.get_key_buffer_state()
-        buffered = (
-            now["kycnt"] != keybuf_base.get("kycnt", now["kycnt"]) or
-            now["rd"] != keybuf_base.get("rd", now["rd"]) or
-            now["wr"] != keybuf_base.get("wr", now["wr"]) or
-            now["buf"] != keybuf_base.get("buf", now["buf"])
-        )
-        return buffered
-
-    def get_irq_scan_state(self):
-        """Return key/interrupt related register snapshot for tracing."""
-        if not hasattr(cpu_core, "get_reg8"):
-            return {"ia": 0, "ib": 0, "ie": 0}
-        return {
-            "ia": cpu_core.get_reg8(4),
-            "ib": cpu_core.get_reg8(2),
-            "ie": cpu_core.get_reg8(5),
-        }
-
-    def _dump_key_unresponsive_state(self, reason, ia=0, pulse=0):
-        """Temporary debug dump for key-unresponsive incidents."""
-        snap = self.get_register_snapshot()
-        scan = self.get_key_scan_state()
-        buf = self.get_key_buffer_state()
-        ua = cpu_core.get_reg8(3) if hasattr(cpu_core, "get_reg8") else 0
-        head16 = "".join(f"{x:02X}" for x in buf["buf"])
-        print("[KEY-UNRESPONSIVE]")
-        print(f"  reason={reason} pulse={pulse} sleeping={self.is_sleeping}")
-        print(
-            f"  PC={snap['pc']:04X} F={snap['flags']:02X} "
-            f"IA={snap['ia']:02X} IB={snap['ib']:02X} IE={snap['ie']:02X} UA={ua:02X}"
-        )
-        print(
-            f"  IX={snap['ix']:04X} IY={snap['iy']:04X} IZ={snap['iz']:04X} "
-            f"US={snap['us']:04X} SS={snap['ss']:04X} KY={snap['ky']:04X}"
-        )
-        print(
-            f"  scan: KYSTA={scan['kysta']:02X} CHATA={scan['chata']:02X} "
-            f"KEYCM={scan['keycm']:02X} KEYIN={scan['keyin16']:04X} "
-            f"KEYMD={scan['keymd']:02X} KYREP={scan['kyrep']:02X}"
-        )
-        print(
-            f"  buf: KYCND={buf['kycnt']:02X} RD={buf['rd']:02X} WR={buf['wr']:02X} "
-            f"HEAD16={head16}"
-        )
-        print(
-            f"  input: key_pressed={self.keyboard.has_key_pressed()} "
-            f"key_via_scan={self.key_interrupt_via_scan} key_reassert={self.key_reassert_enabled} "
-            f"line_state={self._key_line_state} rel_pending={self._key_pulse_release_pending} "
-            f"post_rel={self._key_post_release_pulses_remaining} next_ms={self._key_next_pulse_ms} "
-            f"ia_local={ia:02X}"
-        )

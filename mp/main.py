@@ -7,13 +7,14 @@ import time
 import uselect
 from pb1000 import PB1000System,init_display,draw_bezel
 import force_gc
+from pio_uart import PioUart
 
 KEY_HOLD_MS = 120
 KEY_RELEASE_HARD_TIMEOUT_MS = 1200
 INTER_KEY_GAP_MS = 80
 STEP_SERVICE_CHUNK = 64
 STEP_TIMER_TICK_STEPS = 40000
-FRAME_INTERVAL_MS = 1000
+FRAME_INTERVAL_MS = 100
 AUTO_EXE_ON_ENTER = False
 ON_INT_PULSE_MS = 30
 WAKE_TRACE_STEPS = 40
@@ -22,18 +23,21 @@ WAKE_TRACE_VECTOR_PC = 0x0032
 # Input Configuration
 ENABLE_USB_KBD = True
 ENABLE_UART_KBD = True
+USE_C_KEYBOARD = True   # True: C-native keyboard handling (fast), False: Python-side (debug)
 UART_BAUDRATE = 115200
-UART_TX_PIN = 0
-UART_RX_PIN = 1
+UART_TX_PIN = 4   # UART1 TX (Console output)
+UART_RX_PIN = 5   # UART1 RX (Keyboard input)
 
-# Initialize explicit UART for keyboard
+# Initialize UART1 for keyboard input + console output
 _uart_kbd = None
+_console_uart = None
 if ENABLE_UART_KBD:
     try:
-        _uart_kbd = machine.UART(0, baudrate=UART_BAUDRATE, tx=machine.Pin(UART_TX_PIN), rx=machine.Pin(UART_RX_PIN))
-        print(f"UART Keyboard enabled: GP{UART_TX_PIN}(TX)/GP{UART_RX_PIN}(RX) @ {UART_BAUDRATE}bps")
+        _uart_kbd = machine.UART(1, baudrate=UART_BAUDRATE, tx=machine.Pin(UART_TX_PIN), rx=machine.Pin(UART_RX_PIN), txbuf=2048)
+        _console_uart = _uart_kbd  # Same UART for both input and output
+        print(f"UART1 Console I/O enabled: GP{UART_TX_PIN}(TX)/GP{UART_RX_PIN}(RX) @ {UART_BAUDRATE}bps")
     except Exception as e:
-        print(f"Failed to init UART keyboard: {e}")
+        print(f"Failed to init UART1 console: {e}")
 
 
 def _wake_diag_snapshot(system):
@@ -149,7 +153,9 @@ def _map_input_char(char):
 def _step_with_input_service(system, steps, chunk=STEP_SERVICE_CHUNK):
     ran = 0
     while ran < steps:
-        if hasattr(system, "service_input_lines"):
+        if hasattr(system, "service_pio_uart"):
+            system.service_pio_uart()
+        if hasattr(system, "service_input_lines") and not USE_C_KEYBOARD:
             system.service_input_lines()
         n = chunk
         remain = steps - ran
@@ -237,8 +243,8 @@ def poll_keyboard(system):
         finally:
             _on_int_active = False
 
-    # Poll external USB Host Keyboard if available
-    if ENABLE_USB_KBD and hasattr(system, 'keyboard') and hasattr(system.keyboard, 'poll_usb_host'):
+    # Poll external USB Host Keyboard if available (Python mode only)
+    if not USE_C_KEYBOARD and ENABLE_USB_KBD and hasattr(system, 'keyboard') and hasattr(system.keyboard, 'poll_usb_host'):
         usb_events = system.keyboard.poll_usb_host()
         # If sleeping, check for ESC (BRK) to trigger wake pulse
         if getattr(system, "is_sleeping", False) and usb_events:
@@ -246,6 +252,57 @@ def poll_keyboard(system):
                 if scancode == 0x29 and pressed: # 0x29 = ESC
                     _pulse_on_int(system, now)
                     break
+        
+        # Check for F11 (0x44) to save state
+        if usb_events:
+            for scancode, pressed in usb_events:
+                if scancode == 0x44 and pressed: # 0x44 = F11
+                    print("F11 pressed (USB Key): Requesting save...")
+                    system._save_requested = True
+                    break
+                if scancode == 0x42 and pressed: # 0x42 = F9
+                    print("F9 pressed (USB Key): Requesting reset...")
+                    system.reset_emulator()
+                    break
+
+    # Poll REPL / stdin (usually UART0)
+    if _spoll.poll(0):
+        try:
+            chars = sys.stdin.read(1)
+            if chars == "\x1b": # Escape sequence?
+                # Check for F11: \x1b[23~ or similar
+                # For simplicity, if we get ESC, we can also check for a specific command
+                # but let's try to detect F11 sequence specifically
+                # This is a bit complex for a simple read(1), but we can peek
+                next_chars = sys.stdin.read(4) if _spoll.poll(10) else ""
+                if "[23~" in next_chars:
+                    print("F11 detected via REPL! Saving state...")
+                    system._save_requested = True
+                    return
+                if "[20~" in next_chars:
+                    print("F9 detected via REPL! Resetting...")
+                    system.reset_emulator()
+                    return
+                # Map other characters
+                for c in next_chars:
+                    _key_queue.append(_map_input_char(c))
+            else:
+                for char in chars:
+                    if char == "\x03": # Ctrl+C
+                        print("\n[REPL] Break received")
+                        _key_queue.append(_map_input_char("^"))
+                    elif char in ("\r", "\n"):
+                        if AUTO_EXE_ON_ENTER and _typed_since_enter:
+                            _key_queue.append((KEY_EXE, "EXE"))
+                            _typed_since_enter = False
+                    else:
+                        key, label = _map_input_char(char)
+                        if key is not None:
+                            _key_queue.append((key, label))
+                            if key != KEY_EXE:
+                                _typed_since_enter = True
+        except Exception as e:
+            print(f"REPL input error: {e}")
 
     if ENABLE_UART_KBD and _uart_kbd is not None:
         while _uart_kbd.any():
@@ -255,10 +312,9 @@ def poll_keyboard(system):
                 char = None
             if not char:
                 break
-            if char == "\x03":  # Ctrl+C behavior? Usually handled by REPL, but we can intercept
+            if char == "\x03":
                 print("\n[UART] Break received")
-                # We could raise KeyboardInterrupt, but let's just map it to PB-1000 BRK
-                char = "^" 
+                char = "^"
             if char == "\r" or char == "\n":
                 if AUTO_EXE_ON_ENTER and _typed_since_enter:
                     _key_queue.append((KEY_EXE, "EXE"))
@@ -267,7 +323,6 @@ def poll_keyboard(system):
             key, label = _map_input_char(char)
             if key is not None:
                 if getattr(system, "is_sleeping", False) and label != "BRK":
-                    print(f"[QUEUE] dropped during sleep: {label}")
                     continue
                 _key_queue.append((key, label))
                 if key != KEY_EXE:
@@ -367,6 +422,8 @@ def poll_keyboard(system):
         key = candidates[0]
         print(f"Key Press: {label}")
         system.press_key(key)
+        if hasattr(system, 'set_status'):
+            system.set_status(label)
 
         _active_key = key
         _active_key_label = label
@@ -392,30 +449,35 @@ def poll_touch(system):
         coords = system.touch.get_touch()
         if coords is not None:
             x, y = coords
-            # print(f"[DEBUG_TOUCH] x={x}, y={y}")
-            # Map coords to 4x4 grid within display bounds (x:16-304, y:40-104)
-            if 16 <= x <= 304 and 168 <= y <= 200:
-                col = (x - 16) // 72
-                row = (y - 40) // 16
-                # print(f"(col,row)=({col},{row}) -> ",end="")
+            # Map coords to fit the LCD bezel area (system._disp_x, system._disp_y)
+            # The LCD area is 192x32 scaled.
+            scale = getattr(system.lcd, 'scale', 1.0)
+            lw = int(192 * scale)
+            lh = int(32 * scale)
+            lx0 = system._disp_x
+            ly0 = system._disp_y
+            
+            if lx0 <= x <= lx0 + lw and ly0 <= y <= ly0 + lh:
+                # Relative position within LCD (0.0 to 1.0)
+                rx = (x - lx0) / lw
+                ry = (y - ly0) / lh
+                
+                # PB-1000 has 4x4 touch areas (T1-T16)
+                col = int(rx * 4)
+                row = int(ry * 4)
+                
                 col = max(0, min(3, col))
                 row = max(0, min(3, row))
                 
                 t_idx = row * 4 + col + 1
                 t_key = f"TK{t_idx}"
 
-                # print(f"(col,row)=({col},{row}) / t_idx = {t_idx}")
-
                 if _active_touch_key != t_key:
                     if _active_touch_key is not None:
                         system.release_key(_active_touch_key)
                     system.press_key(t_key)
                     _active_touch_key = t_key
-                    # print(f"[DN] {t_key}")
                 return
-            else:
-                # print(f"[OUT] x={x}, y={y} (Range: 16-304, 40-104)")
-                pass
                 
     if _active_touch_key is not None:
         system.release_key(_active_touch_key)
@@ -431,14 +493,18 @@ def main():
         display = ret
         touch = None
         
-    try:
-        draw_bezel(display)
-    except Exception:
-        pass
+    # The bezel will be drawn automatically via callback when set_display_scale is called.
+    # Initial scale 1.5 will fit the 288x48 LCD.
 
-    system = PB1000System(display, debug={"sys": False, "lcd": False, "kb": False}, restore_registers=False)
+    print("Initializing PB1000System...")
+    system = PB1000System(display, debug={"sys": False, "lcd": False, "kb": False}, restore_registers=True)
+    # (PioUart init moved later)
+    print("PB1000System initialized.")
     system.touch = touch
-    #system.set_lcd_scale(1.5)
+    # Attach console UART for PRINT output mirroring
+    if _console_uart is not None:
+        system.console_uart = _console_uart
+    system.lcd.set_display_scale(1.5)
     
     try:
         system.load_rom('/roms/rom0.bin', slot=0)
@@ -451,8 +517,66 @@ def main():
             import usb_host
             usb_host.init()
             print("USB Host initialized.")
+            
+            # Initialize PIO UART on GP6 (TX) and GP13 (RX) for MMIO 0x0C00-0x0C03
+            # AFTER usb_host.init() to avoid resource conflict. 
+            # Using SM 6, 7 to further reduce conflict risk.
+            try:
+                pio_uart = PioUart(tx_pin=6, rx_pin=13, baudrate=9600, sm_tx=6, sm_rx=7)
+                system.pio_uart = pio_uart
+                print("PIO UART (GP6/GP13) initialized on SM 6/7.")
+            except Exception as e:
+                print(f"Failed to init PIO UART: {e}")
         except Exception as e:
             print(f"Failed to init USB Host: {e}")
+
+    # Activate C keyboard mode if enabled
+    if USE_C_KEYBOARD and ENABLE_USB_KBD:
+        try:
+            import hd61700 as cpu_core
+            if hasattr(cpu_core, 'use_c_keyboard'):
+                cpu_core.use_c_keyboard(True)
+                print("C keyboard mode enabled.")
+            if hasattr(cpu_core, 'set_f11_callback'):
+                def _on_f11(_):
+                    print("F11 pressed (Callback)")
+                    system._save_requested = True
+                cpu_core.set_f11_callback(_on_f11)
+            if hasattr(cpu_core, 'set_f9_callback'):
+                def _on_f9(_):
+                    print("F9 pressed (Callback)")
+                    system.reset_emulator()
+                cpu_core.set_f9_callback(_on_f9)
+            
+            # Synchronize keyboard maps from keymap.py to C core
+            import keymap
+            if hasattr(cpu_core, 'keyboard_config_adv'):
+                cpu_core.keyboard_config_adv(keymap.get_adv_map_list())
+                print("C advanced keyboard map synchronized.")
+            if hasattr(cpu_core, 'keyboard_config_base'):
+                cpu_core.keyboard_config_base(keymap.get_base_map_list())
+                print("C base keyboard map synchronized.")
+
+            # MMIO UART: We use polling for TX now to avoid scheduler floods.
+            # (No callback registration needed)
+
+        except Exception as e:
+            print(f"C keyboard mode init failed: {e}")
+
+    if USE_C_KEYBOARD:
+        print("Configuring C keyboard routing...")
+        try:
+            import usb_host
+            if hasattr(usb_host, 'set_c_kb_routing'):
+                usb_host.set_c_kb_routing(True)
+                print("C keyboard routing enabled.")
+            if hasattr(usb_host, 'start_bg_timer'):
+                print("Starting USB background timer...")
+                usb_host.start_bg_timer(8)
+                print("USB background timer started (8ms).")
+        except Exception as e:
+            print(f"C keyboard routing setup failed: {e}")
+
 
     system.power_on()
 
@@ -464,7 +588,36 @@ def main():
 
     try:
         while True:
-            if hasattr(system, "service_input_lines"):
+            if hasattr(system, "service_pio_uart"):
+                system.service_pio_uart()
+            
+            # Service PIO UART (MMIO)
+            if system.pio_uart:
+                # 1. Pull data from C core TX FIFO and send to PIO
+                if hasattr(cpu_core, 'uart_tx_get'):
+                    for _ in range(32): # Max 32 bytes per cycle
+                        tx_data = cpu_core.uart_tx_get()
+                        if tx_data is not None:
+                            system.pio_uart.write(tx_data)
+                        else:
+                            break
+                            
+                system.pio_uart.service_tx()
+                system.pio_uart.service_rx()
+                
+                # 2. Push data from PIO RX to C core FIFO
+                if hasattr(cpu_core, 'uart_rx_put'):
+                    # Read up to 16 bytes per cycle to prevent infinite loop
+                    for _ in range(16):
+                        if not system.pio_uart.any():
+                            break
+                        data = system.pio_uart.read(1)
+                        if data:
+                            cpu_core.uart_rx_put(data[0])
+                        else:
+                            break
+
+            if hasattr(system, "service_input_lines") and not USE_C_KEYBOARD:
                 system.service_input_lines()
 
             if not system.is_sleeping:
@@ -476,6 +629,41 @@ def main():
             now = time.ticks_ms()
             poll_keyboard(system)
             poll_touch(system)
+
+            # Poll C-side key events for status bar (ISR-safe)
+            if USE_C_KEYBOARD:
+                try:
+                    import hd61700
+                    sc = hd61700.get_last_key()
+                    if sc >= 0:
+                        import keymap
+                        system.set_status(keymap.get_label(sc))
+                except Exception:
+                    pass
+
+            if getattr(system, '_save_requested', False):
+                system._save_requested = False
+                system.set_status("SAVING STATE...")
+                system.update_display(x_offset=16, y_offset=40)
+                if ENABLE_USB_KBD:
+                    try:
+                        import usb_host
+                        usb_host.stop_bg_timer()
+                    except Exception:
+                        pass
+                try:
+                    system.save_state()
+                    system.set_status("STATE SAVED!", 2000)
+                except Exception as e:
+                    system.set_status("SAVE ERROR!", 3000)
+                    print(f"Save state failed: {e}")
+                finally:
+                    if ENABLE_USB_KBD:
+                        try:
+                            import usb_host
+                            usb_host.start_bg_timer(8)
+                        except Exception:
+                            pass
 
             if time.ticks_diff(now, frame_time) >= FRAME_INTERVAL_MS:
                 system.update_display(x_offset=16, y_offset=40)
@@ -489,10 +677,14 @@ def main():
 
     except KeyboardInterrupt:
         print("\nEmulator stopped by user.")
+    except Exception as e:
+        print(f"\n*** MAIN LOOP EXCEPTION: {type(e).__name__}: {e}")
+        import sys
+        sys.print_exception(e)
     finally:
-        for i in range(100):
-            system.debug_step(pause=False,trace=True,prt=True,trace_index=i+1)
-            system.print_registers()
+        #for i in range(100):
+        #    system.debug_step(pause=False,trace=True,prt=True,trace_index=i+1)
+        #    system.print_registers()
         from workarea import peek_workarea,print_workarea,print_all_workarea
         print_all_workarea(system)
         print("dump 0x6000-0x7FFF")

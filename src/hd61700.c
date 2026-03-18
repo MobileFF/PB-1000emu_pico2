@@ -1,4 +1,4 @@
-﻿/*
+/*
  * HD61700 CPU Emulator - Complete Implementation
  * Based on MAME hd61700.cpp by Sandro Ronco (BSD-3-Clause license)
  * Ported to standalone C for MicroPython integration on RP2350
@@ -380,6 +380,14 @@ void hd61700_set_input(hd61700_state_t *cpu, int line, int state) {
     if (IRQ_ENABLED(line) && state)
       REG_IB |= (1 << line);
     REG_KY = (REG_KY & 0xfdff) | ((state ? 1 : 0) << 9);
+    break;
+  case HD61700_TIMER_INT:
+  case HD61700_INT2:
+  case HD61700_INT1:
+    if (state) {
+      cpu->state &= ~CPU_SLP;
+      REG_IB |= (1 << line);
+    }
     break;
   case HD61700_KEY_INT:
     /* Real machine wakes from OFF by BRK event when SW flag is ON. */

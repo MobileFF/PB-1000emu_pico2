@@ -5,61 +5,23 @@ The PB-1000 has a matrix keyboard scanned via IA (row select)
 and read via KY (column data).
 """
 import time
+try:
+    import keymap
+except ImportError:
+    # Fallback/Mock for testing if keymap.py is missing
+    class keymap:
+        KEY_MAP = {}
+        ADV_MAP = {}
+        USB_TO_CHAR = {}
+        SPECIAL_MAP = {}
+        KEY_SHIFT = (11, 2)
 
 class KeyboardMatrix:
     """
     PB-1000 keyboard matrix emulation.
-
-    The HD61700 CPU scans the keyboard by:
-    1. Writing a row select value to IA register (via PST IA instruction)
-    2. Reading the KY register (via GRE KY instruction)
-
-    The PB-1000 keyboard matrix layout:
-    - 13 rows (selected by IA write: 0..12)
-    - 12 KI lines (KI01..KI12)
     """
-
-    # Key mapping: host key -> (KO row, KI line number)
-    # Calibrated against pb1000es KeyTab (KO0..12).
-    KEY_MAP = {
-        'a': (4, 4), 'b': (5, 7), 'c': (5, 5), 'd': (4, 6),
-        'e': (3, 5), 'f': (4, 7), 'g': (4, 8), 'h': (4, 1),
-        'i': (8, 1), 'j': (9, 1), 'k': (9, 8), 'l': (9, 7),
-        'm': (5, 1), 'n': (5, 8), 'o': (8, 8), 'p': (8, 7),
-        'q': (3, 3), 'r': (3, 6), 's': (4, 5), 't': (3, 7),
-        'u': (3, 1), 'v': (5, 6), 'w': (3, 4), 'x': (5, 4),
-        'y': (3, 8), 'z': (5, 3),
-        '0': (10, 7), '1': (9, 6), '2': (9, 5), '3': (9, 4),
-        '4': (8, 6), '5': (8, 5), '6': (8, 4), '7': (7, 7),
-        '8': (7, 6), '9': (7, 5),
-        ' ': (10, 1), '.': (10, 6), '=': (2, 6),
-        '+': (9, 3), '-': (10, 3), '*': (8, 3), '/': (7, 3),
-        
-        # Touch panel keys (T1-T16) mapping to KO7-KO10 and KI9-KI12
-        'tk1': (7, 12), 'tk2': (8, 12), 'tk3': (9, 12), 'tk4': (10, 12),
-        'tk5': (7, 11), 'tk6': (8, 11), 'tk7': (9, 11), 'tk8': (10, 11),
-        'tk9': (7, 10), 'tk10': (8, 10), 'tk11': (9, 10), 'tk12': (10, 10),
-        'tk13': (7, 9), 'tk14': (8, 9), 'tk15': (9, 9), 'tk16': (10, 9),
-    }
-
-    # Special key codes
-    KEY_EXE    = (10, 4)  # Enter/Execute
-    KEY_MODE   = (5, 11)  # Mode (MENU)
-    KEY_SHIFT  = (11, 2)  # Shift
-    KEY_BREAK  = (1, 1)   # Break (Ctrl+C / ESC)
-    KEY_ANS    = (10, 5)  # ANS
-    KEY_BS     = (6, 7)   # Backspace
-    KEY_INS    = (6, 5)   # Insert
-    KEY_DEL    = KEY_BS   # PB-1000 has no DEL key (Delete -> Backspace)
-    KEY_LEFT   = (5, 10)  # Cursor Left
-    KEY_RIGHT  = (3, 9)   # Cursor Right
-    KEY_UP     = (5, 9)   # Cursor Up
-    KEY_DOWN   = (4, 9)   # Cursor Down
-    KEY_NEWALL = (6, 6)   # NEWALL
-    KEY_MENU   = (5,11)   # MENU
-    KEY_LCKEY  = (6,11)   # LCKEY
-    KEY_CAL    = (4,11)   # CAL
     TRACE_MIN_PRINT_MS = 120
+    TRACE_SCAN = True
 
     @staticmethod
     def _ki_to_col(ki):
@@ -99,6 +61,39 @@ class KeyboardMatrix:
         self._trace_last_ia = None
         self._trace_last_ky = None
         self._trace_last_ms = 0
+        self.usb_shift_physical = False
+        self.usb_alt_physical = False
+        self._active_usb_scancodes = {}
+        
+        # Synchronize to C if possible
+        self.sync_to_c()
+
+    def sync_to_c(self):
+        """Synchronize Python keyboard mapping to the C core."""
+        try:
+            import hd61700
+            # Convert ADV_MAP: [(scancode, mod, [(row, ki), ...]), ...]
+            adv_list = []
+            for (scancode, mod), coords in keymap.ADV_MAP.items():
+                adv_list.append((scancode, mod, coords))
+            hd61700.keyboard_config_adv(adv_list)
+
+            # Convert Base/Special maps
+            base_list = []
+            # 1. SPECIAL_MAP
+            for scancode, coord in keymap.SPECIAL_MAP.items():
+                base_list.append((scancode, coord[0], coord[1]))
+            # 2. USB_TO_CHAR -> KEY_MAP
+            for scancode, char in keymap.USB_TO_CHAR.items():
+                if char in keymap.KEY_MAP:
+                    coord = keymap.KEY_MAP[char]
+                    base_list.append((scancode, coord[0], coord[1]))
+            hd61700.keyboard_config_base(base_list)
+            
+            if self.debug:
+                print("KB: Synchronized mapping to C core.")
+        except (ImportError, AttributeError):
+            pass
 
     def _selected_rows(self):
         """Decode IA low nibble as PB-1000 key-output selector."""
@@ -167,8 +162,8 @@ class KeyboardMatrix:
             col = self._ki_to_col(ki)
         elif isinstance(key, str):
             key_lower = key.lower()
-            if key_lower in self.KEY_MAP:
-                row, ki = self.KEY_MAP[key_lower]
+            if key_lower in keymap.KEY_MAP:
+                row, ki = keymap.KEY_MAP[key_lower]
                 col = self._ki_to_col(ki)
             else:
                 return
@@ -192,8 +187,8 @@ class KeyboardMatrix:
             col = self._ki_to_col(ki)
         elif isinstance(key, str):
             key_lower = key.lower()
-            if key_lower in self.KEY_MAP:
-                row, ki = self.KEY_MAP[key_lower]
+            if key_lower in keymap.KEY_MAP:
+                row, ki = keymap.KEY_MAP[key_lower]
                 col = self._ki_to_col(ki)
             else:
                 return
@@ -223,65 +218,50 @@ class KeyboardMatrix:
 
     def process_usb_key(self, scancode, pressed=True):
         """
-        Process a USB HID keyboard scancode.
-        Maps common USB scancodes to PB-1000 keys.
-
-        Args:
-            scancode: int - USB HID scancode
-            pressed: bool - True=press, False=release
+        Process a USB HID keyboard scancode with flexible mapping.
         """
-        # USB HID scancode mapping
-        usb_map = {
-            0x04: 'a', 0x05: 'b', 0x06: 'c', 0x07: 'd',
-            0x08: 'e', 0x09: 'f', 0x0A: 'g', 0x0B: 'h',
-            0x0C: 'i', 0x0D: 'j', 0x0E: 'k', 0x0F: 'l',
-            0x10: 'm', 0x11: 'n', 0x12: 'o', 0x13: 'p',
-            0x14: 'q', 0x15: 'r', 0x16: 's', 0x17: 't',
-            0x18: 'u', 0x19: 'v', 0x1A: 'w', 0x1B: 'x',
-            0x1C: 'y', 0x1D: 'z',
-            0x1E: '1', 0x1F: '2', 0x20: '3', 0x21: '4',
-            0x22: '5', 0x23: '6', 0x24: '7', 0x25: '8',
-            0x26: '9', 0x27: '0',
-            0x2C: ' ',  # Space
-            0x37: '.', 0x57: '+', 0x56: '-',
-            0x55: '*', 0x54: '/',
-            0x2E: '=',
-        }
-        # Special keys
-        special_usb_map = {
-            0x28: self.KEY_EXE,    # Enter
-            0x29: self.KEY_BREAK,  # Escape
-            0x2A: self.KEY_BS,     # Backspace
-            0x4F: self.KEY_RIGHT,  # Right Arrow
-            0x50: self.KEY_LEFT,   # Left Arrow
-            0x51: self.KEY_DOWN,   # Down Arrow
-            0x52: self.KEY_UP,     # Up Arrow
-            0x49: self.KEY_INS,    # Insert
-            0x4C: self.KEY_DEL,    # Delete
-            0x45: self.KEY_NEWALL, # NEWALL(=F12)
-            0x3A: self.KEY_MAP['tk13'], # TK13(=F1)
-            0x3B: self.KEY_MAP['tk14'], # TK14(=F2)
-            0x3C: self.KEY_MAP['tk15'], # TK15(=F3)
-            0x3D: self.KEY_MAP['tk16'], # TK16(=F4)
-            0x3E: self.KEY_MENU,   # MENU(=F5)
-            0x3F: self.KEY_LCKEY,  # LCKEY(=F6)
-            0x40: self.KEY_CAL,    # CAL(=F7)
-            0xE1: self.KEY_SHIFT,  # Left Shift
-            0xE5: self.KEY_SHIFT,  # Right Shift
-        }
+        # 1. Update physical modifier state
+        if scancode in (0xE1, 0xE5):  # Left Shift, Right Shift
+            self.usb_shift_physical = pressed
+        if scancode in (0xE2, 0xE6):  # Left Alt, Right Alt
+            self.usb_alt_physical = pressed
 
-        if scancode in usb_map:
-            key = usb_map[scancode]
-            if pressed:
-                self.key_press(key)
-            else:
-                self.key_release(key)
-        elif scancode in special_usb_map:
-            pos = special_usb_map[scancode]
-            if pressed:
-                self.key_press(pos)
-            else:
-                self.key_release(pos)
+        if not pressed:
+            # Release exactly the keys that were pressed for this scancode
+            if scancode in self._active_usb_scancodes:
+                keys_to_release = self._active_usb_scancodes.pop(scancode)
+                for key_coord in keys_to_release:
+                    self.key_release(key_coord)
+            return
+
+        # 2. Check if already pressed (avoid duplicates)
+        if scancode in self._active_usb_scancodes:
+            return
+
+        # 3. Handle modifiers -> Logical combinations
+        current_mod = 0
+        if self.usb_shift_physical: current_mod |= 1
+        if self.usb_alt_physical:   current_mod |= 2
+
+        coords_to_press = []
+
+        # A. Advanced Map (Scancode, Mod) -> PB-1000 Coordinates
+        if (scancode, current_mod) in keymap.ADV_MAP:
+            coords_to_press.extend(keymap.ADV_MAP[(scancode, current_mod)])
+        else:
+            # B. Base USB HID scancode mapping
+            if scancode in keymap.SPECIAL_MAP:
+                coords_to_press.append(keymap.SPECIAL_MAP[scancode])
+            elif scancode in keymap.USB_TO_CHAR:
+                char = keymap.USB_TO_CHAR[scancode]
+                if char in keymap.KEY_MAP:
+                    coords_to_press.append(keymap.KEY_MAP[char])
+                    # No automatic Shift for alphabets in base map
+
+        if coords_to_press:
+            self._active_usb_scancodes[scancode] = coords_to_press
+            for coord in coords_to_press:
+                self.key_press(coord)
 
     def poll_usb_host(self):
         """
@@ -301,5 +281,3 @@ class KeyboardMatrix:
         except ImportError:
             # usb_host module not built into this firmware
             return []
-
-    TRACE_SCAN = True

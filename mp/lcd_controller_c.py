@@ -167,12 +167,21 @@ class LCDControllerC:
             self._scale_num = 3
             self._scale_den = 2
         else:
-            self._scale_num = 1
+            self._scale_num = int(scale)
             self._scale_den = 1
+        
+        # Sync to integer scale if possible to avoid redundant setup_display calls
+        if int(scale) == scale:
+            self._pixel_size = int(scale)
+
         if hasattr(lcd_c, "set_scale"):
             lcd_c.set_scale(self._scale_num, self._scale_den)
         else:
             lcd_c.clear_dirty()
+        
+        # Notify listener (e.g. system) to redraw bezel
+        if hasattr(self, "on_scale_change") and self.on_scale_change:
+            self.on_scale_change(scale)
 
     def set_bg_colors(self, on_bg, off_bg):
         """Set LCD background colors (RGB565): ON-state and OFF-state."""
@@ -204,6 +213,10 @@ class LCDControllerC:
     def column(self): return 0
     @column.setter
     def column(self, v): lcd_c.set_column(v)
+
+    @property
+    def scale(self):
+        return self._scale_num / self._scale_den
 
     def setup_display(self, spi_id, cs_pin, dc_pin, scale=1, x_offset=0, y_offset=0):
         """Manual/Override configuration."""
