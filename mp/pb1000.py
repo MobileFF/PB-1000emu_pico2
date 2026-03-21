@@ -593,6 +593,12 @@ class PB1000System:
         """Perform a hardware-like reset (PC=0x0000)."""
         print("Emulator Reset triggered (PC=0x0000)")
         cpu_core.reset(self.debug_cfg["sys"])
+        
+        # Clear PIO UART buffers upon reset
+        if self.pio_uart and hasattr(self.pio_uart, "clear_buffers"):
+            self.pio_uart.clear_buffers()
+            print("PIO UART buffers cleared.")
+            
         self.set_status("SYSTEM RESET", 1500)
         # Re-initialize basic state if needed but usually reset() is enough
         # We might want to keep RAM as is (like a warm reset) or clear it?

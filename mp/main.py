@@ -593,11 +593,21 @@ def main():
             
             # Service PIO UART (MMIO)
             if system.pio_uart:
+                if not hasattr(system, 'uart_xon'):
+                    system.uart_xon = True
+
                 # 1. Pull data from C core TX FIFO and send to PIO
                 if hasattr(cpu_core, 'uart_tx_get'):
                     for _ in range(32): # Max 32 bytes per cycle
                         tx_data = cpu_core.uart_tx_get()
                         if tx_data is not None:
+                            # Intercept XON/XOFF for local flow control
+                            if tx_data == 0x13:  # XOFF
+                                system.uart_xon = False
+                                # print("Local XOFF intercepted")
+                            elif tx_data == 0x11: # XON
+                                system.uart_xon = True
+                                # print("Local XON intercepted")
                             system.pio_uart.write(tx_data)
                         else:
                             break
@@ -607,15 +617,19 @@ def main():
                 
                 # 2. Push data from PIO RX to C core FIFO
                 if hasattr(cpu_core, 'uart_rx_put'):
-                    # Read up to 16 bytes per cycle to prevent infinite loop
-                    for _ in range(16):
-                        if not system.pio_uart.any():
-                            break
-                        data = system.pio_uart.read(1)
-                        if data:
-                            cpu_core.uart_rx_put(data[0])
-                        else:
-                            break
+                    # Only push data if XON is true (PB-1000 is ready)
+                    if system.uart_xon:
+                        # Read up to 8 bytes per cycle to match PB-1000 processing speed better
+                        for _ in range(8):
+                            if not system.pio_uart.any():
+                                break
+                            data = system.pio_uart.read(1)
+                            if data:
+                                # DEBUG: Track bytes sent to C core to find the source of spaces
+                                # print(f"-> C: {hex(data[0])}")
+                                cpu_core.uart_rx_put(data[0])
+                            else:
+                                break
 
             if hasattr(system, "service_input_lines") and not USE_C_KEYBOARD:
                 system.service_input_lines()

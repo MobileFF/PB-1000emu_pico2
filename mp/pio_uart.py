@@ -26,13 +26,12 @@ def uart_tx_prog():
 @rp2.asm_pio(in_shiftdir=rp2.PIO.SHIFT_RIGHT, autopush=False)
 def uart_rx_prog():
     wait(0, pin, 0)                     # Wait for start bit (low)
-    set(x, 7)                    [10]   # Delay to middle of first data bit
+    set(x, 7)                    [11]   # Delay to middle of first data bit (1 + 11 = 12 cycles = 1.5 bits)
     label("rx_bitloop")
     in_(pins, 1)                        # Sample 1 data bit
-    jmp(x_dec, "rx_bitloop")     [6]    # Loop 8 times
+    jmp(x_dec, "rx_bitloop")     [6]    # Loop 8 times (1 + 1 + 6 = 8 cycles = 1 bit)
     push()                              # Push 8-bit result to RX FIFO
-    # Wait for stop bit to finish (or at least start of it)
-    # This also rejects noise before next start bit
+    # Wait for stop bit to finish (high)
     wait(1, pin, 0)
 
 
@@ -92,9 +91,15 @@ class PioUart:
 
     def service_rx(self):
         """Pull data from PIO RX FIFO to software buffer."""
+        count = 0
         while self._sm_rx.rx_fifo() > 0:
             val = self._sm_rx.get() >> 24
             self._rx_buffer.append(val & 0xFF)
+            count += 1
+        if count > 0:
+            # Optional: Debug log to console (can be noisy, so keep it short)
+            print(f"RX: {self._rx_buffer[-count:]}")
+            pass
 
     def read(self, nbytes=1):
         """Read up to nbytes from software buffer.
@@ -139,6 +144,19 @@ class PioUart:
             in_base=Pin(self._rx_pin, Pin.IN, Pin.PULL_UP),
             jmp_pin=Pin(self._rx_pin, Pin.IN, Pin.PULL_UP),
         )
+        self._sm_tx.active(1)
+        self._sm_rx.active(1)
+
+    def clear_buffers(self):
+        """Clear software TX and RX buffers."""
+        self._tx_buffer = []
+        self._rx_buffer = []
+        # Note: Clearing hardware FIFOs is tricky but possible by deactivating/activating
+        self._sm_tx.active(0)
+        self._sm_rx.active(0)
+        # Drain hardware FIFOs if they were stuck (though active(0) usually helps)
+        while self._sm_rx.rx_fifo() > 0:
+            self._sm_rx.get()
         self._sm_tx.active(1)
         self._sm_rx.active(1)
 

@@ -533,28 +533,57 @@ static void c_log_write(void *ctx, const char *msg) {
 
 static uint8_t c_mem_direct_read(void *ctx, uint8_t segment, uint32_t offset) {
   (void)ctx;
+  
+  /* Emulate hardware level-triggered interrupt for UART RX */
+  if (uart_rx_head != uart_rx_tail) {
+    if (!(cpu_state.reg8bit[2] & (1 << HD61700_INT1))) {
+      cpu_state.reg8bit[2] |= (1 << HD61700_INT1); /* Assert REG_IB */
+      cpu_state.state &= ~CPU_SLP; /* Wake from sleep */
+    }
+  }
+
   uint8_t bank = normalize_bank(segment);
   /* 0x0000-0x1FFF: Internal ROM / IO area */
   if (offset < 0x2000) {
-    if (bank != 0 && offset >= 0x0C00 && offset <= 0x0C03) {
-      /* MMIO UART: Trap only if NOT in ROM bank (bank 0) */
+    if (offset >= 0x0C00 && offset <= 0x0C03) {
+      /* MMIO UART: Trap in all banks (matching Python behavior) */
       if (offset == 0x0C00) {
-        /* Status register: Bit 0=RX Ready, Bit 1=TX Ready */
-        uint8_t status = 0x00;
-        if (uart_rx_head != uart_rx_tail) {
-          status |= 0x01; // RX Ready
+        /* Status register:
+         * Bit 0: TX Busy (1 = Full/Busy, 0 = Ready) -> PB-1000 technical ref says Bit 0 is TX Busy
+         * Bit 1: RX Ready (1 = Data available)
+         * Bit 2: CTS (1 = Ready)
+         * Bit 3: DSR (1 = Ready)
+         * Bit 4: DCD (1 = Ready)
+         */
+        uint8_t status = 0x1C; /* Hardcode modem lines to ready (Bits 2,3,4) */
+        if ((uint8_t)(uart_tx_head + 1) == uart_tx_tail) {
+          status |= 0x01; // TX Busy
         }
-        /* TX Ready if FIFO has space (size 256, tail/head are 8-bit) */
-        if ((uint8_t)(uart_tx_head + 1) != uart_tx_tail) {
-          status |= 0x02; // TX Ready
+        if (uart_rx_head != uart_rx_tail) {
+          status |= 0x02; // RX Ready
         }
         return status;
       }
       if (offset == 0x0C01) {
-        /* RX Data Register */
+        return 0x00;
+      }
+      if (offset == 0x0C02) {
+        uint8_t val = 0;
         if (uart_rx_head != uart_rx_tail) {
-          return uart_rx_fifo[uart_rx_tail++];
+          val = uart_rx_fifo[uart_rx_tail++];
+          /* DEBUG log for C core consumption */
+          // mp_printf(&mp_plat_print, "DB: UART RX READ (0x0C02) -> %02X (PC=%04X)\n", val, cpu_state.pc);
+          if (uart_rx_head == uart_rx_tail) {
+            /* Clear INT1 both in IRQ controller and input state */
+            hd61700_set_input(&cpu_state, HD61700_INT1, 0);
+            cpu_state.irq_status &= ~(1 << HD61700_INT1);
+            cpu_state.reg8bit[2] &= ~(1 << HD61700_INT1); /* REG_IB */
+            // mp_printf(&mp_plat_print, "DB: UART RX EMPTY -> INT1 CLEARED\n");
+          }
+          return val;
         }
+        /* DEBUG log for empty read */
+        // mp_printf(&mp_plat_print, "DB: UART RX READ EMPTY (0x0C02) (PC=%04X)\n", cpu_state.pc);
         return 0x00;
       }
     }
@@ -602,7 +631,7 @@ static void c_mem_direct_write(void *ctx, uint8_t segment, uint32_t offset,
   }
   /* 0x0C00-0x0C03: MMIO UART area */
   else if (offset < 0x2000) {
-    if (bank != 0 && offset >= 0x0C00 && offset <= 0x0C03) {
+    if (offset >= 0x0C00 && offset <= 0x0C03) {
       if (offset == 0x0C03) {
         /* TX Data Register: Push to TX FIFO */
         if ((uint8_t)(uart_tx_head + 1) != uart_tx_tail) {
@@ -1089,8 +1118,10 @@ static MP_DEFINE_CONST_FUN_OBJ_1(mod_set_uart_tx_callback_obj, mod_set_uart_tx_c
 static mp_obj_t mod_uart_rx_put(mp_obj_t byte_obj) {
   uint8_t b = (uint8_t)mp_obj_get_int(byte_obj);
   uart_rx_fifo[uart_rx_head++] = b;
-  /* Option: Trigger INT1 to notify BIOS? */
-  // hd61700_set_input(&cpu_state, HD61700_INT1, 1);
+  /* Assert INT1 to notify BIOS of incoming data */
+  hd61700_set_input(&cpu_state, HD61700_INT1, 1);
+  cpu_state.reg8bit[2] |= (1 << HD61700_INT1); /* Force REG_IB for robustness */
+  cpu_state.state &= ~CPU_SLP;
   return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(mod_uart_rx_put_obj, mod_uart_rx_put);
