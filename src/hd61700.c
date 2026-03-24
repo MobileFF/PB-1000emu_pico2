@@ -994,7 +994,7 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
         uint8_t arg1 = read_op(cpu);
         uint8_t r1 = 0;
         uint8_t f = 0;
-        uint8_t r2 = (arg & 0x40) ? 1 : 0;
+        uint8_t r2 = (arg & 0x40) ? 0 : 1;
 
         for (int n = GET_IM3(arg1); n > 0; n--) {
           r1 = (uint8_t)(r2 + (uint8_t)~READ_REG(arg));
@@ -1123,33 +1123,40 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
         cpu->icount -= 3;
       } break;
       case 0x38:
-      case 0x39:
       case 0x3a:
-      case 0x3b:
       case 0x3c:
-      case 0x3d:
-      case 0x3e:
-      case 0x3f: {
+      case 0x3e: {
         uint8_t arg = read_op(cpu);
-        bool use_iz = (op & 0x01) != 0;
-        uint16_t addr = use_iz ? REG_IZ : REG_IX;
-        addr = (uint16_t)(addr + get_sign_mreg(cpu, arg));
-        uint8_t src =
-            use_iz ? mem_readbyte_iz(cpu, REG_UA, addr)
-                   : mem_readbyte(cpu, REG_UA, addr);
-        uint16_t res =
-            src + ((op & 0x02) ? -(int)READ_REG(arg) : +(int)READ_REG(arg));
+        uint16_t addr = (uint16_t)(REG_IX + get_sign_mreg(cpu, arg));
+        uint8_t src = mem_readbyte(cpu, REG_UA, addr);
+        uint16_t res = (uint16_t)(src + ((op & 0x02) ? -(int)READ_REG(arg)
+                                                     : +(int)READ_REG(arg)));
         if (op & 0x04) {
-          if (use_iz)
-            mem_writebyte_iz(cpu, REG_UA, addr, (uint8_t)res);
-          else
-            mem_writebyte(cpu, REG_UA, addr, (uint8_t)res);
+          mem_writebyte(cpu, REG_UA, addr, (uint8_t)res);
         }
         CLEAR_FLAGS;
         CHECK_FLAG_Z((uint8_t)res);
         CHECK_FLAGB_UZ_LZ(res);
         CHECK_FLAG_C(res, 0xff);
-        cpu->icount -= 8;
+        cpu->icount -= 9;
+      } break;
+      case 0x39:
+      case 0x3b:
+      case 0x3d:
+      case 0x3f: {
+        uint8_t arg = read_op(cpu);
+        uint16_t addr = (uint16_t)(REG_IZ + get_sign_mreg(cpu, arg));
+        uint8_t src = mem_readbyte_iz(cpu, REG_UA, addr);
+        uint16_t res = (uint16_t)(src + ((op & 0x02) ? -(int)READ_REG(arg)
+                                                     : +(int)READ_REG(arg)));
+        if (op & 0x04) {
+          mem_writebyte_iz(cpu, REG_UA, addr, (uint8_t)res);
+        }
+        CLEAR_FLAGS;
+        CHECK_FLAG_Z((uint8_t)res);
+        CHECK_FLAGB_UZ_LZ(res);
+        CHECK_FLAG_C(res, 0xff);
+        cpu->icount -= 9;
       } break;
       case 0x70:
       case 0x71:

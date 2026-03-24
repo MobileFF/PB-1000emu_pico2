@@ -148,6 +148,7 @@ static void apply_lcdc_command(lcd_state_t *lcd, const uint8_t *cmd,
   lcd->active_chip = (uint8_t)chip;
   lcd_chip_state_t *st = &lcd->chip_state[chip];
   st->mode = cmd_id;
+  st->attr = mode & 0xE0; /* Store decoration bits (Bit 5: Inverse, Bit 6: Underline) */
 
   if (cmd_id == LCDC_CMD_DISPLAY_ON_OFF) {
     set_display_on_state(lcd, (mode & 0x10) != 0);
@@ -304,7 +305,9 @@ void lcd_write(lcd_state_t *lcd, uint8_t data) {
       int glyph_width = 0;
       char_code_to_bitmap(lcd, data, cols, &glyph_width);
       for (int i = 0; i < glyph_width; i++) {
-        write_vram_pixel_byte(lcd, chip, st->x + i, st->y, cols[i]);
+        uint8_t pix = (st->attr & 0x20) ? ~cols[i] : cols[i];
+        if (st->attr & 0x40) pix |= 0x80;
+        write_vram_pixel_byte(lcd, chip, st->x + i, st->y, pix);
       }
       advance_xy(lcd, st, true, false);
       active = true;

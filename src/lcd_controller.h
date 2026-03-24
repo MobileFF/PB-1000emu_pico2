@@ -53,6 +53,7 @@ typedef struct {
   int x;
   int y;
   int mode;
+  uint8_t attr;
 } lcd_chip_state_t;
 
 /* LCD controller state */

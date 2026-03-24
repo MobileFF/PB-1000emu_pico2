@@ -19,6 +19,7 @@ KEY_MENU   = ( 5, 11)  # MENU
 KEY_LCKEY  = ( 6, 11)  # LCKEY
 KEY_CAL    = ( 4, 11)  # CAL
 KEY_CLS    = ( 6,  8)  # CLS
+KEY_KANA   = (10,  8)  # KANA
 
 # Basic Key mapping: label -> (KO row, KI line)
 KEY_MAP = {
@@ -58,6 +59,7 @@ ADV_MAP = {
     (0x20, 1): [KEY_SHIFT,( 2, 4)], # Shift + 3 -> #(SFT+$)
     (0x24, 1): [KEY_SHIFT,( 2, 6)], # Shift + 7 -> SFT + = (')
     (0x32, 1): [KEY_SHIFT,( 7, 3)], # Shift + ] -> SFT + /
+    (0x38, 1): [KEY_SHIFT,( 2, 1)], # Shift + / -> SFT + , (?)
     
     # Unshifted symbols
     (0x37, 0): [(10, 6)],   # . (KO10, KI6)
@@ -103,6 +105,7 @@ SPECIAL_MAP = {
     0x3F: KEY_LCKEY,
     0x40: KEY_CAL,
     0x43: KEY_CLS,
+    0x35: KEY_KANA,
 }
 # Status Label Mapping (Scancode -> Display Name)
 STATUS_LABELS = {
@@ -126,6 +129,7 @@ STATUS_LABELS = {
     0x3D: "F4",
     0x42: "RESET",
     0x43: "CLS",
+    0x35: "KANA",
 }
 
 def get_label(scancode):

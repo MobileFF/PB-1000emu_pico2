@@ -522,7 +522,7 @@ def main():
             # AFTER usb_host.init() to avoid resource conflict. 
             # Using SM 6, 7 to further reduce conflict risk.
             try:
-                pio_uart = PioUart(tx_pin=6, rx_pin=13, baudrate=9600, sm_tx=6, sm_rx=7)
+                pio_uart = PioUart(tx_pin=6, rx_pin=13, baudrate=4800, sm_tx=6, sm_rx=7)
                 system.pio_uart = pio_uart
                 print("PIO UART (GP6/GP13) initialized on SM 6/7.")
             except Exception as e:
@@ -652,6 +652,33 @@ def main():
                     if sc >= 0:
                         import keymap
                         system.set_status(keymap.get_label(sc))
+                        
+                        # PrintScreen key (HID 0x46) detection
+                        if sc == 0x46:
+                            system.set_status("CAPTURING...")
+                            system.update_display(x_offset=16, y_offset=40)
+                            try:
+                                # 1. Capture LCD Screenshot (PBM format)
+                                ts = time.localtime()
+                                ts_str = "{:04}{:02}{:02}_{:02}{:02}{:02}".format(*ts[:6])
+                                pbm_path = f"screenshot_{ts_str}.pbm"
+                                system.lcd.save_pbm(pbm_path)
+                                
+                                # 2. Dump specific RAM areas (EDTOP ~&H6100, LCDTP ~&H68C8)
+                                # We dump 0x6000-0x7FFF as a full VRAM context
+                                ram_dump = bytearray(0x2000)
+                                import hd61700 as cpu_core
+                                for addr in range(0x6000, 0x8000):
+                                    ram_dump[addr - 0x6000] = cpu_core.read_mem(addr)
+                                
+                                with open(f"vram_dump_{ts_str}.bin", "wb") as f:
+                                    f.write(ram_dump)
+                                
+                                system.set_status("CAPTURED!", 2000)
+                                print(f"Captured: screenshot_{ts_str}.txt, vram_dump_{ts_str}.bin")
+                            except Exception as ex:
+                                print(f"Capture failed: {ex}")
+                                system.set_status("CAP ERROR!", 2000)
                 except Exception:
                     pass
 

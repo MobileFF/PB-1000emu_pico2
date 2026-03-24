@@ -98,7 +98,7 @@ class PioUart:
             count += 1
         if count > 0:
             # Optional: Debug log to console (can be noisy, so keep it short)
-            print(f"RX: {self._rx_buffer[-count:]}")
+            # print(f"RX: {self._rx_buffer[-count:]}")
             pass
 
     def read(self, nbytes=1):

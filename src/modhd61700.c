@@ -571,8 +571,10 @@ static uint8_t c_mem_direct_read(void *ctx, uint8_t segment, uint32_t offset) {
         uint8_t val = 0;
         if (uart_rx_head != uart_rx_tail) {
           val = uart_rx_fifo[uart_rx_tail++];
-          /* DEBUG log for C core consumption */
-          // mp_printf(&mp_plat_print, "DB: UART RX READ (0x0C02) -> %02X (PC=%04X)\n", val, cpu_state.pc);
+          /* DEBUG log for C core consumption: focus on ':' (0x3A) and 0x8F */
+          if (val == 0x3A || val == 0x8F) {
+            mp_printf(&mp_plat_print, "DB: UART RX READ (0x0C02) val=%02X PC=%04X tail=%d\n", val, cpu_state.pc, uart_rx_tail-1);
+          }
           if (uart_rx_head == uart_rx_tail) {
             /* Clear INT1 both in IRQ controller and input state */
             hd61700_set_input(&cpu_state, HD61700_INT1, 0);

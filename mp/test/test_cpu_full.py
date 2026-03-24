@@ -428,6 +428,78 @@ def run_tests():
 
     check("CLT", [0xF9], None, [cp(TB+1)])
 
+    # ── Multi-register Arith/Logic (0xDB) ──
+    print("\n[Multi-reg Arith/Logic (0xDB)]")
+    # INVM (Bit 6 = 1) -> DB 44 count (count 6 is 0xA0)
+    def s_invm():
+        vals = [0x55, 0xAA, 0x00, 0xFF, 0x01, 0x80]
+        for i, v in enumerate(vals): hd61700.set_reg(4+i, v)
+    check("INVM $4,6", [0xDB, 0x44, 0xA0], s_invm, [
+        cr(4, 0xAA), cr(5, 0x55), cr(6, 0xFF), cr(7, 0x00), cr(8, 0xFE), cr(9, 0x7F),
+        cf(c=True, z=False)
+    ])
+
+    # CMPM (Bit 6 = 0) -> DB 04 count (count 6 is 0xA0)
+    # 2's complement of 1 across 6 bytes -> all 0xFF
+    def s_cmpm():
+        hd61700.set_reg(4, 1)
+        for i in range(1, 6): hd61700.set_reg(4+i, 0)
+    check("CMPM $4,6 (pos 1)", [0xDB, 0x04, 0xA0], s_cmpm, [
+        cr(4, 0xFF), cr(5, 0xFF), cr(6, 0xFF), cr(7, 0xFF), cr(8, 0xFF), cr(9, 0xFF),
+        cf(c=True, z=False)
+    ])
+
+    # CMPM zero case
+    def s_cmpm_z():
+        for i in range(6): hd61700.set_reg(4+i, 0)
+    check("CMPM $4,6 (zero)", [0xDB, 0x04, 0xA0], s_cmpm_z, [
+        cr(4, 0), cr(5, 0), cr(6, 0), cr(7, 0), cr(8, 0), cr(9, 0),
+        cf(c=False, z=True)
+    ])
+
+    # ADC (IX+$2), $4 (0x38)
+    def s_adc_ix_reg():
+        hd61700.set_reg(2, 0x05)  # offset register
+        hd61700.set_reg(4, 0x11)  # source register
+        hd61700.set_reg16(0, 0x8000) # IX = 0x8000
+        hd61700.set_mem(0x8005, 0x22)
+    check("ADC (IX+$2), $4", [0x38, 0x04], s_adc_ix_reg, [
+        cm(0x8005, 0x33),  # 0x22 + 0x11 = 0x33
+        cf(c=False, z=False)
+    ])
+
+    # SBC (IZ-$SX), $5 (0x3B with arg & 0x80)
+    # $SX is usually $31
+    def s_sbc_iz_reg():
+        hd61700.set_reg(31, 10)   # offset register
+        hd61700.set_reg(5, 0x20)  # source register
+        hd61700.set_reg16(2, 0x9000) # IZ = 0x9000
+        hd61700.set_mem(0x8FF6, 0x50)  # 0x9000 - 10 = 0x8FF6
+    check("SBC (IZ-$SX), $5", [0x3B, 0x85], s_sbc_iz_reg, [
+        cm(0x8FF6, 0x30),  # 0x50 - 0x20 = 0x30
+        cf(c=False, z=False)
+    ])
+
+    # AD (IX+10), $2 (0x7C)
+    def s_ad_ix_imm():
+        hd61700.set_reg(2, 0x01)
+        hd61700.set_reg16(0, 0xA000) # IX = 0xA000
+        hd61700.set_mem(0xA00A, 0xFE)
+    check("AD (IX+10), $2", [0x7C, 0x02, 10], s_ad_ix_imm, [
+        cm(0xA00A, 0xFF),
+        cf(c=False, z=False)
+    ])
+
+    # SB (IZ-5), $3 (0x7F)
+    def s_sb_iz_imm():
+        hd61700.set_reg(3, 0x01)
+        hd61700.set_reg16(2, 0xB000) # IZ = 0xB000
+        hd61700.set_mem(0xAFFB, 0x01)
+    check("SB (IZ-5), $3", [0x7F, 0x83, 5], s_sb_iz_imm, [
+        cm(0xAFFB, 0x00),
+        cf(c=False, z=True)
+    ])
+
     print("\n" + "=" * 40)
     print(f"Result: {total_p} OK, {total_f} NG")
     print("=" * 40)
