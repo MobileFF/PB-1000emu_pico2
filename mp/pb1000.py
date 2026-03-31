@@ -1,7 +1,6 @@
-"""
-PB-1000 System Emulation
-Integrates HD61700 CPU, memory, LCD controller, and keyboard.
-"""
+# PB1000 System
+#
+#
 import hd61700 as cpu_core
 import os
 import sys
@@ -123,6 +122,8 @@ class PB1000System:
     RAM_SIZE         = 0x2000   # 8KB
     SYS_ROM_START    = 0x8000   
     EXP_RAM_SIZE     = 0x8000   # 32KB Expanded RAM
+    PROG_TRACE_START = 0xB5D6
+    PROG_TRACE_END = 0xB7E6
     _KEY_TRACE_ADDRS = {
         0x68D2: "KYSTA",
         0x68D3: "CHATA",
@@ -255,8 +256,13 @@ class PB1000System:
         cpu_core.set_port_callbacks(self._cb_port_read, self._cb_port_write)
         
         if hasattr(cpu_core, "use_c_memory"):
-            direct_mem = (not self.debug_cfg["sys"]) if direct_mem_override is None else bool(direct_mem_override)
+            # Keep direct C memory enabled by default even in sys debug mode.
+            # Python-managed memory is now opt-in via debug={"c_memory": False}.
+            direct_mem = True if direct_mem_override is None else bool(direct_mem_override)
             cpu_core.use_c_memory(direct_mem)
+            # RAMView may still exist in Python-callback mode, but delegating writes
+            # back through cpu_core.write_mem() would recurse into _mem_write().
+            self._ram_is_c_managed = bool(direct_mem)
         if hasattr(cpu_core, "use_c_lcd"):
             direct_lcd = (not self.debug_cfg["sys"]) if direct_lcd_override is None else bool(direct_lcd_override)
             cpu_core.use_c_lcd(direct_lcd)
@@ -325,6 +331,10 @@ class PB1000System:
     def _mem_write(self, segment, offset, data):
         if self.RAM_START <= offset < self.SYS_ROM_START:
             ram_index = (offset - self.RAM_START) % len(self.ram)
+            pc = cpu_core.get_pc() if hasattr(cpu_core, "get_pc") else 0
+            ua = cpu_core.get_reg8(3) if hasattr(cpu_core, "get_reg8") else 0
+            if self.PROG_TRACE_START <= offset <= self.PROG_TRACE_END:
+                print(f"[HD61700] PROG-WR PC={pc:04X} UA={ua:02X} BANK={segment & 0x03} RAM[{offset & 0xFFFF:04X}] <= {data & 0xFF:02X}")
             if self._ram_is_c_managed and hasattr(cpu_core, "write_mem"):
                 cpu_core.write_mem(offset & 0xFFFF, data & 0xFF, segment)
             else:
@@ -342,6 +352,10 @@ class PB1000System:
         elif offset >= 0x8000 and (segment & 0x03) == 1 and self.has_exp:
             exp_off = offset - 0x8000
             if exp_off < len(self.exp_ram):
+                pc = cpu_core.get_pc() if hasattr(cpu_core, "get_pc") else 0
+                ua = cpu_core.get_reg8(3) if hasattr(cpu_core, "get_reg8") else 0
+                if self.PROG_TRACE_START <= offset <= self.PROG_TRACE_END:
+                    print(f"[HD61700] PROG-WR PC={pc:04X} UA={ua:02X} BANK={segment & 0x03} RAM[{offset & 0xFFFF:04X}] <= {data & 0xFF:02X}")
                 if self._ram_is_c_managed and hasattr(cpu_core, "write_mem"):
                     cpu_core.write_mem(offset & 0xFFFF, data & 0xFF, segment)
                 else:
@@ -405,8 +419,17 @@ class PB1000System:
     def _port_read(self):
         # Bit 3 is RXD for RS-232C bit-banging
         rx_bit = self._rx_pin.value()
-        # Mirror RX bit into port_data bit 3
-        self.port_data = (self.port_data & ~0x08) | (rx_bit << 3)
+        
+        if not hasattr(self, '_port_read_count'):
+            self._port_read_count = 0
+        self._port_read_count += 1
+        
+        # PB-1000 ROM boot sequence waits for ON key (bit 0) PRESSED (0) then RELEASED (1).
+        # We simulate the key being held down for the first 100 port reads.
+        on_key_state = 0 if self._port_read_count < 100 else 1
+        
+        # Mirror RX bit into port_data bit 3 and inject ON key state into bit 0
+        self.port_data = (self.port_data & ~0x09) | (rx_bit << 3) | on_key_state
         return self.port_data
 
     def _port_write(self, data):
@@ -569,8 +592,8 @@ class PB1000System:
                     if hasattr(cpu_core, "set_flags"):
                         cpu_core.set_flags(int(regs["flags"]))
                     cpu_core.set_reg8(4, int(regs["ia"]))
-                    cpu_core.set_reg8(2, int(regs["ib"]))
-                    cpu_core.set_reg8(5, int(regs["IE"])) if "IE" in regs else cpu_core.set_reg8(5, int(regs.get("ie", 0)))
+                    cpu_core.set_reg8(2, 0) # Clear IB (Interrupt Request) to prevent instant IRQ on PC=0000
+                    cpu_core.set_reg8(5, 0) # Clear IE (Interrupt Enable)
                     cpu_core.set_reg8(3, int(regs["ua"]))
                     for i, v in enumerate(regs["regmain"]):
                         cpu_core.set_reg(i, int(v))
@@ -671,7 +694,9 @@ class PB1000System:
         if self.pio_uart is not None and hasattr(self.pio_uart, "_sm_tx"):
              # main.py already handles polling for MMIO, but we keep this for consistency
              self.pio_uart.service_tx()
-             self.pio_uart.service_rx()
+             result = self.pio_uart.service_rx()
+             if result:
+                 self.set_status(result,10000)
 
     def update_display(self, x_offset=None, y_offset=None):
         if x_offset is not None: self._disp_x = x_offset
@@ -829,3 +854,237 @@ class PB1000System:
         if hasattr(cpu_core, "get_reg8"):
             return bool(cpu_core.get_reg8(5) & 0x40)
         return True
+
+    def debug_step(self,pause=True,trace=True,prt=True,trace_index=None,out=None):
+        """Execute one instruction and print disassembly."""
+        if trace==False:
+            return cpu_core.step()
+
+        if out is None:
+            out = print
+        
+        pc = cpu_core.get_pc()
+        flags = cpu_core.get_flags()
+        
+        # Decode flags: Z(80), C(40), LZ(20), UZ(10), SW(08), APO(04)
+        f_str = ""
+        f_str += "Z" if flags & 0x80 else "-"
+        f_str += "C" if flags & 0x40 else "-"
+        f_str += "L" if flags & 0x20 else "-"
+        f_str += "U" if flags & 0x10 else "-"
+        f_str += "S" if flags & 0x08 else "-"
+        f_str += "A" if flags & 0x04 else "-"
+
+        op_bytes = cpu_core.step()
+        if not op_bytes:
+            #print("not op_bytes")
+            return None
+
+        hex_str = "".join(f"{x:02X}" for x in op_bytes)
+        try:
+            from debug import decode_basic
+            mnemonic = decode_basic(op_bytes, pc)
+        except Exception as e:
+            mnemonic = f"Parse Error: {e}"
+
+        prefix = f"{trace_index:05d} : " if trace_index is not None else ""
+
+        def _read_bank0_u8(addr):
+            if hasattr(cpu_core, "read_mem"):
+                return cpu_core.read_mem(addr, 0) & 0xFF
+            return 0
+
+        def _read_bank0_u16(addr):
+            lo = _read_bank0_u8(addr)
+            hi = _read_bank0_u8(addr + 1)
+            return lo | (hi << 8)
+
+        def _read_bank0_hex(addr, count):
+            return " ".join(
+                f"{_read_bank0_u8((addr + i) & 0xFFFF):02X}" for i in range(count)
+            )
+
+        extra_lines = []
+        if pc in (0x9A2F, 0x9A3C):
+            sbot = _read_bank0_u16(0x6933)
+            forsk = _read_bank0_u16(0x6935)
+            extra_lines.append(
+                f"BSAVE-OM {pc:04X}: SBOT={sbot:04X} FORSK={forsk:04X} FREE={(forsk - sbot) & 0xFFFF:04X}"
+            )
+        elif pc in (0xB2A3, 0xB2AB):
+            memen = _read_bank0_u16(0x6945)
+            datdi = _read_bank0_u16(0x6947)
+            r01 = (cpu_core.get_reg(1) << 8) | cpu_core.get_reg(0)
+            r45 = (cpu_core.get_reg(5) << 8) | cpu_core.get_reg(4)
+            r67 = (cpu_core.get_reg(7) << 8) | cpu_core.get_reg(6)
+            extra_lines.append(
+                f"BSAVE-OM {pc:04X}: MEMEN={memen:04X} DATDI={datdi:04X} FREE={(datdi - memen) & 0xFFFF:04X} REQ={r01:04X} R45={r45:04X} R67={r67:04X}"
+            )
+        elif pc in (0xB34A, 0xB353):
+            memen = _read_bank0_u16(0x6945)
+            datdi = _read_bank0_u16(0x6947)
+            basdi = _read_bank0_u16(0x6949)
+            r23 = (cpu_core.get_reg(3) << 8) | cpu_core.get_reg(2)
+            extra_lines.append(
+                f"BSAVE-OM {pc:04X}: MEMEN={memen:04X} DATDI={datdi:04X} BASDI={basdi:04X} DIRFREE={(r23 - 0x0021) & 0xFFFF:04X} R23={r23:04X}"
+            )
+        elif pc in (0xB201, 0xB203, 0xB205, 0xB215):
+            r01 = (cpu_core.get_reg(1) << 8) | cpu_core.get_reg(0)
+            r23 = (cpu_core.get_reg(3) << 8) | cpu_core.get_reg(2)
+            r3031 = (cpu_core.get_reg(31) << 8) | cpu_core.get_reg(30)
+            sy = cpu_core.get_sreg(1) & 0x1F
+            extra_lines.append(
+                f"BSAVE-OM {pc:04X}: SY={sy:02X} R01={r01:04X} R23={r23:04X} R30_31={r3031:04X} R30={cpu_core.get_reg(30):02X} R31={cpu_core.get_reg(31):02X}"
+            )
+        elif pc in (0xB720, 0xB724, 0xB726, 0xDCBC, 0xDCBF):
+            nowfl = _read_bank0_u16(0x6F54)
+            ix = cpu_core.get_reg16(0)
+            if pc == 0xB720:
+                extra_lines.append(
+                    f"BSAVE-OM {pc:04X}: NOWFL={nowfl:04X} IX={ix:04X} RAM[6F54:6F5B]={_read_bank0_hex(0x6F54, 8)}"
+                )
+            elif pc == 0xB724:
+                r12 = (cpu_core.get_reg(2) << 8) | cpu_core.get_reg(1)
+                extra_lines.append(
+                    f"BSAVE-OM {pc:04X}: NOWFL={nowfl:04X} IX={ix:04X} R1_2={r12:04X} RAM[6F54:6F5B]={_read_bank0_hex(0x6F54, 8)}"
+                )
+            elif pc == 0xB726:
+                r12 = (cpu_core.get_reg(2) << 8) | cpu_core.get_reg(1)
+                extra_lines.append(
+                    f"BSAVE-OM {pc:04X}: NOWFL={nowfl:04X} IX={ix:04X} R1_2={r12:04X} RAM[6F54:6F5B]={_read_bank0_hex(0x6F54, 8)}"
+                )
+            else:
+                sy = cpu_core.get_sreg(1) & 0x1F
+                addr = (ix + cpu_core.get_reg(sy)) & 0xFFFF
+                m0 = _read_bank0_u8(addr)
+                m1 = _read_bank0_u8((addr + 1) & 0xFFFF)
+                m2 = _read_bank0_u8((addr + 2) & 0xFFFF)
+                m3 = _read_bank0_u8((addr + 3) & 0xFFFF)
+                r2526 = (cpu_core.get_reg(26) << 8) | cpu_core.get_reg(25)
+                r2728 = (cpu_core.get_reg(28) << 8) | cpu_core.get_reg(27)
+                extra_lines.append(
+                    f"BSAVE-OM {pc:04X}: NOWFL={nowfl:04X} IX={ix:04X} SY={sy:02X} SRC={addr:04X} MEM={m0:02X} {m1:02X} {m2:02X} {m3:02X} R25_26={r2526:04X} R27_28={r2728:04X} RAM[6F54:6F5B]={_read_bank0_hex(0x6F54, 8)}"
+                )
+        elif pc in (0xD23F, 0xD242):
+            iz = cpu_core.get_reg16(2)
+            r01 = (cpu_core.get_reg(1) << 8) | cpu_core.get_reg(0)
+            extra_lines.append(
+                f"BSAVE-OM {pc:04X}: IZ={iz:04X} R01={r01:04X} RAM[6FCC:6FD3]={_read_bank0_hex(0x6FCC, 8)}"
+            )
+        elif pc in (0xD2BB, 0xD2C9, 0xD2CD, 0xD2D7, 0xD2E7):
+            r01 = (cpu_core.get_reg(1) << 8) | cpu_core.get_reg(0)
+            r23 = (cpu_core.get_reg(3) << 8) | cpu_core.get_reg(2)
+            r2021 = (cpu_core.get_reg(21) << 8) | cpu_core.get_reg(20)
+            extra_lines.append(
+                f"BSAVE-OM {pc:04X}: R01={r01:04X} R23={r23:04X} R20_21={r2021:04X} RAM[6FAF:6FB4]={_read_bank0_hex(0x6FAF, 6)} RAM[6FCC:6FD3]={_read_bank0_hex(0x6FCC, 8)}"
+            )
+            if pc in (0xD2CD, 0xD2D7):
+                extra_lines.append(
+                    f"BSAVE-OM {pc:04X}: RAM[6E1D:6E24]={_read_bank0_hex(0x6E1D, 8)} RAM[6F74:6F7B]={_read_bank0_hex(0x6F74, 8)}"
+                )
+        elif pc in (0xB1C2, 0xB1E8, 0xB1EB, 0xB1F4, 0xB201, 0xB210):
+            ix = cpu_core.get_reg16(0)
+            r0102 = (cpu_core.get_reg(2) << 16) | (cpu_core.get_reg(1) << 8) | cpu_core.get_reg(0)
+            r34 = (cpu_core.get_reg(4) << 8) | cpu_core.get_reg(3)
+            r5 = cpu_core.get_reg(5)
+            extra_lines.append(
+                f"BSAVE-OM {pc:04X}: IX={ix:04X} R0={cpu_core.get_reg(0):02X} R1={cpu_core.get_reg(1):02X} R2={cpu_core.get_reg(2):02X} R3={cpu_core.get_reg(3):02X} R4={cpu_core.get_reg(4):02X} R5={r5:02X} R34={r34:04X} RAM[6F74:6F7B]={_read_bank0_hex(0x6F74, 8)}"
+            )
+            if ix:
+                extra_lines.append(
+                    f"BSAVE-OM {pc:04X}: IXMEM[{ix:04X}]={_read_bank0_hex(ix, 8)}"
+                )
+        elif pc in (0xDCE4, 0xDCE7, 0xE00B, 0xE011, 0xE013, 0xE019):
+            r01 = (cpu_core.get_reg(1) << 8) | cpu_core.get_reg(0)
+            r2324 = (cpu_core.get_reg(24) << 8) | cpu_core.get_reg(23)
+            r2526 = (cpu_core.get_reg(26) << 8) | cpu_core.get_reg(25)
+            r2728 = (cpu_core.get_reg(28) << 8) | cpu_core.get_reg(27)
+            r3031 = (cpu_core.get_reg(31) << 8) | cpu_core.get_reg(30)
+            sy = cpu_core.get_sreg(1) & 0x1F
+            extra_lines.append(
+                f"BSAVE-OM {pc:04X}: SY={sy:02X} R01={r01:04X} R23_24={r2324:04X} R25_26={r2526:04X} R27_28={r2728:04X} R30_31={r3031:04X}"
+            )
+        elif pc == 0xABBD:
+            r01 = (cpu_core.get_reg(1) << 8) | cpu_core.get_reg(0)
+            r45 = (cpu_core.get_reg(5) << 8) | cpu_core.get_reg(4)
+            r67 = (cpu_core.get_reg(7) << 8) | cpu_core.get_reg(6)
+            r3031 = (cpu_core.get_reg(31) << 8) | cpu_core.get_reg(30)
+            extra_lines.append(
+                f"BSAVE-OM TRAP {pc:04X}: R01={r01:04X} R45={r45:04X} R67={r67:04X} R30_31={r3031:04X} IX={cpu_core.get_reg16(0):04X} IZ={cpu_core.get_reg16(2):04X}"
+            )
+
+        line = f"{prefix}[{pc:04X}] {hex_str:<10} | F:{f_str} | {mnemonic} "
+        if pause:
+            print(f"{line}| ",end="")
+            for extra in extra_lines:
+                print()
+                print(extra, end="")
+            while True:
+                cmd = input(">")
+                if cmd and cmd.strip().upper().startswith("R"):
+                    self.print_registers()
+                elif cmd and cmd.strip().upper().startswith("D"):
+                    addr = int(input("address:"),16)
+                    from main import dump_mem
+                    dump_mem(addr,1,self)
+                else:
+                    break
+        else:
+            if prt:
+                out(line)
+                for extra in extra_lines:
+                    out(extra)
+        return line
+            
+    def print_registers(self, printer=print):
+        regs = [cpu_core.get_reg(i) for i in range(32)]
+        printer("Registers:")
+        for idx in range(0, 32, 4):
+            chunk = " ".join(f"${idx + j:02d}={regs[idx + j]:02X}" for j in range(4))
+            printer(f"  {chunk}")
+        if hasattr(cpu_core, "get_reg8"):
+            ia = cpu_core.get_reg8(4)
+            ib = cpu_core.get_reg8(2)
+            ua = cpu_core.get_reg8(3)
+            ie = cpu_core.get_reg8(5)
+            printer(f"IA: IA={ia:02X} IB={ib:02X} UA={ua:02X} IE={ie:02X}")
+        if hasattr(cpu_core, "get_sreg"):
+            sx = cpu_core.get_sreg(0)
+            sy = cpu_core.get_sreg(1)
+            sz = cpu_core.get_sreg(2)
+            printer(f"SIR: SX={sx:02X} SY={sy:02X} SZ={sz:02X}")
+        pair_names = ["IX", "IY", "IZ", "US", "SS", "KY"]
+        pair_values = [cpu_core.get_reg16(i) for i in range(6)]
+        pairs = " ".join(f"{pair_names[i]}={pair_values[i]:04X}" for i in range(len(pair_names)))
+        printer(f"16-bit: {pairs}")
+
+#     def set_pc(self, addr):
+#             """Set CPU PC (debug helper)."""
+#             cpu_core.set_pc(addr & 0xFFFF)
+
+    def dump_mem_range(self, start, end, bytes_per_line=16, printer=print):
+        """Dump linear memory bytes [start..end] in hex."""
+        start &= 0xFFFF
+        end &= 0xFFFF
+        if end < start:
+            printer(f"Invalid range: {start:04X}-{end:04X}")
+            return
+
+        printer(f"MEM DUMP {start:04X}-{end:04X} ({end - start + 1} bytes)")
+        addr = start
+        while addr <= end:
+            line_end = addr + bytes_per_line - 1
+            if line_end > end:
+                line_end = end
+            vals = []
+            a = addr
+            while a <= line_end:
+                vals.append(f"{self._mem_read_impl(0, a):02X}")
+                a += 1
+            printer(f"{addr:04X}: {' '.join(vals)}")
+            addr += bytes_per_line
+
+
+
+
+

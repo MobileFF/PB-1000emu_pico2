@@ -1,4 +1,4 @@
-/*
+﻿/*
  * MicroPython C Module wrapper for HD61700 CPU
  * Exposes HD61700 CPU core to MicroPython as 'hd61700' module
  */
@@ -30,6 +30,10 @@ static uint8_t ram_buf[0x2000];     // 8KB RAM (0x6000-0x7FFF)
 static uint8_t exp_ram_buf[0x8000]; // 32KB Expanded RAM (Bank 1: 0x8000-0xFFFF)
 static bool has_exp_ram = false;
 static bool has_exp_ram_forced = false;
+
+/* Dedup trace state for SSTOP/SBOT (0x6931-0x6934). */
+static uint8_t sstop_sbot_last[4];
+static bool sstop_sbot_last_valid[4];
 
 /* Direct C mode flags */
 static bool use_c_mem = false;
@@ -425,6 +429,111 @@ static inline uint8_t normalize_bank(uint8_t segment) {
   return (segment <= 3) ? (segment & 0x03u) : ((segment >> 4) & 0x03u);
 }
 
+/* Focused write-tracing for PBFTOBIN source area in RAM. */
+#define PROG_TRACE_START 0xB5D6u
+#define PROG_TRACE_END 0xB7E6u
+#define SSTOP_SBOT_TRACE_START 0x6931u
+#define SSTOP_SBOT_TRACE_END 0x6934u
+#define ENABLE_PROG_WRITE_TRACE 1
+#define ENABLE_SSTOP_SBOT_WRITE_TRACE 1
+#define DIR_ENTRY_TRACE_START 0x6F54u
+#define DIR_ENTRY_TRACE_END 0x6F95u
+#define ENABLE_DIR_ENTRY_TRACE 1
+
+static inline bool is_prog_trace_addr(uint32_t offset) {
+  return offset >= PROG_TRACE_START && offset <= PROG_TRACE_END;
+}
+
+static inline bool is_sstop_sbot_trace_addr(uint32_t offset) {
+  return offset >= SSTOP_SBOT_TRACE_START && offset <= SSTOP_SBOT_TRACE_END;
+}
+
+
+static inline bool is_dir_entry_trace_addr(uint32_t offset) {
+  return offset >= DIR_ENTRY_TRACE_START && offset <= DIR_ENTRY_TRACE_END;
+}
+static inline bool should_log_sstop_sbot_write(uint32_t offset, uint8_t data) {
+  if (!is_sstop_sbot_trace_addr(offset)) {
+    return false;
+  }
+  uint32_t idx = offset - SSTOP_SBOT_TRACE_START;
+  if (idx >= 4u) {
+    return false;
+  }
+  if (sstop_sbot_last_valid[idx] && sstop_sbot_last[idx] == data) {
+    return false;
+  }
+  sstop_sbot_last_valid[idx] = true;
+  sstop_sbot_last[idx] = data;
+  return true;
+}
+
+static void format_last_opcodes(char *out, size_t out_size) {
+  static const char hex[] = "0123456789ABCDEF";
+  if (out_size == 0) {
+    return;
+  }
+
+  size_t op_len = cpu_state.last_op_len;
+  if (op_len > sizeof(cpu_state.last_opcodes)) {
+    op_len = sizeof(cpu_state.last_opcodes);
+  }
+  if (op_len == 0) {
+    if (out_size >= 2) {
+      out[0] = '-';
+      out[1] = '\0';
+    } else {
+      out[0] = '\0';
+    }
+    return;
+  }
+
+  size_t pos = 0;
+  for (size_t i = 0; i < op_len; i++) {
+    if (i > 0) {
+      if (pos + 1 >= out_size) {
+        break;
+      }
+      out[pos++] = ' ';
+    }
+    if (pos + 2 >= out_size) {
+      break;
+    }
+    uint8_t b = cpu_state.last_opcodes[i];
+    out[pos++] = hex[(b >> 4) & 0x0F];
+    out[pos++] = hex[b & 0x0F];
+  }
+  out[pos] = '\0';
+}
+
+static void log_watch_write(const char *tag, uint8_t bank, uint32_t offset,
+                            uint8_t data, const char *note) {
+  char op_hex[(sizeof(cpu_state.last_opcodes) * 3)];
+  uint8_t op_len = cpu_state.last_op_len;
+  if (op_len > sizeof(cpu_state.last_opcodes)) {
+    op_len = sizeof(cpu_state.last_opcodes);
+  }
+  format_last_opcodes(op_hex, sizeof(op_hex));
+
+  /*
+  if (note != NULL && note[0] != '\0') {
+    mp_printf(&mp_plat_print,
+              "[HD61700] %s PC=%04X UA=%02X BANK=%u RAM[%04X] <= %02X OPLEN=%u OP=%s (%s)\n",
+              tag, (unsigned int)cpu_state.pc,
+              (unsigned int)cpu_state.reg8bit[3], (unsigned int)bank,
+              (unsigned int)offset, (unsigned int)data,
+              (unsigned int)op_len, op_hex, note);
+  } else {
+    mp_printf(&mp_plat_print,
+              "[HD61700] %s PC=%04X UA=%02X BANK=%u RAM[%04X] <= %02X OPLEN=%u OP=%s\n",
+              tag, (unsigned int)cpu_state.pc,
+              (unsigned int)cpu_state.reg8bit[3], (unsigned int)bank,
+              (unsigned int)offset, (unsigned int)data,
+              (unsigned int)op_len, op_hex);
+  }
+  */
+}
+
 /* Auto-detect expanded RAM image from common paths. */
 static bool detect_exp_ram_file(void) {
   struct stat st;
@@ -620,6 +729,18 @@ static void c_mem_direct_write(void *ctx, uint8_t segment, uint32_t offset,
   /* Only write to RAM area (0x6000-0x7FFF) */
   if (offset >= 0x6000 && offset < 0x8000) {
     ram_buf[offset - 0x6000] = data;
+    /*
+    if (ENABLE_PROG_WRITE_TRACE && is_prog_trace_addr(offset)) {
+      log_watch_write("PROG-WR", bank, offset, data, NULL);
+    }
+    if (ENABLE_DIR_ENTRY_TRACE && is_dir_entry_trace_addr(offset)) {
+      log_watch_write("DIR-WR", bank, offset, data, NULL);
+    }
+    if (ENABLE_SSTOP_SBOT_WRITE_TRACE &&
+        should_log_sstop_sbot_write(offset, data)) {
+      log_watch_write("SSTOP/SBOT-WR", bank, offset, data, NULL);
+    }
+    */
     if (cpu_debug_enabled && cpu_key_debug_enabled &&
         is_key_trace_addr(offset)) {
       mp_printf(&mp_plat_print, "[HD61700] C RAM WRITE: %04X <= %02X\n",
@@ -647,7 +768,14 @@ static void c_mem_direct_write(void *ctx, uint8_t segment, uint32_t offset,
   else if (offset >= 0x8000 && bank == 1) {
     if (has_exp_ram) {
       exp_ram_buf[offset - 0x8000] = data;
+      if (ENABLE_PROG_WRITE_TRACE && is_prog_trace_addr(offset)) {
+        log_watch_write("PROG-WR", bank, offset, data, NULL);
+      }
+    } else if (is_prog_trace_addr(offset)) {
+      log_watch_write("PROG-WR-IGN", bank, offset, data, "no exp RAM");
     }
+  } else if (is_prog_trace_addr(offset)) {
+    log_watch_write("PROG-WR-IGN", bank, offset, data, "bank not writable");
   }
 }
 
@@ -682,6 +810,8 @@ static mp_obj_t mod_reset(size_t n_args, const mp_obj_t *args) {
   uart_rx_tail = 0;
   hd61700_set_key_debug(&cpu_state, cpu_debug_enabled && cpu_key_debug_enabled);
   hd61700_set_lcd_debug(&cpu_state, cpu_debug_enabled && cpu_lcd_debug_enabled);
+  memset(sstop_sbot_last, 0, sizeof(sstop_sbot_last));
+  memset(sstop_sbot_last_valid, 0, sizeof(sstop_sbot_last_valid));
   /* Fallback auto-detection so C direct-memory mode also works without
      explicit Python-side set_has_exp_ram(). */
   if (!has_exp_ram_forced) {
@@ -709,6 +839,8 @@ static mp_obj_t mod_set_debug(mp_obj_t enabled_obj) {
   hd61700_set_debug(&cpu_state, cpu_debug_enabled);
   hd61700_set_key_debug(&cpu_state, cpu_debug_enabled && cpu_key_debug_enabled);
   hd61700_set_lcd_debug(&cpu_state, cpu_debug_enabled && cpu_lcd_debug_enabled);
+  memset(sstop_sbot_last, 0, sizeof(sstop_sbot_last));
+  memset(sstop_sbot_last_valid, 0, sizeof(sstop_sbot_last_valid));
   return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(mod_set_debug_obj, mod_set_debug);
@@ -940,11 +1072,11 @@ static mp_obj_t mod_set_registers(mp_obj_t buf_obj) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(mod_set_registers_obj, mod_set_registers);
 
-// hd61700.step() -> 実行した命令の bytes オブジェクトを返す
+// hd61700.step() -> 陞ｳ貅ｯ・｡蠕鯉ｼ邵ｺ貅ｷ螟夊脂・､邵ｺ・ｮ bytes 郢ｧ・ｪ郢晄じ縺夂ｹｧ・ｧ郢ｧ・ｯ郢晏現・帝恆譁絶・
 static mp_obj_t mod_step(void) {
   hd61700_step(&cpu_state);
 
-  // 実行したバイト列を MicroPython の bytes 型として返す
+  // 陞ｳ貅ｯ・｡蠕鯉ｼ邵ｺ貅倥Σ郢ｧ・､郢昜ｺ･繝ｻ郢ｧ繝ｻMicroPython 邵ｺ・ｮ bytes 陜吩ｹ昶・邵ｺ蜉ｱ窶ｻ髴第鱒笘・
   return mp_obj_new_bytes(cpu_state.last_opcodes, cpu_state.last_op_len);
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(mod_step_obj, mod_step);
@@ -1248,7 +1380,7 @@ static const mp_rom_map_elem_t hd61700_module_globals_table[] = {
     {MP_ROM_QSTR(MP_QSTR_set_reg16), MP_ROM_PTR(&mod_set_reg16_obj)},
     {MP_ROM_QSTR(MP_QSTR_set_sreg), MP_ROM_PTR(&mod_set_sreg_obj)},
     {MP_ROM_QSTR(MP_QSTR_set_registers), MP_ROM_PTR(&mod_set_registers_obj)},
-    /* ステップ実行用 */
+    /* 郢ｧ・ｹ郢昴・繝｣郢晄懶ｽｮ貅ｯ・｡讙守舞 */
     {MP_ROM_QSTR(MP_QSTR_step), MP_ROM_PTR(&mod_step_obj)},
     /* Optimization APIs */
     {MP_ROM_QSTR(MP_QSTR_load_rom), MP_ROM_PTR(&mod_load_rom_obj)},
@@ -1307,3 +1439,14 @@ MP_REGISTER_MODULE(MP_QSTR_hd61700, hd61700_user_cmodule);
 // Since we can't easily run code on module load in usermod without a custom
 // init, we'll add this to the table and call it from Python.
 // Actually, we can add it to the globals and the user will call it.
+
+
+
+
+
+
+
+
+
+
+

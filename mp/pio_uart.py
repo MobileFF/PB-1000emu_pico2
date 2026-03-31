@@ -99,7 +99,10 @@ class PioUart:
         if count > 0:
             # Optional: Debug log to console (can be noisy, so keep it short)
             # print(f"RX: {self._rx_buffer[-count:]}")
-            pass
+            if 26 in self._rx_buffer[-count:]:
+                print("[EOF Received]")
+                return "[EOF Received]"
+            #pass
 
     def read(self, nbytes=1):
         """Read up to nbytes from software buffer.

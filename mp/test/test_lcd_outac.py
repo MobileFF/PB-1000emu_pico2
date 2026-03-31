@@ -126,7 +126,7 @@ def run_outac_once(system,update_step=100):
     for i, b in enumerate(stub):
         system.ram[(base + i) % len(system.ram)] = b
 
-    system.set_pc(stub_addr)
+    system.pc = stub_addr
     dbg = False
     # Run the stub
     # Using larger chunks and stop_pc for much better performance

@@ -72,8 +72,8 @@ def _parse_sir_or_imm5(b, idx, arg):
     return f"${get_sir_name(sel)}", idx
 
 
-def _parse_optional_jr(b, idx, arg, pc, inst_len):
-    if not (arg & 0x80):
+def _parse_optional_jr(b, idx, arg, pc, inst_len, allow_jr=True):
+    if (not allow_jr) or not (arg & 0x80):
         return "", idx
     skip = 0
     # Internal ROM is word-aligned.
@@ -85,12 +85,13 @@ def _parse_optional_jr(b, idx, arg, pc, inst_len):
             skip = 1
     off = _read_u8(b, idx + skip)
     if off is None:
-        # no byte available for JR offset – show a question mark
+        # no byte available for JR offset 遯ｶ繝ｻshow a question mark
         if pc is None:
             return ", JR ?", idx
         # with PC we can indicate target is unknown
         return ", JR ? -> &H????", idx
-    signed = _fmt_signed7(off)
+    # signed = _fmt_signed7(off)
+    signed = -off if (arg & 0x80) else off
     if pc is None:
         return f", JR {signed:+d}", idx + skip + 1
     pc_after = _advance_fetch_addr(pc, idx + skip + 1)
@@ -671,9 +672,7 @@ def decode_basic(b, pc=None):
         base = "IZ" if (op & 0x01) else "IX"
         sign = "-" if (arg & 0x80) else "+"
         mnem = ["ADCW", "SBCW", "ADW", "SBW"][(op & 0x06) >> 1]
-        jr, _ = _parse_optional_jr(b, i, arg, pc, i + 1)
-        return f"{mnem} ({base}{sign}{src}) , {_fmt_regpair(arg)}{jr}"
-
+        return f"{mnem} ({base}{sign}{src}) , {_fmt_regpair(arg)}"
     if op in (0xC0, 0xC1, 0xC8, 0xC9):
         arg = _read_u8(b, i)
         if arg is None:

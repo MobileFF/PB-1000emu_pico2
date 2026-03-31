@@ -105,12 +105,15 @@ def run_tests():
             total_f += 1
 
     def cr(r, e): return lambda: (R(r)==e, f"R{r}={R(r):02X}!={e:02X}")
+    def cr16(r, e): return lambda: (hd61700.get_reg16(r)==e, f"R{r}16={hd61700.get_reg16(r):04X}!={e:04X}")
     def cm(a, e): return lambda: (M(a)==e, f"[{a:04X}]={M(a):02X}!={e:02X}")
-    def cf(z=None, c=None):
+    def cf(z=None, c=None, lz=None, uz=None):
         def _ck():
             f = F(); e = []
             if z is not None and bool(f&0x80)!=z: e.append(f"Z={bool(f&0x80)}")
             if c is not None and bool(f&0x40)!=c: e.append(f"C={bool(f&0x40)}")
+            if lz is not None and bool(f&0x20)!=lz: e.append(f"LZ={bool(f&0x20)}")
+            if uz is not None and bool(f&0x10)!=uz: e.append(f"UZ={bool(f&0x10)}")
             return (len(e)==0, ",".join(e)) if e else (True,"")
         return _ck
     def cp(e): return lambda: (PC()==e, f"PC={PC():04X}!={e:04X}")
@@ -261,6 +264,54 @@ def run_tests():
         hd61700.write_mem(0x6500,0xAA)
     check("LD R0,(IX+)", [0x28,0x20], ix2, [cr(0,0xAA)])
 
+    def ix2i():
+        hd61700.set_reg(0,0); hd61700.set_reg(1,0)
+        hd61700.set_reg16(0,0x6500); hd61700.set_sreg(1,1)
+        hd61700.write_mem(0x6500,0xBB)
+    check("LDI R0,(IX+)", [0x2A,0x20], ix2i, [cr(0,0xBB), cr16(0,0x6501)])
+
+    def iz2i():
+        hd61700.set_reg(0,0); hd61700.set_reg(1,0)
+        hd61700.set_reg16(2,0x6500); hd61700.set_sreg(1,1)
+        hd61700.write_mem(0x6500,0xCC)
+    check("LDI R0,(IZ+)", [0x2B,0x20], iz2i, [cr(0,0xCC), cr16(2,0x6501)])
+
+    def iz_std():
+        hd61700.set_reg(0,0xAA)
+        hd61700.set_reg16(2,0x7000)
+    check("STD IZ -20", [0x65,0x80,0x14], iz_std,
+          [cr16(2,0x6FEC), cm(0x6FEC,0xAA)])
+
+    def iz_sti_restore():
+        hd61700.set_reg(0,0xCC)
+        hd61700.set_reg16(2,0x7000)
+    check("STI IZ -20 (no restore)", [0x63,0x80,0x14], iz_sti_restore,
+          [cr16(2,0x6FED), cm(0x6FEC,0xCC)])
+
+    def stw_ix():
+        hd61700.set_reg(0,0x34); hd61700.set_reg(1,0x00)
+        hd61700.set_reg16(0,0x6500); hd61700.set_sreg(1,1)
+    check("STW IX+ (restore)", [0xA0,0x20], stw_ix,
+          [cm(0x6500,0x34), cm(0x6501,0x00), cr16(0,0x6500)])
+
+    def stiw_ix():
+        hd61700.set_reg(0,0xAA); hd61700.set_reg(1,0x00)
+        hd61700.set_reg16(0,0x6500); hd61700.set_sreg(1,1)
+    check("STIW IX+ (no restore)", [0xA2,0x20], stiw_ix,
+          [cm(0x6500,0xAA), cm(0x6501,0x00), cr16(0,0x6502)])
+
+    def stdw_ix():
+        hd61700.set_reg(0,0x11); hd61700.set_reg(1,0x00)
+        hd61700.set_reg16(0,0x6500); hd61700.set_sreg(1,1)
+    check("STDW IX", [0xA4,0x20], stdw_ix,
+          [cm(0x6500,0x11), cm(0x64FF,0x00), cr16(0,0x64FF)])
+
+    def stdm_iz():
+        hd61700.set_reg(0,0x33); hd61700.set_reg(1,0x44); hd61700.set_reg(2,0x55)
+        hd61700.set_reg16(2,0x7000); hd61700.set_sreg(1,1)
+    check("STDM IZ reverse", [0xE5,0x22,0x03], stdm_iz,
+          [cm(0x7001,0x55), cm(0x7000,0x44), cm(0x6FFF,0x33), cr16(2,0x6999)])
+
     # ── Stack ──
     print("\n[Stack]")
     def sk1():
@@ -346,6 +397,40 @@ def run_tests():
     code = [0x82, 0x80, 0x00, 0x03, 0x42, 0x00, 0xAA, 0x42, 0x00, 0x55]
     check("LDW+JR consumes offset", code, lj, [cr(0,0x55)])
 
+    def adcw_jr():
+        hd61700.set_reg(0, 0x01); hd61700.set_reg(1, 0x00)
+        hd61700.set_reg(2, 0x02); hd61700.set_reg(3, 0x00)
+        hd61700.set_sreg(0, 2)  # SX -> R2:R3
+    adcw_jr_code = [0x80, 0x80, 0x06,
+                    0x42, 0x00, 0xAA,
+                    0x37, (TB + 12) & 0xFF, (TB + 12) >> 8,
+                    0x42, 0x00, 0x55,
+                    0xF8]
+    check("ADCW+JR consumes offset", adcw_jr_code, adcw_jr, [cr(0, 0x55), cp(TB + 13)])
+
+    def sbw_jr():
+        hd61700.set_reg(0, 0x05); hd61700.set_reg(1, 0x00)
+        hd61700.set_reg(2, 0x03); hd61700.set_reg(3, 0x00)
+        hd61700.set_sreg(0, 2)  # SX -> R2:R3
+    sbw_jr_code = [0x89, 0x80, 0x06,
+                   0x42, 0x00, 0xAA,
+                   0x37, (TB + 12) & 0xFF, (TB + 12) >> 8,
+                   0x42, 0x00, 0x55,
+                   0xF8]
+    check("SBW+JR consumes offset", sbw_jr_code, sbw_jr, [cr(0, 0x55), cp(TB + 13)])
+
+    def sbw_mem_no_jr():
+        hd61700.set_reg16(0, 0x6500)  # IZ
+        hd61700.set_sreg(0, 0)        # SX = R0:R1 offset source, value 0
+        hd61700.set_reg(0, 0x01); hd61700.set_reg(1, 0x00)
+        hd61700.write_mem(0x6500, 0x05); hd61700.write_mem(0x6501, 0x00)
+    sbw_mem_no_jr_code = [0xBF, 0x80,
+                          0x42, 0x00, 0xAA,
+                          0x37, (TB + 11) & 0xFF, (TB + 11) >> 8,
+                          0x42, 0x00, 0x55,
+                          0xF8]
+    check("SBW mem keeps no-JR", sbw_mem_no_jr_code, sbw_mem_no_jr, [cr(0, 0xAA), cp(TB + 12)])
+
     # ensure debugger shows '?' when JR byte missing
     from debug import decode_basic
     def dt():
@@ -354,6 +439,26 @@ def run_tests():
     small = [0x82, 0x80]
     result = decode_basic(small, TB)
     check("decode_missing_jr", [], dt, [lambda: ("JR ?" in result, f"got '{result}'")])
+    result_mem = decode_basic([0xBF, 0x80], TB)
+    check("decode_mem_sbw_no_jr", [], dt, [lambda: ("JR" not in result_mem, f"got '{result_mem}'")])
+
+    def sbcw_mem_zero_flags():
+        hd61700.set_reg16(0, 0x6500)  # IX
+        hd61700.set_sreg(1, 2)        # SY -> R2:R3 offset source
+        hd61700.set_reg(2, 0x00); hd61700.set_reg(3, 0x00)
+        hd61700.set_reg(25, 0x34); hd61700.set_reg(26, 0x12)
+        hd61700.write_mem(0x6500, 0x34); hd61700.write_mem(0x6501, 0x12)
+    check("SBCW mem zero flags", [0xBA, 0x39], sbcw_mem_zero_flags,
+          [cf(z=True, c=False, lz=True, uz=True)])
+
+    def sbcw_mem_highbyte_flags():
+        hd61700.set_reg16(0, 0x6500)  # IX
+        hd61700.set_sreg(1, 2)        # SY -> R2:R3 offset source
+        hd61700.set_reg(2, 0x00); hd61700.set_reg(3, 0x00)
+        hd61700.set_reg(25, 0x01); hd61700.set_reg(26, 0x00)
+        hd61700.write_mem(0x6500, 0x00); hd61700.write_mem(0x6501, 0x01)
+    check("SBCW mem highbyte flags", [0xBA, 0x39], sbcw_mem_highbyte_flags,
+          [cf(z=False, c=False, lz=True, uz=True)])
 
     # ── UA/bank switching regression ──
     print("\n[UA banking]")
@@ -462,7 +567,7 @@ def run_tests():
         hd61700.set_reg(2, 0x05)  # offset register
         hd61700.set_reg(4, 0x11)  # source register
         hd61700.set_reg16(0, 0x8000) # IX = 0x8000
-        hd61700.set_mem(0x8005, 0x22)
+        hd61700.write_mem(0x8005, 0x22)
     check("ADC (IX+$2), $4", [0x38, 0x04], s_adc_ix_reg, [
         cm(0x8005, 0x33),  # 0x22 + 0x11 = 0x33
         cf(c=False, z=False)
@@ -474,7 +579,7 @@ def run_tests():
         hd61700.set_reg(31, 10)   # offset register
         hd61700.set_reg(5, 0x20)  # source register
         hd61700.set_reg16(2, 0x9000) # IZ = 0x9000
-        hd61700.set_mem(0x8FF6, 0x50)  # 0x9000 - 10 = 0x8FF6
+        hd61700.write_mem(0x8FF6, 0x50)  # 0x9000 - 10 = 0x8FF6
     check("SBC (IZ-$SX), $5", [0x3B, 0x85], s_sbc_iz_reg, [
         cm(0x8FF6, 0x30),  # 0x50 - 0x20 = 0x30
         cf(c=False, z=False)
@@ -484,7 +589,7 @@ def run_tests():
     def s_ad_ix_imm():
         hd61700.set_reg(2, 0x01)
         hd61700.set_reg16(0, 0xA000) # IX = 0xA000
-        hd61700.set_mem(0xA00A, 0xFE)
+        hd61700.write_mem(0xA00A, 0xFE)
     check("AD (IX+10), $2", [0x7C, 0x02, 10], s_ad_ix_imm, [
         cm(0xA00A, 0xFF),
         cf(c=False, z=False)
@@ -494,7 +599,7 @@ def run_tests():
     def s_sb_iz_imm():
         hd61700.set_reg(3, 0x01)
         hd61700.set_reg16(2, 0xB000) # IZ = 0xB000
-        hd61700.set_mem(0xAFFB, 0x01)
+        hd61700.write_mem(0xAFFB, 0x01)
     check("SB (IZ-5), $3", [0x7F, 0x83, 5], s_sb_iz_imm, [
         cm(0xAFFB, 0x00),
         cf(c=False, z=True)

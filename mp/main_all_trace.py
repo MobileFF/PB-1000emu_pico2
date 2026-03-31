@@ -13,19 +13,16 @@ KEY_HOLD_MS = 120
 KEY_RELEASE_HARD_TIMEOUT_MS = 1200
 INTER_KEY_GAP_MS = 80
 STEP_SERVICE_CHUNK = 64
-STEP_TIMER_TICK_STEPS = 40000
+STEP_TIMER_TICK_STEPS = 256
 FRAME_INTERVAL_MS = 100
 AUTO_EXE_ON_ENTER = False
 ON_INT_PULSE_MS = 30
 WAKE_TRACE_STEPS = 40
 WAKE_TRACE_VECTOR_PC = 0x0032
-TRACE_AFTER_PC_ENABLED = True
-TRACE_AFTER_PC_FROM = 0x0000
-TRACE_AFTER_PC_TO   = 0xFFFF
 
 # Input Configuration
 ENABLE_USB_KBD = True
-ENABLE_UART_KBD = False
+ENABLE_UART_KBD = True
 USE_C_KEYBOARD = True   # True: C-native keyboard handling (fast), False: Python-side (debug)
 UART_BAUDRATE = 115200
 UART_TX_PIN = 4   # UART1 TX (Console output)
@@ -165,53 +162,19 @@ def _step_with_input_service(system, steps, chunk=STEP_SERVICE_CHUNK):
         if hasattr(system, "service_input_lines") and not USE_C_KEYBOARD:
             system.service_input_lines()
 
-#         if TRACE_AFTER_PC_ENABLED and not _trace_after_pc_active:
-#             try:
-#                 if TRACE_AFTER_PC_FROM <= system.pc <= TRACE_AFTER_PC_TO:
-#                 #if TRACE_AFTER_PC_FROM <= system.pc:
-#                     _trace_after_pc_active = True
-#             except Exception:
-#                 pass
-# 
-#         if _trace_after_pc_active:
-#             if not _trace_after_pc_announced:
-#                 print(f"[TRACE_AFTER_PC] start pc={system.pc:04X}")
-#                 _trace_after_pc_announced = True
-#             _trace_after_pc_index += 1
-#             
-#                 
-#             system.debug_step(
-#                 pause=False,
-# #                 trace=TRACE_AFTER_PC_FROM <= system.pc <= TRACE_AFTER_PC_TO,
-# #                 prt=TRACE_AFTER_PC_FROM <= system.pc <= TRACE_AFTER_PC_TO,
-#                 trace=True,
-#                 prt=True,
-#                 trace_index=_trace_after_pc_index,
-#             )
-#             if 0xE00B <= system.pc <= 0xE097 or 0xb292 <= system.pc <= 0xb2ab or 0xDCB4 <= system.pc <= 0xDCF2:
-#                 print(f"[{system.pc:04X}] registers")
-#                 system.print_registers()
-#             ran += 1
-#             if system.pc == 0xabbd:
-#                 _trace_after_pc_active = False
-#             continue
-
+        system.debug_step(
+            pause=False,
+            trace=True,
+            prt=True,
+            trace_index=_trace_after_pc_index,
+        )
+        _trace_after_pc_index += 1
         n = chunk
         remain = steps - ran
         if n > remain:
             n = remain
-        #if TRACE_AFTER_PC_ENABLED:
-            executed = system.step(n)
-            if executed is None:
-                executed = n
-            ran += executed
-#             try:
-#                 if system.pc == TRACE_AFTER_PC_FROM:
-#                     _trace_after_pc_active = True
-#             except Exception:
-#                 pass
+            ran += 1
         else:
-            system.step(n)
             ran += n
     return ran
 
@@ -779,7 +742,7 @@ def main():
         print_all_workarea(system)
         print("dump 0x6000-0x7FFF")
         system.dump_mem_range(0x6000,0x7FFF)
-        print("Saving RAM state...")
+#         print("Saving RAM state...")
 #         try:
 #             system.save_ram()
 #         except Exception as e:
@@ -788,3 +751,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
