@@ -159,7 +159,7 @@ def _step_with_input_service(system, steps, chunk=STEP_SERVICE_CHUNK):
     while ran < steps:
         if hasattr(system, "service_pio_uart"):
             system.service_pio_uart()
-        if hasattr(system, "service_input_lines") and not USE_C_KEYBOARD:
+        if hasattr(system, "service_input_lines"):
             system.service_input_lines()
 
         system.debug_step(

@@ -2,6 +2,7 @@ import machine
 import time
 from xpt2046 import XPT2046
 from ili9341 import ILI9341
+from pb1000 import draw_bezel
 
 # Pin Definitions (Matching pb1000.py)
 SPI_ID = 1
@@ -14,6 +15,10 @@ RST_PIN = 7
 BL_PIN = 22
 T_CS_PIN = 16
 T_IRQ_PIN = 17
+
+# Touch calibration offsets (same concept as pb1000.py)
+TOUCH_X_OFFSET = 0
+TOUCH_Y_OFFSET = -96
 
 def main():
     print("--- PB-1000 Touch Panel Standalone Test ---")
@@ -39,7 +44,10 @@ def main():
     print("Initializing ILI9341 display and setting background to Green...")
     display = ILI9341(spi, cs, dc, rst, width=320, height=240)
     # 0x07E0 is pure green in RGB565.
-    display.fill_rect(0, 0, 320, 240, 0x07E0)
+    # display.fill_rect(0, 0, 320, 240, 0x07E0)
+
+    # Draw PB-1000 bezel overlay (matching pb1000.py behavior)
+    draw_bezel(display, scale=1.5, x=16, y=40)
     
     # 3. Initialize Touch Panel
     print(f"Initializing Touch Panel (T_CS={T_CS_PIN}, T_IRQ={T_IRQ_PIN})...")
@@ -69,16 +77,21 @@ def main():
                     raw_x, raw_y = touch.read_raw()
                     
                     # Convert to logical PB-1000 Key
+                    # Y axis is inverted relative to the framebuffer coordinate space.
                     t_key = "None (Out of bounds)"
+                    x += TOUCH_X_OFFSET
+                    y += TOUCH_Y_OFFSET
                     if 16 <= x <= 304 and 40 <= y <= 104:
                         col = (x - 16) // 72
                         row = (y - 40) // 16
                         col = max(0, min(3, col))
                         row = max(0, min(3, row))
+                        row = 3 - row  # invert Y axis mapping (top 0 <-> bottom 3)
                         t_idx = row * 4 + col + 1
                         t_key = f"T{t_idx}"
 
-                    print(f"TOUCH DETECTED -> RAW:({raw_x:4d}, {raw_y:4d}) | MAPPED:X={x:3d}, Y={y:3d} | PB-1000 KEY: {t_key}")
+                    in_bounds = (16 <= x <= 304 and 40 <= y <= 104)
+                    print(f"TOUCH DETECTED -> RAW:({raw_x:4d}, {raw_y:4d}) | MAPPED:X={x:3d}, Y={y:3d} | IN_BOUNDS={in_bounds} | PB-1000 KEY: {t_key}")
                     
                     # Anti-spam delay while touched
                     time.sleep_ms(100)

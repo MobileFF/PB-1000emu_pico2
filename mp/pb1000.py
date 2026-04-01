@@ -210,6 +210,8 @@ class PB1000System:
         self.keyboard = KeyboardMatrix(debug=self.debug_cfg["kb"])
         self._disp_x = 16
         self._disp_y = 40
+        self.touch_x_offset = 0
+        self.touch_y_offset = -104  # adjust if touch mapping seems biased downward
         self.port_data = 0
         self.console_uart = None  # Set externally from main.py
         self.status_msg = ""
@@ -781,6 +783,22 @@ class PB1000System:
 
     def press_key(self, key):
         self.keyboard.key_press(key)
+        
+        # Forward to C core if available (C core will only use this if use_c_keyboard is True)
+        if hasattr(cpu_core, 'press_row_ki'):
+            # Resolve coordinates (row, ki)
+            coord = None
+            if isinstance(key, tuple) and len(key) >= 2:
+                coord = key
+            elif isinstance(key, str):
+                import keymap
+                k = key.lower()
+                if k in keymap.KEY_MAP:
+                    coord = keymap.KEY_MAP[k]
+            
+            if coord:
+                cpu_core.press_row_ki(coord[0], coord[1])
+
         # Automatically show label on status bar
         if hasattr(self, 'set_status'):
             label = key
@@ -799,15 +817,35 @@ class PB1000System:
 
     def release_key(self, key):
         self.keyboard.key_release(key)
+
+        # Forward to C core if available (C core will handle its own KEY_INT release)
+        if hasattr(cpu_core, 'release_row_ki'):
+            coord = None
+            if isinstance(key, tuple) and len(key) >= 2:
+                coord = key
+            elif isinstance(key, str):
+                import keymap
+                k = key.lower()
+                if k in keymap.KEY_MAP:
+                    coord = keymap.KEY_MAP[k]
+            
+            if coord:
+                cpu_core.release_row_ki(coord[0], coord[1])
+
         if not self.keyboard.has_key_pressed():
             if self._key_scan_pending():
                 self._key_post_release_pulses_remaining = self._key_post_release_pulses_max
             else:
                 self._key_post_release_pulses_remaining = 0
+            
             if self._key_line_state:
                 cpu_core.set_input(cpu_core.KEY_INT, 0)
             self._key_line_state = 0
             self._key_pulse_release_pending = False
+            
+        if not self.key_interrupt_via_scan:
+            cpu_core.set_input(cpu_core.KEY_INT, 0)
+            self._key_line_state = 0
 
     def power_on(self, force=False):
         cpu_core.set_input(cpu_core.SW, 1)

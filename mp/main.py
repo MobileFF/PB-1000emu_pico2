@@ -250,7 +250,7 @@ def _trace_wake_path(system, reason, steps=WAKE_TRACE_STEPS):
         if pc_before == WAKE_TRACE_VECTOR_PC:
             saw_vector = True
         try:
-            if hasattr(system, "service_input_lines"):
+            if hasattr(system, "service_input_lines") and not USE_C_KEYBOARD:
                 system.service_input_lines()
             trace_line = system.debug_step(pause=False, trace=True, prt=True, trace_index=i + 1)
             if isinstance(trace_line, str) and f"[{WAKE_TRACE_VECTOR_PC:04X}]" in trace_line:
@@ -498,6 +498,10 @@ def poll_touch(system):
         coords = system.touch.get_touch()
         if coords is not None:
             x, y = coords
+            # Apply manual touch calibration offset for Y (and X) drift
+            x += getattr(system, 'touch_x_offset', 0)
+            y += getattr(system, 'touch_y_offset', 0)
+
             # Map coords to fit the LCD bezel area (system._disp_x, system._disp_y)
             # The LCD area is 192x32 scaled.
             scale = getattr(system.lcd, 'scale', 1.0)
@@ -516,6 +520,8 @@ def poll_touch(system):
                 row = int(ry * 4)
                 
                 col = max(0, min(3, col))
+                # Y-axis reverse relative to display coordinates
+                row = 3 - row
                 row = max(0, min(3, row))
                 
                 t_idx = row * 4 + col + 1

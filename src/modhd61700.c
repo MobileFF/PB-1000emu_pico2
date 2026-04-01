@@ -1,4 +1,4 @@
-﻿/*
+/*
  * MicroPython C Module wrapper for HD61700 CPU
  * Exposes HD61700 CPU core to MicroPython as 'hd61700' module
  */
@@ -1346,6 +1346,24 @@ static mp_obj_t mod_get_last_key(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(mod_get_last_key_obj, mod_get_last_key);
 
+/* hd61700.press_row_ki(row, ki) */
+static mp_obj_t mod_press_row_ki(mp_obj_t row_obj, mp_obj_t ki_obj) {
+  int row = mp_obj_get_int(row_obj);
+  int ki = mp_obj_get_int(ki_obj);
+  c_kb_press(row, ki);
+  return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(mod_press_row_ki_obj, mod_press_row_ki);
+
+/* hd61700.release_row_ki(row, ki) */
+static mp_obj_t mod_release_row_ki(mp_obj_t row_obj, mp_obj_t ki_obj) {
+  int row = mp_obj_get_int(row_obj);
+  int ki = mp_obj_get_int(ki_obj);
+  c_kb_release(row, ki);
+  return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(mod_release_row_ki_obj, mod_release_row_ki);
+
 
 /* ====== Module definition ====== */
 static const mp_rom_map_elem_t hd61700_module_globals_table[] = {
@@ -1425,6 +1443,10 @@ static const mp_rom_map_elem_t hd61700_module_globals_table[] = {
      MP_ROM_PTR(&mod_keyboard_config_base_obj)},
     {MP_ROM_QSTR(MP_QSTR_get_last_key),
      MP_ROM_PTR(&mod_get_last_key_obj)},
+    {MP_ROM_QSTR(MP_QSTR_press_row_ki),
+     MP_ROM_PTR(&mod_press_row_ki_obj)},
+    {MP_ROM_QSTR(MP_QSTR_release_row_ki),
+     MP_ROM_PTR(&mod_release_row_ki_obj)},
 };
 static MP_DEFINE_CONST_DICT(hd61700_module_globals,
                             hd61700_module_globals_table);
