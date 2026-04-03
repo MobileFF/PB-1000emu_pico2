@@ -26,7 +26,6 @@ TRACE_AFTER_PC_TO   = 0xFFFF
 # Input Configuration
 ENABLE_USB_KBD = True
 ENABLE_UART_KBD = False
-USE_C_KEYBOARD = True   # True: C-native keyboard handling (fast), False: Python-side (debug)
 UART_BAUDRATE = 115200
 UART_TX_PIN = 4   # UART1 TX (Console output)
 UART_RX_PIN = 5   # UART1 RX (Keyboard input)
@@ -162,54 +161,15 @@ def _step_with_input_service(system, steps, chunk=STEP_SERVICE_CHUNK):
     while ran < steps:
         if hasattr(system, "service_pio_uart"):
             system.service_pio_uart()
-        if hasattr(system, "service_input_lines") and not USE_C_KEYBOARD:
-            system.service_input_lines()
-
-#         if TRACE_AFTER_PC_ENABLED and not _trace_after_pc_active:
-#             try:
-#                 if TRACE_AFTER_PC_FROM <= system.pc <= TRACE_AFTER_PC_TO:
-#                 #if TRACE_AFTER_PC_FROM <= system.pc:
-#                     _trace_after_pc_active = True
-#             except Exception:
-#                 pass
-# 
-#         if _trace_after_pc_active:
-#             if not _trace_after_pc_announced:
-#                 print(f"[TRACE_AFTER_PC] start pc={system.pc:04X}")
-#                 _trace_after_pc_announced = True
-#             _trace_after_pc_index += 1
-#             
-#                 
-#             system.debug_step(
-#                 pause=False,
-# #                 trace=TRACE_AFTER_PC_FROM <= system.pc <= TRACE_AFTER_PC_TO,
-# #                 prt=TRACE_AFTER_PC_FROM <= system.pc <= TRACE_AFTER_PC_TO,
-#                 trace=True,
-#                 prt=True,
-#                 trace_index=_trace_after_pc_index,
-#             )
-#             if 0xE00B <= system.pc <= 0xE097 or 0xb292 <= system.pc <= 0xb2ab or 0xDCB4 <= system.pc <= 0xDCF2:
-#                 print(f"[{system.pc:04X}] registers")
-#                 system.print_registers()
-#             ran += 1
-#             if system.pc == 0xabbd:
-#                 _trace_after_pc_active = False
-#             continue
 
         n = chunk
         remain = steps - ran
         if n > remain:
             n = remain
-        #if TRACE_AFTER_PC_ENABLED:
             executed = system.step(n)
             if executed is None:
                 executed = n
             ran += executed
-#             try:
-#                 if system.pc == TRACE_AFTER_PC_FROM:
-#                     _trace_after_pc_active = True
-#             except Exception:
-#                 pass
         else:
             system.step(n)
             ran += n
@@ -291,28 +251,6 @@ def poll_keyboard(system):
             #     pass
         finally:
             _on_int_active = False
-
-    # Poll external USB Host Keyboard if available (Python mode only)
-    if not USE_C_KEYBOARD and ENABLE_USB_KBD and hasattr(system, 'keyboard') and hasattr(system.keyboard, 'poll_usb_host'):
-        usb_events = system.keyboard.poll_usb_host()
-        # If sleeping, check for ESC (BRK) to trigger wake pulse
-        if getattr(system, "is_sleeping", False) and usb_events:
-            for scancode, pressed in usb_events:
-                if scancode == 0x29 and pressed: # 0x29 = ESC
-                    _pulse_on_int(system, now)
-                    break
-        
-        # Check for F11 (0x44) to save state
-        if usb_events:
-            for scancode, pressed in usb_events:
-                if scancode == 0x44 and pressed: # 0x44 = F11
-                    print("F11 pressed (USB Key): Requesting save...")
-                    system._save_requested = True
-                    break
-                if scancode == 0x42 and pressed: # 0x42 = F9
-                    print("F9 pressed (USB Key): Requesting reset...")
-                    system.reset_emulator()
-                    break
 
     # Poll REPL / stdin (usually UART0)
     if _spoll.poll(0):
@@ -586,7 +524,7 @@ def main():
             print(f"Failed to init USB Host: {e}")
 
     # Activate C keyboard mode if enabled
-    if USE_C_KEYBOARD and ENABLE_USB_KBD:
+    if ENABLE_USB_KBD:
         try:
             import hd61700 as cpu_core
             if hasattr(cpu_core, 'use_c_keyboard'):
@@ -602,6 +540,11 @@ def main():
                     print("F9 pressed (Callback)")
                     system.reset_emulator()
                 cpu_core.set_f9_callback(_on_f9)
+            if hasattr(cpu_core, 'set_f11_callback'):
+                def _on_f11(_):
+                    print("F11 pressed (Callback)")
+                    system._save_requested = True
+                cpu_core.set_f11_callback(_on_f11)
             
             # Synchronize keyboard maps from keymap.py to C core
             import keymap
@@ -618,19 +561,18 @@ def main():
         except Exception as e:
             print(f"C keyboard mode init failed: {e}")
 
-    if USE_C_KEYBOARD:
-        print("Configuring C keyboard routing...")
-        try:
-            import usb_host
-            if hasattr(usb_host, 'set_c_kb_routing'):
-                usb_host.set_c_kb_routing(True)
-                print("C keyboard routing enabled.")
-            if hasattr(usb_host, 'start_bg_timer'):
-                print("Starting USB background timer...")
-                usb_host.start_bg_timer(8)
-                print("USB background timer started (8ms).")
-        except Exception as e:
-            print(f"C keyboard routing setup failed: {e}")
+    print("Configuring C keyboard routing...")
+    try:
+        import usb_host
+        if hasattr(usb_host, 'set_c_kb_routing'):
+            usb_host.set_c_kb_routing(True)
+            print("C keyboard routing enabled.")
+        if hasattr(usb_host, 'start_bg_timer'):
+            print("Starting USB background timer...")
+            usb_host.start_bg_timer(8)
+            print("USB background timer started (8ms).")
+    except Exception as e:
+        print(f"C keyboard routing setup failed: {e}")
 
 
     system.power_on()
@@ -686,9 +628,6 @@ def main():
                             else:
                                 break
 
-            if hasattr(system, "service_input_lines") and not USE_C_KEYBOARD:
-                system.service_input_lines()
-
             if not system.is_sleeping:
                 ran = _step_with_input_service(system, 4000)
                 tick_step_accum += ran
@@ -700,42 +639,42 @@ def main():
             poll_touch(system)
 
             # Poll C-side key events for status bar (ISR-safe)
-            if USE_C_KEYBOARD:
-                try:
-                    import hd61700
-                    sc = hd61700.get_last_key()
-                    if sc >= 0:
-                        import keymap
-                        system.set_status(keymap.get_label(sc))
-                        
-                        # PrintScreen key (HID 0x46) detection
-                        if sc == 0x46:
-                            system.set_status("CAPTURING...")
-                            system.update_display(x_offset=16, y_offset=40)
-                            try:
-                                # 1. Capture LCD Screenshot (PBM format)
-                                ts = time.localtime()
-                                ts_str = "{:04}{:02}{:02}_{:02}{:02}{:02}".format(*ts[:6])
-                                pbm_path = f"screenshot_{ts_str}.pbm"
-                                system.lcd.save_pbm(pbm_path)
-                                
-                                # 2. Dump specific RAM areas (EDTOP ~&H6100, LCDTP ~&H68C8)
-                                # We dump 0x6000-0x7FFF as a full VRAM context
-                                ram_dump = bytearray(0x2000)
-                                import hd61700 as cpu_core
-                                for addr in range(0x6000, 0x8000):
-                                    ram_dump[addr - 0x6000] = cpu_core.read_mem(addr)
-                                
-                                with open(f"vram_dump_{ts_str}.bin", "wb") as f:
-                                    f.write(ram_dump)
-                                
-                                system.set_status("CAPTURED!", 2000)
-                                print(f"Captured: screenshot_{ts_str}.txt, vram_dump_{ts_str}.bin")
-                            except Exception as ex:
-                                print(f"Capture failed: {ex}")
-                                system.set_status("CAP ERROR!", 2000)
-                except Exception:
-                    pass
+            try:
+                import hd61700
+                sc = hd61700.get_last_key()
+                if sc >= 0:
+                    import keymap
+                    system.set_status(keymap.get_label(sc))
+                    
+                    # PrintScreen key (HID 0x46) detection
+                    if sc == 0x46:
+                        system.set_status("CAPTURING...")
+                        system.update_display(x_offset=16, y_offset=40)
+                        try:
+                            # 1. Capture LCD Screenshot (PBM format)
+                            ts = time.localtime()
+                            ts_str = "{:04}{:02}{:02}_{:02}{:02}{:02}".format(*ts[:6])
+                            pbm_path = f"screenshot_{ts_str}.pbm"
+                            system.lcd.save_pbm(pbm_path)
+                            
+                            # 2. Dump specific RAM areas (EDTOP ~&H6100, LCDTP ~&H68C8)
+                            # We dump 0x6000-0x7FFF as a full VRAM context
+                            ram_dump = bytearray(0x2000)
+                            import hd61700 as cpu_core
+                            for addr in range(0x6000, 0x8000):
+                                ram_dump[addr - 0x6000] = cpu_core.read_mem(addr)
+                            
+                            with open(f"vram_dump_{ts_str}.bin", "wb") as f:
+                                f.write(ram_dump)
+                            
+                            system.set_status("CAPTURED!", 2000)
+                            print(f"Captured: screenshot_{ts_str}.txt, vram_dump_{ts_str}.bin")
+                        except Exception as ex:
+                            print(f"Capture failed: {ex}")
+                            system.set_status("CAP ERROR!", 2000)
+            except Exception:
+                pass
+
 
             if getattr(system, '_save_requested', False):
                 system._save_requested = False
@@ -785,11 +724,7 @@ def main():
         print_all_workarea(system)
         print("dump 0x6000-0x7FFF")
         system.dump_mem_range(0x6000,0x7FFF)
-        print("Saving RAM state...")
-#         try:
-#             system.save_ram()
-#         except Exception as e:
-#             print(f"Save failed: {e}")
+
 
 
 if __name__ == '__main__':

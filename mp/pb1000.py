@@ -12,10 +12,9 @@ try:
     from lcd_controller_c import LCDControllerC as LCDController
     _LCD_BACKEND = "C"
 except ImportError:
-    from lcd_controller import LCDController
-    _LCD_BACKEND = "Python"
+    pass
 
-from keyboard import KeyboardMatrix
+# original keyboard.py is kept but unused.
 
 # PIO UART for RS-232C passthrough (optional)
 try:
@@ -184,30 +183,11 @@ class PB1000System:
         self.rom1 = bytearray(0)
         self.rom_bank = 0
         self._key_trace_last = {}
-        self._key_line_state = 0
-        self._key_commit_pulse_sent = False
-        self._key_commit_pulse_count = 0
-        self._key_commit_pulse_max = 64
-        self._key_pulse_interval_ms = 25
-        self._key_next_pulse_ms = 0
-        self._key_pulse_release_pending = False
-        self._key_post_release_pulses_remaining = 0
-        self._key_post_release_pulses_max = 16
-        self.key_interrupt_via_scan = True
-        self.key_reassert_enabled = False
-        self._chata_zero_since_ms = None
-        self._chata_stuck_logged = False
-        self._key_noresp_since_ms = None
-        self._key_noresp_logged = False
-        self._key_noresp_threshold_ms = 1200
-        self._display_probe_active = False
-        self._display_probe_label = ""
-        self._display_probe_hit = False
 
         self.lcd = LCDController(display, debug=self.debug_cfg["lcd"])
         self._save_requested = False
         self.lcd.on_scale_change = self._on_lcd_scale_change
-        self.keyboard = KeyboardMatrix(debug=self.debug_cfg["kb"])
+        
         self._disp_x = 16
         self._disp_y = 40
         self.touch_x_offset = 0
@@ -229,11 +209,7 @@ class PB1000System:
             # Note: main.py will replace this with a real PioUart instance if needed
             print("PIO UART support enabled in system.")
         except Exception as e:
-            print(f"PIO UART setup warning: {e}")
-
-        # LCD write state tracking for console mirror
-        self._lcd_cmd_state = 0     # 0=idle, 3=DRAW_CHAR pending
-        self._lcd_char_bytes = []   # Accumulate bytes for DRAW_CHAR
+            print("PIO UART setup warning")
 
         # Initialize CPU
         cpu_core.reset(self.debug_cfg["sys"])
@@ -244,17 +220,10 @@ class PB1000System:
               
         self._cb_mem_read = self._mem_read
         self._cb_mem_write = self._mem_write
-        self._cb_lcd_read = self.lcd.lcd_read
-        self._cb_lcd_write = self._intercept_lcd_write
-        self._cb_lcd_ctrl = self._intercept_lcd_ctrl
-        self._cb_kb_read = self.keyboard.kb_read
-        self._cb_kb_write = self.keyboard.kb_write
         self._cb_port_read = self._port_read
         self._cb_port_write = self._port_write
 
         cpu_core.set_mem_callbacks(self._cb_mem_read, self._cb_mem_write)
-        cpu_core.set_lcd_callbacks(self._cb_lcd_read, self._cb_lcd_write, self._cb_lcd_ctrl)
-        cpu_core.set_kb_callbacks(self._cb_kb_read, self._cb_kb_write)
         cpu_core.set_port_callbacks(self._cb_port_read, self._cb_port_write)
         
         if hasattr(cpu_core, "use_c_memory"):
@@ -265,10 +234,10 @@ class PB1000System:
             # RAMView may still exist in Python-callback mode, but delegating writes
             # back through cpu_core.write_mem() would recurse into _mem_write().
             self._ram_is_c_managed = bool(direct_mem)
+        # Use C LCD logic
         if hasattr(cpu_core, "use_c_lcd"):
-            direct_lcd = (not self.debug_cfg["sys"]) if direct_lcd_override is None else bool(direct_lcd_override)
-            cpu_core.use_c_lcd(direct_lcd)
-            
+            cpu_core.use_c_lcd(True)
+
         if restore_registers:
             self.load_state()
             
@@ -370,50 +339,6 @@ class PB1000System:
         self._display_probe_active = True
         self._display_probe_hit = False
         self._display_probe_label = label
-
-    def _intercept_lcd_ctrl(self, data):
-        self.lcd.lcd_ctrl(data)
-        # Tracking for console mirror
-        self._lcd_op_command = (data & 0x01) != 0
-        self._lcd_cmd_buf = []
-
-    def _intercept_lcd_write(self, data):
-        self.lcd.lcd_write(data)
-        
-        if self.console_uart is None:
-            return
-
-        if self._lcd_op_command:
-            # Command mode (OP=1)
-            self._lcd_cmd_buf.append(data)
-            cmd_id = self._lcd_cmd_buf[0] & 0x0F
-            
-            # Command lengths: 0x03 (DRAW_CHAR) is 3 bytes
-            expected = 3 if cmd_id == 0x03 else 1
-            if len(self._lcd_cmd_buf) >= expected:
-                self._lcd_current_mode = cmd_id
-                self._lcd_cmd_buf = []
-        else:
-            # Data mode (OP=0)
-            if getattr(self, "_lcd_current_mode", 0) == 0x03:
-                # DRAW_CHAR mode - data is character code
-                decoded = self._decode_pb1000_char(data)
-                if decoded:
-                    self.console_uart.write(decoded)
-
-    def _decode_pb1000_char(self, data):
-        """Decode PB-1000 character code to ASCII for console mirror."""
-        # Nibble swap as used in HD61700 / LCD protocol
-        code = ((data & 0x0F) << 4) | (data >> 4)
-        
-        # Standard ASCII range
-        if 0x20 <= code <= 0x7E:
-            return chr(code)
-        if code == 0x0D or code == 0x0A:
-            return "\r\n"
-        if code == 0xFF: # PB-1000 often uses 0xFF as spacer or blank?
-            return None
-        return None
 
     def display_write_probe_hit(self):
         return self._display_probe_hit
@@ -632,63 +557,6 @@ class PB1000System:
     def tick_timer(self):
         cpu_core.timer_tick()
 
-    def _key_interrupt_requested_by_scan(self):
-        if not hasattr(cpu_core, "get_reg8"):
-            return False
-        ia = cpu_core.get_reg8(4) & 0xFF
-        if (ia & 0x80) == 0:
-            return False
-        mask = self._KEY_PULSE_MASK_TABLE[(ia >> 4) & 0x03]
-        ky = self.keyboard.kb_read() & 0xF0FF
-        if mask != 0 and (ky & mask) != 0:
-            return True
-        return ky != 0
-
-    def _key_scan_pending(self):
-        base = 0x68D2 - self.RAM_START
-        chata = self.ram[base + 1]
-        keycm = self.ram[base + 2]
-        return (chata != 0x20) or (keycm != 0x00)
-
-    def service_input_lines(self):
-        if self.key_interrupt_via_scan:
-            if self._key_pulse_release_pending and self._key_line_state:
-                cpu_core.set_input(cpu_core.KEY_INT, 0)
-                self._key_line_state = 0
-                self._key_pulse_release_pending = False
-
-            pulse = 0
-            key_pressed = self.keyboard.has_key_pressed()
-
-            if self.is_key_input_enabled():
-                ia = cpu_core.get_reg8(4) if hasattr(cpu_core, "get_reg8") else 0
-                now = time.ticks_ms()
-                if (ia & 0x80) == 0:
-                    if time.ticks_diff(now, self._key_next_pulse_ms) >= 0:
-                        pulse = 1
-                        self._key_next_pulse_ms = time.ticks_add(now, self._key_pulse_interval_ms)
-                elif key_pressed and self._key_interrupt_requested_by_scan():
-                    if time.ticks_diff(now, self._key_next_pulse_ms) >= 0:
-                        pulse = 1
-                        self._key_next_pulse_ms = time.ticks_add(now, self._key_pulse_interval_ms)
-                elif (not key_pressed) and (self._key_post_release_pulses_remaining > 0):
-                    if time.ticks_diff(now, self._key_next_pulse_ms) >= 0:
-                        pulse = 1
-                        self._key_post_release_pulses_remaining -= 1
-                        self._key_next_pulse_ms = time.ticks_add(now, self._key_pulse_interval_ms)
-            
-            if pulse and not self._key_line_state:
-                cpu_core.set_input(cpu_core.KEY_INT, 1)
-                self._key_line_state = 1
-                self._key_pulse_release_pending = True
-            
-            if (not key_pressed) and (self._key_post_release_pulses_remaining == 0):
-                if self._key_line_state:
-                    cpu_core.set_input(cpu_core.KEY_INT, 0)
-                self._key_line_state = 0
-                self._key_pulse_release_pending = False
-            return
-
     def service_pio_uart(self):
         """Service PIO UART TX/RX buffers.
         Only needed if pio_uart is active.
@@ -782,11 +650,7 @@ class PB1000System:
                 self.lcd.dirty = True
 
     def press_key(self, key):
-        self.keyboard.key_press(key)
-        
-        # Forward to C core if available (C core will only use this if use_c_keyboard is True)
         if hasattr(cpu_core, 'press_row_ki'):
-            # Resolve coordinates (row, ki)
             coord = None
             if isinstance(key, tuple) and len(key) >= 2:
                 coord = key
@@ -809,16 +673,7 @@ class PB1000System:
                     label = key.upper()
             self.set_status(label)
 
-        if not self.key_interrupt_via_scan:
-            cpu_core.set_input(cpu_core.KEY_INT, 1)
-            self._key_line_state = 1
-        else:
-            self._key_next_pulse_ms = time.ticks_ms()
-
     def release_key(self, key):
-        self.keyboard.key_release(key)
-
-        # Forward to C core if available (C core will handle its own KEY_INT release)
         if hasattr(cpu_core, 'release_row_ki'):
             coord = None
             if isinstance(key, tuple) and len(key) >= 2:
@@ -831,21 +686,6 @@ class PB1000System:
             
             if coord:
                 cpu_core.release_row_ki(coord[0], coord[1])
-
-        if not self.keyboard.has_key_pressed():
-            if self._key_scan_pending():
-                self._key_post_release_pulses_remaining = self._key_post_release_pulses_max
-            else:
-                self._key_post_release_pulses_remaining = 0
-            
-            if self._key_line_state:
-                cpu_core.set_input(cpu_core.KEY_INT, 0)
-            self._key_line_state = 0
-            self._key_pulse_release_pending = False
-            
-        if not self.key_interrupt_via_scan:
-            cpu_core.set_input(cpu_core.KEY_INT, 0)
-            self._key_line_state = 0
 
     def power_on(self, force=False):
         cpu_core.set_input(cpu_core.SW, 1)
