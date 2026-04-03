@@ -31,8 +31,23 @@ CS_PIN = 9
 DC_PIN = 8
 RST_PIN = 7
 BL_PIN = 22
+SD_CS_PIN = 15
 T_CS_PIN = 16
 T_IRQ_PIN = 17
+
+def init_sdcard(spi):
+    try:
+        from sdcard import SDCard
+        sd_cs = machine.Pin(SD_CS_PIN, machine.Pin.OUT, value=1)
+        # Use verified 400kHz for stable initialization, restore to 40MHz for LCD
+        sd = SDCard(spi, sd_cs, baudrate=400000, restore_baudrate=40000000)
+        vfs = os.VfsFat(sd)
+        os.mount(vfs, "/sd")
+        print("SD Card mounted at /sd")
+        return True
+    except Exception as e:
+        print(f"SD Card mount optional: {e}")
+        return False
 
 def init_display():
     spi = machine.SPI(
@@ -42,6 +57,11 @@ def init_display():
         mosi=machine.Pin(MOSI_PIN),
         miso=machine.Pin(MISO_PIN),
     )
+    # Ensure all CS pins are high before starting
+    machine.Pin(CS_PIN, machine.Pin.OUT, value=1)
+    machine.Pin(T_CS_PIN, machine.Pin.OUT, value=1)
+    machine.Pin(SD_CS_PIN, machine.Pin.OUT, value=1)
+
     cs = machine.Pin(CS_PIN, machine.Pin.OUT)
     dc = machine.Pin(DC_PIN, machine.Pin.OUT)
     rst = machine.Pin(RST_PIN, machine.Pin.OUT)
@@ -49,6 +69,10 @@ def init_display():
 
     display = ILI9341(spi, cs, dc, rst, width=320, height=240)
     display.fill_rect(0, 0, 320, 240, 0x0000)
+    
+    # Try mounting SD card
+    sd_mounted = init_sdcard(spi)
+    
     touch = None
     try:
         from xpt2046 import XPT2046
@@ -56,7 +80,7 @@ def init_display():
     except Exception as e:
         print("Touch panel init failed:", e)
 
-    return display, touch
+    return display, touch, sd_mounted, spi
 
 def draw_bezel(display, scale=1.0, x=16, y=40):
     """Draws the PB-1000 LCD bezel scaled to fit the display."""
@@ -158,8 +182,13 @@ class PB1000System:
         self.debug_cfg = self._normalize_debug_config(debug)
         self.debug = self.debug_cfg["sys"]
         self._ram_is_c_managed = False
+        self.sd_mounted = False
+        if isinstance(display, tuple) and len(display) >= 4:
+            self.sd_mounted = display[2]
+            # display[0] is the display object itself
+            display = display[0]
 
-        self._exp_ram_path = self._ram_path(1)
+        self._exp_ram_path = self._get_storage_path("ram1.bin")
         self.has_exp = self._file_exists(self._exp_ram_path)
         print(f"Expanded RAM detection: {'FOUND' if self.has_exp else 'NOT FOUND'} ({self._exp_ram_path})")
         if hasattr(cpu_core, "set_has_exp_ram"):
@@ -379,6 +408,41 @@ class PB1000System:
         except OSError:
             pass
 
+    def _ensure_dir(self, path):
+        """Create directory if it doesn't exist."""
+        try:
+            parts = path.strip("/").split("/")
+            curr = ""
+            for p in parts:
+                curr += "/" + p
+                try:
+                    os.mkdir(curr)
+                except OSError:
+                    pass
+        except Exception:
+            pass
+
+    def _get_storage_path(self, filename):
+        """Return the best path for a file, prioritizing SD card."""
+        sd_path = "/sd/" + filename
+        roms_path = "/roms/" + filename
+        root_path = "/" + filename
+        
+        if self.sd_mounted:
+            if filename in ("ram0.bin", "ram1.bin", "regs.json"):
+                if self._file_exists(sd_path):
+                    return sd_path
+                if self._file_exists(roms_path):
+                    return roms_path
+                return sd_path
+            
+            if self._file_exists(sd_path):
+                return sd_path
+        
+        if self._file_exists(roms_path):
+            return roms_path
+        return root_path
+
     def _file_exists(self, path):
         try:
             os.stat(path)
@@ -417,14 +481,19 @@ class PB1000System:
         import json
         import gc
         gc.collect()
+        
         if path is None:
-            path0 = "/roms/ram0.bin"
-            path1 = "/roms/ram1.bin"
-            reg_path = "/roms/regs.json"
+            path0 = self._get_storage_path("ram0.bin")
+            path1 = self._get_storage_path("ram1.bin")
+            reg_path = self._get_storage_path("regs.json")
         else:
             path0 = f"{path}/ram0.bin"
             path1 = f"{path}/ram1.bin"
             reg_path = f"{path}/regs.json"
+
+        # Ensure directory for saving exists if it's on SD
+        if path0.startswith("/sd/"):
+            self._ensure_dir("/sd")
 
         try:
             with open(path0, "wb") as f:
@@ -462,15 +531,9 @@ class PB1000System:
     def load_state(self, path=None):
         import json
         if path is None:
-            path0 = "/roms/ram0.bin"
-            path1 = "/roms/ram1.bin"
-            reg_path = "/roms/regs.json"
-            if not self._file_exists(path0):
-                path0 = "/ram0.bin"
-                path1 = "/ram1.bin"
-                reg_path = "/regs.json"
-                if not self._file_exists(reg_path):
-                    reg_path = "/roms/register.bin"
+            path0 = self._get_storage_path("ram0.bin")
+            path1 = self._get_storage_path("ram1.bin")
+            reg_path = self._get_storage_path("regs.json")
         else:
             path0 = f"{path}/ram0.bin"
             path1 = f"{path}/ram1.bin"

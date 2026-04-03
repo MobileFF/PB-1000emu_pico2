@@ -480,8 +480,9 @@ def main():
     print("PB-1000 Emulator Starting...")
 
     ret = init_display()
-    if isinstance(ret, tuple):
-        display, touch = ret
+    if isinstance(ret, tuple) and len(ret) >= 2:
+        display = ret[0]
+        touch = ret[1]
     else:
         display = ret
         touch = None
@@ -490,7 +491,8 @@ def main():
     # Initial scale 1.5 will fit the 288x48 LCD.
 
     print("Initializing PB1000System...")
-    system = PB1000System(display, debug={"sys": False, "lcd": False, "kb": False}, restore_registers=True)
+    # Pass the entire return tuple (contains sd_mounted info)
+    system = PB1000System(ret, debug={"sys": False, "lcd": False, "kb": False}, restore_registers=True)
     # (PioUart init moved later)
     print("PB1000System initialized.")
     system.touch = touch
@@ -651,24 +653,32 @@ def main():
                         system.set_status("CAPTURING...")
                         system.update_display(x_offset=16, y_offset=40)
                         try:
-                            # 1. Capture LCD Screenshot (PBM format)
+                            # 1. Prepare Path
                             ts = time.localtime()
                             ts_str = "{:04}{:02}{:02}_{:02}{:02}{:02}".format(*ts[:6])
-                            pbm_path = f"screenshot_{ts_str}.pbm"
+                            
+                            base_dir = "/sd/screenshots" if system.sd_mounted else "/roms"
+                            if system.sd_mounted:
+                                system._ensure_dir(base_dir)
+                            
+                            pbm_path = f"{base_dir}/screenshot_{ts_str}.pbm"
+                            vram_path = f"{base_dir}/vram_dump_{ts_str}.bin"
+                            
+                            # 2. Capture LCD Screenshot (PBM format)
                             system.lcd.save_pbm(pbm_path)
                             
-                            # 2. Dump specific RAM areas (EDTOP ~&H6100, LCDTP ~&H68C8)
+                            # 3. Dump specific RAM areas (EDTOP ~&H6100, LCDTP ~&H68C8)
                             # We dump 0x6000-0x7FFF as a full VRAM context
                             ram_dump = bytearray(0x2000)
                             import hd61700 as cpu_core
                             for addr in range(0x6000, 0x8000):
                                 ram_dump[addr - 0x6000] = cpu_core.read_mem(addr)
                             
-                            with open(f"vram_dump_{ts_str}.bin", "wb") as f:
+                            with open(vram_path, "wb") as f:
                                 f.write(ram_dump)
                             
                             system.set_status("CAPTURED!", 2000)
-                            print(f"Captured: screenshot_{ts_str}.txt, vram_dump_{ts_str}.bin")
+                            print(f"Captured: {pbm_path}, {vram_path}")
                         except Exception as ex:
                             print(f"Capture failed: {ex}")
                             system.set_status("CAP ERROR!", 2000)
