@@ -57,8 +57,18 @@ static uint32_t debug_calc_needed_entry_space(uint16_t free_ptr) {
 
 static uint8_t mem_readbyte(hd61700_state_t *cpu, uint8_t segment,
                             uint32_t offset) {
-  /* Data-space accesses use UA bits 4-5 (IX/main bank). */
   uint8_t bank = (segment >> 4) & 0x03;
+  offset &= 0xFFFF;
+
+  if (offset < 0x2000) {
+    if (cpu->rom0_ptr) return cpu->rom0_ptr[offset];
+  } else if (offset >= 0x6000 && offset < 0x8000) {
+    if (cpu->ram_ptr) return cpu->ram_ptr[offset - 0x6000];
+  } else if (offset >= 0x8000) {
+    if (bank == 0 && cpu->rom1_ptr) return cpu->rom1_ptr[offset - 0x8000];
+    if (bank == 1 && cpu->exp_ram_ptr) return cpu->exp_ram_ptr[offset - 0x8000];
+  }
+
   if (cpu->mem_read)
     return cpu->mem_read(cpu->cb_ctx, bank, offset);
   return 0;
@@ -66,16 +76,39 @@ static uint8_t mem_readbyte(hd61700_state_t *cpu, uint8_t segment,
 
 static void mem_writebyte(hd61700_state_t *cpu, uint8_t segment,
                           uint32_t offset, uint8_t data) {
-  /* Data-space accesses use UA bits 4-5 (IX/main bank). */
   uint8_t bank = (segment >> 4) & 0x03;
+  offset &= 0xFFFF;
+
+  if (offset >= 0x6000 && offset < 0x8000) {
+    if (cpu->ram_ptr) {
+      cpu->ram_ptr[offset - 0x6000] = data;
+      return;
+    }
+  } else if (offset >= 0x8000 && bank == 1) {
+    if (cpu->exp_ram_ptr) {
+      cpu->exp_ram_ptr[offset - 0x8000] = data;
+      return;
+    }
+  }
+
   if (cpu->mem_write)
     cpu->mem_write(cpu->cb_ctx, bank, offset, data);
 }
 
 static uint8_t mem_readbyte_iz(hd61700_state_t *cpu, uint8_t segment,
                                uint32_t offset) {
-  /* IZ accesses use UA bits 6-7. */
   uint8_t bank = (segment >> 6) & 0x03;
+  offset &= 0xFFFF;
+
+  if (offset < 0x2000) {
+    if (cpu->rom0_ptr) return cpu->rom0_ptr[offset];
+  } else if (offset >= 0x6000 && offset < 0x8000) {
+    if (cpu->ram_ptr) return cpu->ram_ptr[offset - 0x6000];
+  } else if (offset >= 0x8000) {
+    if (bank == 0 && cpu->rom1_ptr) return cpu->rom1_ptr[offset - 0x8000];
+    if (bank == 1 && cpu->exp_ram_ptr) return cpu->exp_ram_ptr[offset - 0x8000];
+  }
+
   if (cpu->mem_read)
     return cpu->mem_read(cpu->cb_ctx, bank, offset);
   return 0;
@@ -83,16 +116,39 @@ static uint8_t mem_readbyte_iz(hd61700_state_t *cpu, uint8_t segment,
 
 static void mem_writebyte_iz(hd61700_state_t *cpu, uint8_t segment,
                              uint32_t offset, uint8_t data) {
-  /* IZ accesses use UA bits 6-7. */
   uint8_t bank = (segment >> 6) & 0x03;
+  offset &= 0xFFFF;
+
+  if (offset >= 0x6000 && offset < 0x8000) {
+    if (cpu->ram_ptr) {
+      cpu->ram_ptr[offset - 0x6000] = data;
+      return;
+    }
+  } else if (offset >= 0x8000 && bank == 1) {
+    if (cpu->exp_ram_ptr) {
+      cpu->exp_ram_ptr[offset - 0x8000] = data;
+      return;
+    }
+  }
+
   if (cpu->mem_write)
     cpu->mem_write(cpu->cb_ctx, bank, offset, data);
 }
 
 static uint8_t mem_readbyte_stack(hd61700_state_t *cpu, uint8_t segment,
                                   uint32_t offset) {
-  /* SSP/USP accesses use UA bits 2-3. */
   uint8_t bank = (segment >> 2) & 0x03;
+  offset &= 0xFFFF;
+
+  if (offset < 0x2000) {
+    if (cpu->rom0_ptr) return cpu->rom0_ptr[offset];
+  } else if (offset >= 0x6000 && offset < 0x8000) {
+    if (cpu->ram_ptr) return cpu->ram_ptr[offset - 0x6000];
+  } else if (offset >= 0x8000) {
+    if (bank == 0 && cpu->rom1_ptr) return cpu->rom1_ptr[offset - 0x8000];
+    if (bank == 1 && cpu->exp_ram_ptr) return cpu->exp_ram_ptr[offset - 0x8000];
+  }
+
   if (cpu->mem_read)
     return cpu->mem_read(cpu->cb_ctx, bank, offset);
   return 0;
@@ -100,16 +156,39 @@ static uint8_t mem_readbyte_stack(hd61700_state_t *cpu, uint8_t segment,
 
 static void mem_writebyte_stack(hd61700_state_t *cpu, uint8_t segment,
                                 uint32_t offset, uint8_t data) {
-  /* SSP/USP accesses use UA bits 2-3. */
   uint8_t bank = (segment >> 2) & 0x03;
+  offset &= 0xFFFF;
+
+  if (offset >= 0x6000 && offset < 0x8000) {
+    if (cpu->ram_ptr) {
+      cpu->ram_ptr[offset - 0x6000] = data;
+      return;
+    }
+  } else if (offset >= 0x8000 && bank == 1) {
+    if (cpu->exp_ram_ptr) {
+      cpu->exp_ram_ptr[offset - 0x8000] = data;
+      return;
+    }
+  }
+
   if (cpu->mem_write)
     cpu->mem_write(cpu->cb_ctx, bank, offset, data);
 }
 
 static uint8_t prog_readbyte(hd61700_state_t *cpu, uint8_t segment,
                              uint32_t offset) {
-  /* Program-space accesses use UA bits 0-1 (PC bank). */
   uint8_t bank = segment & 0x03;
+  offset &= 0xFFFF;
+
+  if (offset < 0x2000) {
+    if (cpu->rom0_ptr) return cpu->rom0_ptr[offset];
+  } else if (offset >= 0x6000 && offset < 0x8000) {
+    if (cpu->ram_ptr) return cpu->ram_ptr[offset - 0x6000];
+  } else if (offset >= 0x8000) {
+    if (bank == 0 && cpu->rom1_ptr) return cpu->rom1_ptr[offset - 0x8000];
+    if (bank == 1 && cpu->exp_ram_ptr) return cpu->exp_ram_ptr[offset - 0x8000];
+  }
+
   if (cpu->mem_read)
     return cpu->mem_read(cpu->cb_ctx, bank, offset);
   return 0;

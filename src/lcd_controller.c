@@ -5,6 +5,7 @@
  */
 #include "lcd_controller.h"
 #include <stdio.h>
+#include <string.h>
 
 /* ======== Internal helpers ======== */
 
@@ -402,9 +403,17 @@ void lcd_set_bg_colors(lcd_state_t *lcd, uint16_t on_bg, uint16_t off_bg) {
 /* RP2350 hardware SPI rendering via pico-sdk */
 #include "hardware/gpio.h"
 #include "hardware/spi.h"
+#include "hardware/dma.h"
 
-/* Byte-swap a 16-bit value for big-endian SPI transfer */
-static inline uint16_t bswap16(uint16_t v) { return (v >> 8) | (v << 8); }
+static int lcd_dma_chan = -1;
+static uint8_t dma_buffer[288 * 48 * 2]; /* 1.5x scale max size, 2 bytes/pixel */
+
+void lcd_wait_for_idle(lcd_state_t *lcd) {
+  if (lcd_dma_chan >= 0) {
+    dma_channel_wait_for_finish_blocking(lcd_dma_chan);
+    gpio_put(lcd->pin_cs, 1);
+  }
+}
 
 void lcd_setup_display(lcd_state_t *lcd, void *spi_inst, uint8_t pin_cs,
                        uint8_t pin_dc, uint8_t scale, uint16_t x_offset,
@@ -495,10 +504,14 @@ void lcd_render_to_display(lcd_state_t *lcd) {
       last_page = i;
     }
   }
+
   if (first_page == -1) {
     lcd->dirty = false;
     return;
   }
+
+  /* Wait for previous DMA before starting new one or touching SPI */
+  lcd_wait_for_idle(lcd);
 
   uint8_t s = lcd->scale;
   uint8_t scale_num = lcd->scale_num ? lcd->scale_num : 1;
@@ -511,23 +524,33 @@ void lcd_render_to_display(lcd_state_t *lcd) {
   uint16_t out_h = frac_scale ? (uint16_t)((LCD_HEIGHT * scale_num) / scale_den)
                                : (uint16_t)(LCD_HEIGHT * s);
 
-  /* Pre-compute big-endian color values */
-  uint16_t be_on = bswap16(lcd->color_on);
-  uint16_t be_off = bswap16(lcd->color_off);
-  uint16_t be_lcd_off = bswap16(lcd->color_lcd_off);
-
-  uint16_t row_buf[LCD_WIDTH * 4]; /* max integer scale=4 (192*4=768) */
+  /* Pre-split colors for 8-bit Big-Endian DMA */
+  uint8_t on_h = (uint8_t)(lcd->color_on >> 8);
+  uint8_t on_l = (uint8_t)(lcd->color_on & 0xFF);
+  uint8_t off_h = (uint8_t)(lcd->color_off >> 8);
+  uint8_t off_l = (uint8_t)(lcd->color_off & 0xFF);
+  uint8_t lcd_off_h = (uint8_t)(lcd->color_lcd_off >> 8);
+  uint8_t lcd_off_l = (uint8_t)(lcd->color_lcd_off & 0xFF);
 
   /* LCD Power OFF: fill whole area once and exit */
   if (!lcd->display_on) {
     ili_set_window(lcd, xo, yo, xo + out_w - 1, yo + out_h - 1);
     gpio_put(lcd->pin_dc, 1);
     gpio_put(lcd->pin_cs, 0);
-    for (int i = 0; i < out_w; i++) row_buf[i] = be_lcd_off;
-    for (int y = 0; y < out_h; y++) {
-      spi_write_blocking((spi_inst_t *)lcd->spi_inst, (const uint8_t *)row_buf, (size_t)out_w * 2);
+    uint32_t total_pixels = (uint32_t)out_w * out_h;
+    uint32_t fill_limit = (total_pixels > (288 * 48)) ? (288 * 48) : total_pixels;
+    for (uint32_t i = 0; i < fill_limit; i++) {
+        dma_buffer[i*2] = lcd_off_h;
+        dma_buffer[i*2+1] = lcd_off_l;
     }
-    gpio_put(lcd->pin_cs, 1);
+    
+    if (lcd_dma_chan < 0) lcd_dma_chan = dma_claim_unused_channel(true);
+    dma_channel_config c = dma_channel_get_default_config(lcd_dma_chan);
+    channel_config_set_transfer_data_size(&c, DMA_SIZE_8);
+    channel_config_set_dreq(&c, spi_get_dreq((spi_inst_t *)lcd->spi_inst, true));
+    dma_channel_configure(lcd_dma_chan, &c, &spi_get_hw((spi_inst_t *)lcd->spi_inst)->dr,
+                         dma_buffer, fill_limit * 2, true);
+    lcd_wait_for_idle(lcd);
     goto clear_dirty;
   }
 
@@ -539,39 +562,54 @@ void lcd_render_to_display(lcd_state_t *lcd) {
   gpio_put(lcd->pin_dc, 1);
   gpio_put(lcd->pin_cs, 0);
 
+  uint32_t buf_idx = 0;
   if (frac_scale) {
-    /* Fixed-point scale for coordinates (16.16) */
     uint32_t step_fp = (uint32_t)(((uint32_t)scale_den << 16) / scale_num);
     for (int dy = dy_start; dy <= dy_end; dy++) {
       uint16_t sy = (uint16_t)((dy * scale_den) / scale_num);
       uint8_t bit = (uint8_t)(sy & 0x07);
       int base = (sy >> 3) * LCD_WIDTH;
-
       uint32_t sx_fp = 0;
       for (int dx = 0; dx < out_w; dx++) {
         uint16_t sx = (uint16_t)(sx_fp >> 16);
         if (sx >= LCD_WIDTH) sx = LCD_WIDTH - 1;
-        row_buf[dx] = (lcd->vram[base + sx] & (1 << bit)) ? be_on : be_off;
+        bool pixel = (lcd->vram[base + sx] & (1 << bit)) != 0;
+        dma_buffer[buf_idx++] = pixel ? on_h : off_h;
+        dma_buffer[buf_idx++] = pixel ? on_l : off_l;
         sx_fp += step_fp;
       }
-      spi_write_blocking((spi_inst_t *)lcd->spi_inst, (const uint8_t *)row_buf, (size_t)out_w * 2);
     }
   } else {
-    /* Fast path for integer scaling */
     for (int sy = first_page * 8; sy <= (last_page * 8 + 7); sy++) {
       int base = (sy >> 3) * LCD_WIDTH;
       uint8_t bit = (uint8_t)(sy & 0x07);
-      int idx = 0;
       for (int col = 0; col < LCD_WIDTH; col++) {
-        uint16_t color = (lcd->vram[base + col] & (1 << bit)) ? be_on : be_off;
-        for (int v = 0; v < s; v++) row_buf[idx++] = color;
+        bool pixel = (lcd->vram[base + col] & (1 << bit)) != 0;
+        uint8_t h = pixel ? on_h : off_h;
+        uint8_t l = pixel ? on_l : off_l;
+        for (int v = 0; v < s; v++) {
+            dma_buffer[buf_idx++] = h;
+            dma_buffer[buf_idx++] = l;
+        }
       }
-      for (int v = 0; v < s; v++) {
-        spi_write_blocking((spi_inst_t *)lcd->spi_inst, (const uint8_t *)row_buf, (size_t)out_w * 2);
+      if (s > 1) {
+        uint8_t *line_start = &dma_buffer[buf_idx - out_w * 2];
+        for (int v = 1; v < s; v++) {
+          memcpy(&dma_buffer[buf_idx], line_start, out_w * 2);
+          buf_idx += out_w * 2;
+        }
       }
     }
   }
-  gpio_put(lcd->pin_cs, 1);
+
+  if (lcd_dma_chan < 0) lcd_dma_chan = dma_claim_unused_channel(true);
+  dma_channel_config c = dma_channel_get_default_config(lcd_dma_chan);
+  channel_config_set_transfer_data_size(&c, DMA_SIZE_8);
+  channel_config_set_dreq(&c, spi_get_dreq((spi_inst_t *)lcd->spi_inst, true));
+  dma_channel_configure(lcd_dma_chan, &c, &spi_get_hw((spi_inst_t *)lcd->spi_inst)->dr,
+                       dma_buffer, buf_idx, true);
+
+  lcd_wait_for_idle(lcd);
 
 clear_dirty:
   lcd->dirty = false;
@@ -579,9 +617,9 @@ clear_dirty:
     lcd->dirty_pages[i] = false;
   }
 }
-
 #else
-/* Stub implementations for non-ARM builds (CPython testing, etc.) */
+/* Stub implementations for non-ARM builds */
+void lcd_wait_for_idle(lcd_state_t *lcd) { (void)lcd; }
 void lcd_setup_display(lcd_state_t *lcd, void *spi_inst, uint8_t pin_cs,
                        uint8_t pin_dc, uint8_t scale, uint16_t x_offset,
                        uint16_t y_offset) {

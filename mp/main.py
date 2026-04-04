@@ -2,6 +2,7 @@
 PB-1000 Emulator - Normal Run Script
 """
 import machine
+# machine.freq(200000000)
 import sys
 import time
 import uselect
@@ -690,6 +691,8 @@ def main():
                 system._save_requested = False
                 system.set_status("SAVING STATE...")
                 system.update_display(x_offset=16, y_offset=40)
+                if hasattr(system.lcd, 'lcd_sync'):
+                    system.lcd.lcd_sync()
                 if ENABLE_USB_KBD:
                     try:
                         import usb_host

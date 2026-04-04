@@ -829,6 +829,19 @@ static mp_obj_t mod_reset(size_t n_args, const mp_obj_t *args) {
   cpu_state.port_write = c_port_write;
   cpu_state.log_write = c_log_write;
   cpu_state.log_ctx = NULL;
+
+  /* Connect direct memory pointers for high-performance path */
+  if (use_c_mem) {
+    cpu_state.rom0_ptr = rom0_buf;
+    cpu_state.rom1_ptr = rom1_buf;
+    cpu_state.ram_ptr = ram_buf;
+    cpu_state.exp_ram_ptr = has_exp_ram ? exp_ram_buf : NULL;
+  } else {
+    cpu_state.rom0_ptr = NULL;
+    cpu_state.rom1_ptr = NULL;
+    cpu_state.ram_ptr = NULL;
+    cpu_state.exp_ram_ptr = NULL;
+  }
   return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(mod_reset_obj, 0, 1, mod_reset);
@@ -1365,12 +1378,21 @@ static mp_obj_t mod_release_row_ki(mp_obj_t row_obj, mp_obj_t ki_obj) {
 static MP_DEFINE_CONST_FUN_OBJ_2(mod_release_row_ki_obj, mod_release_row_ki);
 
 
+/* hd61700.lcd_sync() */
+static mp_obj_t mod_lcd_sync(void) {
+    lcd_wait_for_idle(lcd_c_get_state());
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(mod_lcd_sync_obj, mod_lcd_sync);
+
+
 /* ====== Module definition ====== */
 static const mp_rom_map_elem_t hd61700_module_globals_table[] = {
     {MP_ROM_QSTR(MP_QSTR___name__), MP_ROM_QSTR(MP_QSTR_hd61700)},
     {MP_ROM_QSTR(MP_QSTR_reset), MP_ROM_PTR(&mod_reset_obj)},
     {MP_ROM_QSTR(MP_QSTR_execute), MP_ROM_PTR(&mod_execute_obj)},
     {MP_ROM_QSTR(MP_QSTR_execute_steps), MP_ROM_PTR(&mod_execute_steps_obj)},
+    {MP_ROM_QSTR(MP_QSTR_lcd_sync), MP_ROM_PTR(&mod_lcd_sync_obj)},
     {MP_ROM_QSTR(MP_QSTR_set_debug), MP_ROM_PTR(&mod_set_debug_obj)},
     {MP_ROM_QSTR(MP_QSTR_set_key_debug), MP_ROM_PTR(&mod_set_key_debug_obj)},
     {MP_ROM_QSTR(MP_QSTR_set_lcd_debug), MP_ROM_PTR(&mod_set_lcd_debug_obj)},

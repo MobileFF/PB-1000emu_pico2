@@ -195,6 +195,12 @@ typedef struct {
   uint8_t last_opcodes[8]; // HD61700の最大命令長に合わせて確保
   uint8_t last_op_len;
 
+  /* Direct memory pointers (optional optimization) */
+  uint8_t *rom0_ptr;    /* Internal ROM (8KB): 0x0000-0x1FFF */
+  uint8_t *rom1_ptr;    /* System ROM / Bank 0 (32KB): 0x8000-0xFFFF */
+  uint8_t *ram_ptr;     /* Main RAM (8KB): 0x6000-0x7FFF */
+  uint8_t *exp_ram_ptr; /* Expanded RAM (32KB): Bank 1 @ 0x8000-0xFFFF */
+
 } hd61700_state_t;
 
 /* API Functions */
