@@ -75,7 +75,7 @@ class LCDController:
         self._op_command = False
         self._cmd_buf = []
         self._cmd_expected = 0
-        self._legacy_mode = False
+        self._cmd_expected = 0
         self._charset = self._load_charset()
 
     def _set_display_on(self, enabled):

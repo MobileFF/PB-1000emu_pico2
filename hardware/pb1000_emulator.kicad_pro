@@ -1,0 +1,92 @@
+{
+  "boards": [],
+  "cvpcb": {
+    "alias_files": [],
+    "last_fp_lib_table": ""
+  },
+  "erc": {
+    "nets_to_ignore": [],
+    "pins_to_ignore": [],
+    "severities": {
+      "bus_conflicting_nets": "error",
+      "bus_entry_needed": "error",
+      "bus_to_bus_conflict": "error",
+      "bus_to_net_conflict": "error",
+      "conflicting_net_types": "error",
+      "different_unit_footprint": "error",
+      "different_unit_net": "error",
+      "duplicate_reference": "error",
+      "duplicate_sheet_names": "error",
+      "endpoint_off_grid": "warning",
+      "extra_units": "warning",
+      "global_label_dangling": "warning",
+      "hier_label_dangling": "warning",
+      "lib_symbol_issues": "warning",
+      "missing_footprint": "warning",
+      "missing_unit": "warning",
+      "multiple_net_names": "warning",
+      "net_not_bus_member": "warning",
+      "no_connect_connected": "warning",
+      "no_connect_dangling": "warning",
+      "pin_not_connected": "error",
+      "pin_not_driven": "error",
+      "pin_to_pin_conflict": "error",
+      "power_pin_not_driven": "error",
+      "similar_labels": "warning",
+      "single_node_net": "warning",
+      "unresolved_variable": "error",
+      "wire_dangling": "warning"
+    }
+  },
+  "libraries": {
+    "pinned_footprint_libs": [],
+    "pinned_symbol_libs": []
+  },
+  "meta": {
+    "filename": "pb1000_emulator.kicad_pro",
+    "version": 1
+  },
+  "net_settings": {
+    "classes": [
+      {
+        "bus_width": 12,
+        "clearance": 0.2,
+        "diff_pair_gap": 0.25,
+        "diff_pair_width": 0.2,
+        "line_style": 0,
+        "microvia_diameter": 0.3,
+        "microvia_drill": 0.1,
+        "name": "Default",
+        "pcb_color": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "schematic_color": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "track_width": 0.2,
+        "via_diameter": 0.6,
+        "via_drill": 0.3
+      }
+    ],
+    "definitions": []
+  },
+  "pcbnew": {
+    "last_fp_lib_table": ""
+  },
+  "schematic": {
+    "last_symbol_lib_table": ""
+  },
+  "sheets": [
+    [
+      "00000000-0000-0000-0000-000000000001",
+      ""
+    ]
+  ],
+  "version": 1
+}

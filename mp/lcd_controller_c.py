@@ -15,13 +15,6 @@ class LCDControllerC:
     WIDTH = lcd_c.WIDTH
     HEIGHT = lcd_c.HEIGHT
 
-    # Legacy direct-control commands
-    CMD_DISPLAY_ON = 0x39
-    CMD_DISPLAY_OFF = 0x38
-    CMD_SET_PAGE = 0xB8
-    CMD_SET_COL = 0x00
-    CMD_SET_START = 0xC0
-
     # LCD.s command IDs
     LCDC_CMD_READ = 0x01
     LCDC_CMD_DRAW_BITIMAGE = 0x02
@@ -205,14 +198,6 @@ class LCDControllerC:
         if not v: lcd_c.clear_dirty()
     @property
     def display_on(self): return lcd_c.is_display_on()
-    @property
-    def page(self): return 0
-    @page.setter
-    def page(self, v): lcd_c.set_page(v)
-    @property
-    def column(self): return 0
-    @column.setter
-    def column(self, v): lcd_c.set_column(v)
 
     @property
     def scale(self):

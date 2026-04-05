@@ -203,7 +203,6 @@ void lcd_init(lcd_state_t *lcd) {
   lcd->active_chip = 0;
   lcd->selected_ce = 0x00;
   lcd->op_command = false;
-  lcd->legacy_mode = false;
   lcd->cmd_buf_len = 0;
   lcd->cmd_expected = 0;
   lcd->charset_loaded = false;
@@ -222,8 +221,6 @@ void lcd_init(lcd_state_t *lcd) {
 
 void lcd_clear(lcd_state_t *lcd) {
   memset(lcd->vram, 0, LCD_VRAM_SIZE);
-  lcd->page = 0;
-  lcd->column = 0;
   lcd->dirty = true;
   for (int i = 0; i < LCD_PAGES; i++) {
     lcd->dirty_pages[i] = true;
@@ -231,51 +228,16 @@ void lcd_clear(lcd_state_t *lcd) {
 }
 
 void lcd_ctrl(lcd_state_t *lcd, uint8_t data) {
-  /* Legacy direct-control commands */
-  if (data == LCD_CMD_DISPLAY_ON) {
-    set_display_on_state(lcd, true);
-    lcd->legacy_mode = true;
-    return;
-  }
-  if (data == LCD_CMD_DISPLAY_OFF) {
-    set_display_on_state(lcd, false);
-    lcd->legacy_mode = true;
-    return;
-  }
-  if ((data & 0xF8) == LCD_CMD_SET_PAGE) {
-    lcd->page = data & 0x03;
-    lcd->legacy_mode = true;
-    return;
-  }
-  if (data < 0x40) {
-    lcd->column = data % LCD_WIDTH;
-    lcd->legacy_mode = true;
-    return;
-  }
-
   /* New LCD.s-like protocol */
   lcd->ctrl_reg = data;
   lcd->selected_ce = (data >> 1) & 0x03;
   lcd->op_command = (data & 0x01) != 0;
   lcd->cmd_buf_len = 0;
   lcd->cmd_expected = 0;
-  lcd->legacy_mode = false;
 }
 
 void lcd_write(lcd_state_t *lcd, uint8_t data) {
-  /* Legacy mode */
-  if (lcd->legacy_mode) {
-    if (lcd->page < 4 && lcd->column < LCD_WIDTH) {
-      int offset = lcd->page * LCD_WIDTH + lcd->column;
-      if (offset < LCD_VRAM_SIZE) {
-        lcd->vram[offset] = data;
-        lcd->dirty = true;
-        lcd->dirty_pages[lcd->page] = true;
-      }
-    }
-    lcd->column = (lcd->column + 1) % LCD_WIDTH;
-    return;
-  }
+  /* Protocol data write mode */
 
   /* Command mode (OP=1) */
   if (lcd->op_command) {
@@ -294,7 +256,6 @@ void lcd_write(lcd_state_t *lcd, uint8_t data) {
   }
 
   /* Data-RAM mode (OP=0) */
-  bool active = false;
   int chip = lcd->active_chip;
   if (lcd->selected_ce & (1 << chip)) {
     lcd_chip_state_t *st = &lcd->chip_state[chip];
@@ -311,7 +272,6 @@ void lcd_write(lcd_state_t *lcd, uint8_t data) {
         write_vram_pixel_byte(lcd, chip, st->x + i, st->y, pix);
       }
       advance_xy(lcd, st, true, false);
-      active = true;
     } else {
       /* Bitimage or other data mode */
       uint8_t pixel_byte = data;
@@ -322,23 +282,8 @@ void lcd_write(lcd_state_t *lcd, uint8_t data) {
       advance_xy(
           lcd, st, false,
           (mode == LCDC_CMD_DRAW_BITIMAGE && lcd->draw_bitimage_reverse));
-      active = true;
     }
   }
-
-  if (active)
-    return;
-
-  /* Legacy fallback */
-  if (lcd->page < 4 && lcd->column < LCD_WIDTH) {
-    int offset = lcd->page * LCD_WIDTH + lcd->column;
-    if (offset < LCD_VRAM_SIZE) {
-      lcd->vram[offset] = data;
-      lcd->dirty = true;
-      lcd->dirty_pages[lcd->page] = true;
-    }
-  }
-  lcd->column = (lcd->column + 1) % LCD_WIDTH;
 }
 
 uint8_t lcd_read(lcd_state_t *lcd) {
@@ -351,16 +296,6 @@ uint8_t lcd_read(lcd_state_t *lcd) {
         (st->mode == LCDC_CMD_DRAW_BITIMAGE && lcd->draw_bitimage_reverse));
     /* LCD.s notes readback nibble swap */
     return ((raw & 0x0F) << 4) | ((raw >> 4) & 0x0F);
-  }
-
-  /* Legacy fallback */
-  if (lcd->page < 4 && lcd->column < LCD_WIDTH) {
-    int offset = lcd->page * LCD_WIDTH + lcd->column;
-    if (offset < LCD_VRAM_SIZE) {
-      uint8_t val = lcd->vram[offset];
-      lcd->column = (lcd->column + 1) % LCD_WIDTH;
-      return val;
-    }
   }
   return 0xFF;
 }
@@ -608,8 +543,6 @@ void lcd_render_to_display(lcd_state_t *lcd) {
   channel_config_set_dreq(&c, spi_get_dreq((spi_inst_t *)lcd->spi_inst, true));
   dma_channel_configure(lcd_dma_chan, &c, &spi_get_hw((spi_inst_t *)lcd->spi_inst)->dr,
                        dma_buffer, buf_idx, true);
-
-  lcd_wait_for_idle(lcd);
 
 clear_dirty:
   lcd->dirty = false;

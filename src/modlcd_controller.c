@@ -182,21 +182,6 @@ static mp_obj_t mod_lcd_render(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(mod_lcd_render_obj, mod_lcd_render);
 
-/* lcd_c.set_page(page) - for legacy test compatibility */
-static mp_obj_t mod_lcd_set_page(mp_obj_t page_obj) {
-  lcd_state.page = (uint8_t)(mp_obj_get_int(page_obj) & 0x03);
-  return mp_const_none;
-}
-static MP_DEFINE_CONST_FUN_OBJ_1(mod_lcd_set_page_obj, mod_lcd_set_page);
-
-/* lcd_c.set_column(column) - for legacy test compatibility */
-static mp_obj_t mod_lcd_set_column(mp_obj_t col_obj) {
-  int col = mp_obj_get_int(col_obj);
-  lcd_state.column = (uint8_t)(col % LCD_WIDTH);
-  return mp_const_none;
-}
-static MP_DEFINE_CONST_FUN_OBJ_1(mod_lcd_set_column_obj, mod_lcd_set_column);
-
 /* ====== Module definition ====== */
 static const mp_rom_map_elem_t lcd_c_module_globals_table[] = {
     {MP_ROM_QSTR(MP_QSTR___name__), MP_ROM_QSTR(MP_QSTR_lcd_c)},
@@ -221,8 +206,6 @@ static const mp_rom_map_elem_t lcd_c_module_globals_table[] = {
     {MP_ROM_QSTR(MP_QSTR_set_bg_colors),
      MP_ROM_PTR(&mod_lcd_set_bg_colors_obj)},
     {MP_ROM_QSTR(MP_QSTR_set_scale), MP_ROM_PTR(&mod_lcd_set_scale_obj)},
-    {MP_ROM_QSTR(MP_QSTR_set_page), MP_ROM_PTR(&mod_lcd_set_page_obj)},
-    {MP_ROM_QSTR(MP_QSTR_set_column), MP_ROM_PTR(&mod_lcd_set_column_obj)},
     {MP_ROM_QSTR(MP_QSTR_setup_display),
      MP_ROM_PTR(&mod_lcd_setup_display_obj)},
     {MP_ROM_QSTR(MP_QSTR_render), MP_ROM_PTR(&mod_lcd_render_obj)},

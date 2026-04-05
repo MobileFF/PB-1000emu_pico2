@@ -27,13 +27,6 @@
 #define LCD_VRAM_SIZE (LCD_WIDTH * LCD_PAGES) /* 768 bytes */
 #define LCD_CHARSET_SIZE 2048
 
-/* Legacy direct-control commands */
-#define LCD_CMD_DISPLAY_ON 0x39
-#define LCD_CMD_DISPLAY_OFF 0x38
-#define LCD_CMD_SET_PAGE 0xB8
-#define LCD_CMD_SET_COL 0x00
-#define LCD_CMD_SET_START 0xC0
-
 /* LCD.s command IDs (mode low nibble) */
 #define LCDC_CMD_READ 0x01
 #define LCDC_CMD_DRAW_BITIMAGE 0x02
@@ -61,9 +54,6 @@ typedef struct {
   /* VRAM: 192 columns x 4 pages = 768 bytes */
   uint8_t vram[LCD_VRAM_SIZE];
 
-  /* Current addressing */
-  uint8_t page;   /* 0-3 */
-  uint8_t column; /* 0-191 */
   uint8_t start_line;
 
   /* Display state */
@@ -88,7 +78,6 @@ typedef struct {
   uint8_t char_width;
   uint8_t selected_ce;
   bool op_command;
-  bool legacy_mode;
 
   /* Command buffer */
   uint8_t cmd_buf[4];

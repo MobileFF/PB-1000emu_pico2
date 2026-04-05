@@ -777,6 +777,92 @@ class PB1000System:
     def pc(self):
         return cpu_core.get_pc()
 
+    @pc.setter
+    def pc(self, value):
+        cpu_core.set_pc(value)
+
+    @property
+    def flags(self):
+        return cpu_core.get_flags()
+
+    @flags.setter
+    def flags(self, value):
+        cpu_core.set_flags(value)
+
+    @property
+    def ia(self):
+        return cpu_core.get_reg8(4)
+
+    @ia.setter
+    def ia(self, value):
+        cpu_core.set_reg8(4, value)
+
+    @property
+    def ib(self):
+        return cpu_core.get_reg8(2)
+
+    @ib.setter
+    def ib(self, value):
+        cpu_core.set_reg8(2, value)
+
+    @property
+    def ie(self):
+        return cpu_core.get_reg8(5)
+
+    @ie.setter
+    def ie(self, value):
+        cpu_core.set_reg8(5, value)
+
+    @property
+    def ua(self):
+        return cpu_core.get_reg8(3)
+
+    @ua.setter
+    def ua(self, value):
+        cpu_core.set_reg8(3, value)
+
+    # Main Registers r0-r31
+    def __getattr__(self, name):
+        if name.startswith('r') and name[1:].isdigit():
+            idx = int(name[1:])
+            if 0 <= idx <= 31:
+                return cpu_core.get_reg(idx)
+        raise AttributeError(f"'PB1000System' object has no attribute '{name}'")
+
+    def __setattr__(self, name, value):
+        if name.startswith('r') and name[1:].isdigit():
+            idx = int(name[1:])
+            if 0 <= idx <= 31:
+                cpu_core.set_reg(idx, value)
+                return
+        super().__setattr__(name, value)
+
+    @property
+    def ix(self): return cpu_core.get_reg16(0)
+    @ix.setter
+    def ix(self, v): cpu_core.set_reg16(0, v)
+    @property
+    def iy(self): return cpu_core.get_reg16(1)
+    @iy.setter
+    def iy(self, v): cpu_core.set_reg16(1, v)
+    @property
+    def iz(self): return cpu_core.get_reg16(2)
+    @iz.setter
+    def iz(self, v): cpu_core.set_reg16(2, v)
+
+    @property
+    def sx(self): return cpu_core.get_sreg(0)
+    @sx.setter
+    def sx(self, v): cpu_core.set_sreg(0, v)
+    @property
+    def sy(self): return cpu_core.get_sreg(1)
+    @sy.setter
+    def sy(self, v): cpu_core.set_sreg(1, v)
+    @property
+    def sz(self): return cpu_core.get_sreg(2)
+    @sz.setter
+    def sz(self, v): cpu_core.set_sreg(2, v)
+
     @property
     def cpu(self):
         return cpu_core
@@ -1024,6 +1110,15 @@ class PB1000System:
                 a += 1
             printer(f"{addr:04X}: {' '.join(vals)}")
             addr += bytes_per_line
+
+    def dump_edtop_vram(self, bytes_per_line=16, printer=print):
+        """Dump EDTOP VRAM (0x6100-0x61FF)."""
+        self.dump_mem_range(0x6100, 0x61FF, bytes_per_line=bytes_per_line, printer=printer)
+
+    def dump_ledtp_vram(self, bytes_per_line=16, printer=print):
+        """Dump LEDTP VRAM (0x6201-0x6850)."""
+        #self.dump_mem_range(0x6201, 0x6850, bytes_per_line=bytes_per_line, printer=printer)
+        self.lcd.dump_vram()
 
 
 

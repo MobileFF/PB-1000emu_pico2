@@ -1,8 +1,9 @@
-
+# LCDControllerのテスト用スクリプト
 import machine
 import time
 from ili9341 import ILI9341
-from lcd_controller import LCDController
+from lcd_controller_c import LCDControllerC as LCDController
+from pb1000 import draw_bezel
 
 # ---- Hardware Pin Configuration (Same as main.py) ----
 SPI_ID   = 1
@@ -65,27 +66,68 @@ def test_display():
     
     lcd = LCDController(display)
     # lcd init clears vram
-    
+    lcd.lcd_ctrl(lcd.CMD_DISPLAY_ON)
+
     # Draw Bezel
     print("Drawing Bezel...")
-    display.fill_rect(12, 36, 296, 72, 0x4228)
-    display.fill_rect(14, 38, 292, 68, 0x8410)
-    display.fill_rect(16, 40, 288, 64, 0xB5E6)
-
+    draw_bezel(display)
+#     display.fill_rect(12, 36, 296, 72, 0x4228)
+#     display.fill_rect(14, 38, 292, 68, 0x8410)
+#     print("Clearing display...")
+    lcd.clear()
+    
+    print("Turning on display...")
+    # LCD.s Command: DISPLAY ON/OFF (0x04)
+    # Bit 4 (0x10) = ON. 0x14 = ON, 0x04 = OFF
+    lcd.lcd_ctrl(0xDF) # OP=1, CE=3 (Both chips)
+    lcd.lcd_write(0x14)
+    lcd.lcd_ctrl(0xDE) # OP=0
+    
     print("Drawing text to VRAM...")
     # Write "PB-1000 OK!"
     text = "PB-1000 OK!"
     x = 10
     for char in text:
         # Each char is 5 pixels wide, + 1 pixel gap
-        draw_char(lcd, x, 8, char) # Page 1 (y=8)
+        # DRAW_BITIMAGE mode: OVERWRITE, chip based on x
+        chip = 0x00 if x < 96 else 0x10
+        lcd.lcd_ctrl(0xDF)
+        lcd.lcd_write(0x82 | chip)
+        
+        # Calculate Column Byte for LCD.s format
+        x_local = x % 96
+        block = x_local // 48
+        rem = x_local % 48
+        cmd_col = (block << 7) | (rem * 2)
+        lcd.lcd_write(cmd_col) # X coordinate (col)
+        
+        lcd.lcd_write(1) # Y coordinate (row 1 = page 1)
+        lcd.lcd_ctrl(0xDE)
+
+        pattern = FONT[char]
+        for col_byte in pattern:
+            # PB-1000 DRAW_BITIMAGE mode expects bit-reversed pattern data
+            rev_byte = sum(1 << (7 - i) for i in range(8) if (col_byte & (1 << i)))
+            lcd.lcd_write(rev_byte)
+            
         x += 6
     
     print("Drawing status line...")
-    # Draw a dotted line on Page 3
-    for i in range(192):
-        lcd.page = 3
-        lcd.column = i
+    # Draw a dotted line on Row 3
+    lcd.lcd_ctrl(0xDF)
+    lcd.lcd_write(0x82) # Left chip
+    lcd.lcd_write(0)
+    lcd.lcd_write(3)
+    lcd.lcd_ctrl(0xDE)
+    for i in range(96):
+        lcd.lcd_write(0x55 if i % 2 == 0 else 0xAA)
+        
+    lcd.lcd_ctrl(0xDF)
+    lcd.lcd_write(0x92) # Right chip
+    lcd.lcd_write(0)
+    lcd.lcd_write(3)
+    lcd.lcd_ctrl(0xDE)
+    for i in range(96):
         lcd.lcd_write(0x55 if i % 2 == 0 else 0xAA)
         
     print("Updating physical display...")

@@ -13,7 +13,7 @@ import machine
 import time
 import hd61700 as cpu_core
 from ili9341 import ILI9341
-from pb1000 import PB1000System
+from pb1000 import PB1000System,init_display,draw_bezel
 
 
 # ---- Hardware Pin Configuration (same as main.py) ----
@@ -27,28 +27,28 @@ RST_PIN = 7
 BL_PIN = 22
 
 
-def init_display():
-    spi = machine.SPI(
-        SPI_ID,
-        baudrate=40_000_000,
-        sck=machine.Pin(SCK_PIN),
-        mosi=machine.Pin(MOSI_PIN),
-        miso=machine.Pin(MISO_PIN),
-    )
-    cs = machine.Pin(CS_PIN, machine.Pin.OUT)
-    dc = machine.Pin(DC_PIN, machine.Pin.OUT)
-    rst = machine.Pin(RST_PIN, machine.Pin.OUT)
-    machine.Pin(BL_PIN, machine.Pin.OUT, value=1)
-
-    display = ILI9341(spi, cs, dc, rst, width=320, height=240)
-    display.fill_rect(0, 0, 320, 240, 0x0000)
-    return display
-
-
-def draw_bezel(display):
-    display.fill_rect(12, 36, 296, 72, 0x4228)
-    display.fill_rect(14, 38, 292, 68, 0x8410)
-    display.fill_rect(16, 40, 288, 64, 0xB5E6)
+# def init_display():
+#     spi = machine.SPI(
+#         SPI_ID,
+#         baudrate=40_000_000,
+#         sck=machine.Pin(SCK_PIN),
+#         mosi=machine.Pin(MOSI_PIN),
+#         miso=machine.Pin(MISO_PIN),
+#     )
+#     cs = machine.Pin(CS_PIN, machine.Pin.OUT)
+#     dc = machine.Pin(DC_PIN, machine.Pin.OUT)
+#     rst = machine.Pin(RST_PIN, machine.Pin.OUT)
+#     machine.Pin(BL_PIN, machine.Pin.OUT, value=1)
+# 
+#     display = ILI9341(spi, cs, dc, rst, width=320, height=240)
+#     display.fill_rect(0, 0, 320, 240, 0x0000)
+#     return display
+# 
+# 
+# def draw_bezel(display):
+#     display.fill_rect(12, 36, 296, 72, 0x4228)
+#     display.fill_rect(14, 38, 292, 68, 0x8410)
+#     display.fill_rect(16, 40, 288, 64, 0xB5E6)
 
 
 def run_outac_once(system,update_step=100):
@@ -61,9 +61,10 @@ def run_outac_once(system,update_step=100):
 
     print("Test Start")
 
-    outdv_addr = 0x690C
-    if system.RAM_START <= outdv_addr < system.SYS_ROM_START:
-        system.ram[outdv_addr - system.RAM_START] = 0x00
+#     outdv_addr = 0x690E
+#     if system.RAM_START <= outdv_addr < system.SYS_ROM_START:
+#         system.ram[outdv_addr - system.RAM_START] = 0x00
+#         system.ram[outdv_addr + 1 - system.RAM_START] = 0x00  # 16-bit address clear
 
     stub_addr = 0x7000
 # # print mark and Alpabet(upper)
@@ -80,7 +81,7 @@ def run_outac_once(system,update_step=100):
             0x42,0x10,0x20, # LD      $16,&H20
             0x77,0x9E,0xFF, # CAL     OUTAC
             0x48,0x10,0x01, # AD      $16,1
-            0xB1,0x87,      # JR      NC,LOOP
+            0xB1,0xF9,      # JR      NC,LOOP (-7 bytes back to 0x7003)
             0xF7,           # RTN
     ])
 # print 1 char
@@ -161,17 +162,26 @@ def run_outac_once(system,update_step=100):
 
 def main():
     print("OUTAC real LCD test start")
-    display = init_display()
+    ret = init_display()
+    if isinstance(ret, tuple) and len(ret) >= 2:
+        display = ret[0]
+        touch = ret[1]
+    else:
+        display = ret
+        touch = None
     draw_bezel(display)
-
+    
+    if hasattr(display, 'lcd_sync'):
+        display.lcd_sync()
+        
     # debug=True to see CPU/LCD logs while testing
     system = PB1000System(display=display)
     #system.lcd.setup_display(spi_id=1, cs_pin=9, dc_pin=8, scale=1, x_offset=16, y_offset=40)
     system.load_rom("/roms/rom0.bin", slot=0)
     system.load_rom("/roms/rom1.bin", slot=1)
-
+    system.lcd.set_display_scale(1.5)
     #update_step = int(input("update display step?>"))
-
+    system.update_display()
     #run_outac_once(system,update_step)
     run_outac_once(system)
     #system.update_display(x_offset=16, y_offset=40)
@@ -181,7 +191,7 @@ def main():
     print("dump vrams")
     system.dump_edtop_vram()
     system.dump_ledtp_vram()
-    system.lcd.dump_vram()
+    #system.lcd.dump_vram()
     print("save lcd.vram to pbm")
     system.lcd.save_pbm("lcd_dump.pbm")
     nonzero = sum(1 for b in system.lcd.vram if b)
