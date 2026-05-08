@@ -182,6 +182,15 @@ static mp_obj_t mod_lcd_render(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(mod_lcd_render_obj, mod_lcd_render);
 
+/* lcd_c.wait_for_idle() */
+static mp_obj_t mod_lcd_wait_for_idle(void) {
+#ifdef __arm__
+  lcd_wait_for_idle(&lcd_state);
+#endif
+  return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(mod_lcd_wait_for_idle_obj, mod_lcd_wait_for_idle);
+
 /* ====== Module definition ====== */
 static const mp_rom_map_elem_t lcd_c_module_globals_table[] = {
     {MP_ROM_QSTR(MP_QSTR___name__), MP_ROM_QSTR(MP_QSTR_lcd_c)},
@@ -209,6 +218,7 @@ static const mp_rom_map_elem_t lcd_c_module_globals_table[] = {
     {MP_ROM_QSTR(MP_QSTR_setup_display),
      MP_ROM_PTR(&mod_lcd_setup_display_obj)},
     {MP_ROM_QSTR(MP_QSTR_render), MP_ROM_PTR(&mod_lcd_render_obj)},
+    {MP_ROM_QSTR(MP_QSTR_wait_for_idle), MP_ROM_PTR(&mod_lcd_wait_for_idle_obj)},
     /* Constants */
     {MP_ROM_QSTR(MP_QSTR_WIDTH), MP_ROM_INT(LCD_WIDTH)},
     {MP_ROM_QSTR(MP_QSTR_HEIGHT), MP_ROM_INT(LCD_HEIGHT)},

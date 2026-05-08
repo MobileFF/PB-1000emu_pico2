@@ -18,14 +18,14 @@ def tests_80_83(t, check):
         hd61700.set_reg(0,0xFF); hd61700.set_reg(1,0xFF)
         hd61700.set_reg(2,0x01); hd61700.set_reg(3,0x00)
         hd61700.set_sreg(0,2)
-    check("80 ADCW overflow C", [0x80,0x00], s, [cf(c=True)])
+    check("80 ADCW overflow C", [0x80,0x00], s, [cf(c=True), cr(0,0xFF), cr(1,0xFF)])
     # --- 0x81 SBCW (check only) ---
     def s():
         hd61700.set_reg(0,0x03); hd61700.set_reg(1,0x00)
         hd61700.set_reg(2,0x03); hd61700.set_reg(3,0x00)
         hd61700.set_sreg(0,2)
     check("81 SBCW chk 3-3=0 Z", [0x81,0x00], s,
-          [cf(z=True,c=False)])
+          [cf(z=True,c=False), cr(0,0x03), cr(1,0x00)])
     # --- 0x82 LDW (16-bit copy) ---
     def s():
         hd61700.set_reg(0,0); hd61700.set_reg(1,0)
@@ -48,26 +48,26 @@ def tests_84_8f(t, check):
         hd61700.set_reg(0,0xFF); hd61700.set_reg(1,0x00)
         hd61700.set_reg(2,0x0F); hd61700.set_reg(3,0x00)
         hd61700.set_sreg(0,2)
-    check("84 ANCW chk", [0x84,0x00], s, [cf(z=False)])
+    check("84 ANCW chk", [0x84,0x00], s, [cf(z=False), cr(0,0xFF), cr(1,0x00)])
     # --- 0x85 NACW (NAND check 16-bit) ---
     def s():
         hd61700.set_reg(0,0xFF); hd61700.set_reg(1,0xFF)
         hd61700.set_reg(2,0xFF); hd61700.set_reg(3,0xFF)
         hd61700.set_sreg(0,2)
     check("85 NACW ~(FFFF&FFFF)=0 Z,C", [0x85,0x00], s,
-          [cf(z=True,c=True)])
+          [cf(z=True,c=True), cr(0,0xFF), cr(1,0xFF)])
     # --- 0x86 ORCW (OR check 16-bit) ---
     def s():
         hd61700.set_reg(0,0); hd61700.set_reg(1,0)
         hd61700.set_reg(2,0); hd61700.set_reg(3,0)
         hd61700.set_sreg(0,2)
-    check("86 ORCW 0|0=0 Z,C", [0x86,0x00], s, [cf(z=True,c=True)])
+    check("86 ORCW 0|0=0 Z,C", [0x86,0x00], s, [cf(z=True,c=True), cr(0,0), cr(1,0)])
     # --- 0x87 XRCW (XOR check 16-bit) ---
     def s():
         hd61700.set_reg(0,0xAA); hd61700.set_reg(1,0x55)
         hd61700.set_reg(2,0xAA); hd61700.set_reg(3,0x55)
         hd61700.set_sreg(0,2)
-    check("87 XRCW same=0 Z", [0x87,0x00], s, [cf(z=True)])
+    check("87 XRCW same=0 Z", [0x87,0x00], s, [cf(z=True), cr(0,0xAA), cr(1,0x55)])
     # --- 0x88 ADW (add 16-bit with write-back) ---
     def s():
         hd61700.set_reg(0,0x01); hd61700.set_reg(1,0x00)

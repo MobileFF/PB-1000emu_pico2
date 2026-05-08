@@ -10,16 +10,6 @@
 
 /* ======== Helper Functions ======== */
 
-static inline void set_pc(hd61700_state_t *cpu, int32_t new_pc) {
-  cpu->pc = (uint16_t)(new_pc & 0xffff);
-  if (cpu->pc < INT_ROM)
-    cpu->fetch_addr = (uint32_t)cpu->pc << 1;
-  else
-    cpu->fetch_addr = (uint32_t)cpu->pc;
-  cpu->curpc = cpu->pc;
-  cpu->ppc = cpu->curpc;
-}
-
 static void cpu_log(hd61700_state_t *cpu, const char *fmt, ...) {
   if (!cpu->debug_log)
     return;
@@ -33,6 +23,21 @@ static void cpu_log(hd61700_state_t *cpu, const char *fmt, ...) {
   if (n < 0)
     return;
   cpu->log_write(cpu->log_ctx, buf);
+}
+
+static inline void set_pc(hd61700_state_t *cpu, int32_t new_pc) {
+  uint16_t old_pc = cpu->pc;
+  cpu->pc = (uint16_t)(new_pc & 0xffff);
+  if (cpu->pc < INT_ROM)
+    cpu->fetch_addr = (uint32_t)cpu->pc << 1;
+  else
+    cpu->fetch_addr = (uint32_t)cpu->pc;
+  cpu->curpc = cpu->pc;
+  cpu->ppc = cpu->curpc;
+
+  if (cpu->debug_log && (cpu->pc == 0x00F9 || old_pc == 0xE40C)) {
+    cpu_log(cpu, "SET_PC: 0x%04X -> 0x%04X (fetch: 0x%08X)", old_pc, cpu->pc, cpu->fetch_addr);
+  }
 }
 
 static uint8_t debug_read_bank0_u8(hd61700_state_t *cpu, uint32_t offset) {
@@ -60,7 +65,11 @@ static uint8_t mem_readbyte(hd61700_state_t *cpu, uint8_t segment,
   uint8_t bank = (segment >> 4) & 0x03;
   offset &= 0xFFFF;
 
-  if (offset < 0x2000) {
+  if (offset >= 0x0C00 && offset <= 0x0C07) {
+    if (cpu->io_read) return cpu->io_read(cpu->cb_ctx, bank, offset);
+  }
+
+  if (offset < ((uint32_t)INT_ROM << 1)) {
     if (cpu->rom0_ptr) return cpu->rom0_ptr[offset];
   } else if (offset >= 0x6000 && offset < 0x8000) {
     if (cpu->ram_ptr) return cpu->ram_ptr[offset - 0x6000];
@@ -78,6 +87,13 @@ static void mem_writebyte(hd61700_state_t *cpu, uint8_t segment,
                           uint32_t offset, uint8_t data) {
   uint8_t bank = (segment >> 4) & 0x03;
   offset &= 0xFFFF;
+
+  if (offset >= 0x0C00 && offset <= 0x0C07) {
+    if (cpu->io_write) {
+      cpu->io_write(cpu->cb_ctx, bank, offset, data);
+      return;
+    }
+  }
 
   if (offset >= 0x6000 && offset < 0x8000) {
     if (cpu->ram_ptr) {
@@ -100,7 +116,11 @@ static uint8_t mem_readbyte_iz(hd61700_state_t *cpu, uint8_t segment,
   uint8_t bank = (segment >> 6) & 0x03;
   offset &= 0xFFFF;
 
-  if (offset < 0x2000) {
+  if (offset >= 0x0C00 && offset <= 0x0C07) {
+    if (cpu->io_read) return cpu->io_read(cpu->cb_ctx, bank, offset);
+  }
+
+  if (offset < ((uint32_t)INT_ROM << 1)) {
     if (cpu->rom0_ptr) return cpu->rom0_ptr[offset];
   } else if (offset >= 0x6000 && offset < 0x8000) {
     if (cpu->ram_ptr) return cpu->ram_ptr[offset - 0x6000];
@@ -118,6 +138,13 @@ static void mem_writebyte_iz(hd61700_state_t *cpu, uint8_t segment,
                              uint32_t offset, uint8_t data) {
   uint8_t bank = (segment >> 6) & 0x03;
   offset &= 0xFFFF;
+
+  if (offset >= 0x0C00 && offset <= 0x0C07) {
+    if (cpu->io_write) {
+      cpu->io_write(cpu->cb_ctx, bank, offset, data);
+      return;
+    }
+  }
 
   if (offset >= 0x6000 && offset < 0x8000) {
     if (cpu->ram_ptr) {
@@ -140,7 +167,11 @@ static uint8_t mem_readbyte_stack(hd61700_state_t *cpu, uint8_t segment,
   uint8_t bank = (segment >> 2) & 0x03;
   offset &= 0xFFFF;
 
-  if (offset < 0x2000) {
+  if (offset >= 0x0C00 && offset <= 0x0C07) {
+    if (cpu->io_read) return cpu->io_read(cpu->cb_ctx, bank, offset);
+  }
+
+  if (offset < ((uint32_t)INT_ROM << 1)) {
     if (cpu->rom0_ptr) return cpu->rom0_ptr[offset];
   } else if (offset >= 0x6000 && offset < 0x8000) {
     if (cpu->ram_ptr) return cpu->ram_ptr[offset - 0x6000];
@@ -158,6 +189,13 @@ static void mem_writebyte_stack(hd61700_state_t *cpu, uint8_t segment,
                                 uint32_t offset, uint8_t data) {
   uint8_t bank = (segment >> 2) & 0x03;
   offset &= 0xFFFF;
+
+  if (offset >= 0x0C00 && offset <= 0x0C07) {
+    if (cpu->io_write) {
+      cpu->io_write(cpu->cb_ctx, bank, offset, data);
+      return;
+    }
+  }
 
   if (offset >= 0x6000 && offset < 0x8000) {
     if (cpu->ram_ptr) {
@@ -180,7 +218,7 @@ static uint8_t prog_readbyte(hd61700_state_t *cpu, uint8_t segment,
   uint8_t bank = segment & 0x03;
   offset &= 0xFFFF;
 
-  if (offset < 0x2000) {
+  if (offset < ((uint32_t)INT_ROM << 1)) {
     if (cpu->rom0_ptr) return cpu->rom0_ptr[offset];
   } else if (offset >= 0x6000 && offset < 0x8000) {
     if (cpu->ram_ptr) return cpu->ram_ptr[offset - 0x6000];
@@ -229,6 +267,10 @@ static uint16_t read_imm16_aligned(hd61700_state_t *cpu) {
 static uint8_t read_op(hd61700_state_t *cpu) {
   uint32_t addr = cpu->fetch_addr;
   uint8_t data = read_program_byte(cpu, addr);
+
+  if (cpu->debug_log && (addr >= 0xE40C && addr <= 0xE40F)) {
+    cpu_log(cpu, "READ_OP: [0x%08X] -> 0x%02X", addr, data);
+  }
 
   // 鬯ｯ・ｮ繝ｻ・ｯ髫ｶ蜴・ｽｽ・ｸ郢晢ｽｻ繝ｻ・ｽ郢晢ｽｻ繝ｻ・ｳ鬯ｮ・ｮ闕ｵ譏ｴ繝ｻ郢晢ｽｻ繝ｻ・ｽ郢晢ｽｻ繝ｻ・ｯ鬩幢ｽ｢隴趣ｽ｢繝ｻ・ｽ繝ｻ・ｻ驛｢譎｢・ｽ・ｻ郢晢ｽｻ繝ｻ・｡鬯ｮ・ｯ雋顔§謫郢晢ｽｻ繝ｻ・ｯ髣費ｽｨ陞滂ｽｲ繝ｻ・ｽ繝ｻ・ｽ郢晢ｽｻ繝ｻ・ｼ驛｢譎｢・ｽ・ｻ郢晢ｽｻ繝ｻ・ｰ鬯ｯ・ｩ隰ｳ・ｾ繝ｻ・ｽ繝ｻ・ｵ驛｢譎｢・ｽ・ｻ郢晢ｽｻ繝ｻ・ｺ鬯ｮ・ｮ闕ｵ譏ｴ繝ｻ繝ｻ縺､ﾂ郢晢ｽｻ繝ｻ・･鬩包ｽｯ繝ｻ・ｶ郢晢ｽｻ繝ｻ・ｲ鬯ｯ・ｩ陝ｷ・｢繝ｻ・ｽ繝ｻ・｢鬮ｫ・ｴ陷ｿ髢・ｾ蜉ｱ繝ｻ繝ｻ・ｽ郢晢ｽｻ繝ｻ・｣驛｢譎｢・ｽ・ｻ郢晢ｽｻ繝ｻ・ｹ鬯ｩ謳ｾ・ｽ・ｵ郢晢ｽｻ繝ｻ・ｺ鬮ｫ・ｲ繝ｻ・ｷ髯具ｽｹ郢晢ｽｻ繝ｻ・ｽ繝ｻ・ｽ郢晢ｽｻ繝ｻ・ｹ鬮ｫ・ｴ髮懶ｽ｣繝ｻ・ｽ繝ｻ・｢驛｢譎｢・ｽ・ｻ郢晢ｽｻ繝ｻ・ｽ驛｢譎｢・ｽ・ｻ郢晢ｽｻ繝ｻ・ｼ鬯ｯ・ｩ陝ｷ・｢繝ｻ・ｽ繝ｻ・｢鬮ｫ・ｴ陷ｿ髢・ｾ蜉ｱ繝ｻ繝ｻ・ｽ郢晢ｽｻ繝ｻ・ｳ驛｢譎｢・ｽ・ｻ郢晢ｽｻ繝ｻ・ｨ鬩幢ｽ｢隴趣ｽ｢繝ｻ・ｽ繝ｻ・ｻ鬮ｯ譎｢・ｽ・ｶ髫ｴ諠ｹ・ｹ諤懌┌鬯ｮ・ｯ陋ｹ・ｺ繝ｻ・ｻ郢ｧ謇假ｽｽ・ｽ繝ｻ・ｽ郢晢ｽｻ繝ｻ・ｬ鬯ｯ・ｲ郢晢ｽｻ驕倪・繝ｻ繝ｻ・ｽ郢晢ｽｻ繝ｻ・ｸ鬯ｯ・ｩ隰ｳ・ｾ繝ｻ・ｽ繝ｻ・ｵ驛｢譎｢・ｽ・ｻ郢晢ｽｻ繝ｻ・ｺ鬯ｮ・ｯ繝ｻ・ｷ髣費ｽｨ陞滂ｽｲ繝ｻ・ｽ繝ｻ・ｽ郢晢ｽｻ繝ｻ・ｱ鬯ｩ蛹・ｽｽ・ｯ郢晢ｽｻ繝ｻ・ｶ驛｢譎｢・ｽ・ｻ郢晢ｽｻ繝ｻ・ｻ鬯ｯ・ｩ隰ｳ・ｾ繝ｻ・ｽ繝ｻ・ｵ驛｢譎｢・ｽ・ｻ郢晢ｽｻ繝ｻ・ｺ鬯ｯ・ｩ隲､諞ｺ笳冗ｹ晢ｽｻ繝ｻ・ｽ郢晢ｽｻ繝ｻ・ｫ鬩幢ｽ｢隴趣ｽ｢繝ｻ・ｽ繝ｻ・ｻ驛｢譎｢・ｽ・ｻ郢晢ｽｻ繝ｻ・･
   if (cpu->last_op_len < sizeof(cpu->last_opcodes)) {

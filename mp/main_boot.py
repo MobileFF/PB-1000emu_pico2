@@ -29,13 +29,13 @@ def initialize_system(*, console_uart=None):
     else:
         display = ret
         touch = None
-    display.fill_rect(0, 0, 320, 240, 0xC618)
+    #display.fill_rect(0, 0, 320, 240, 0xC618)
 
     if hasattr(display, 'lcd_sync'):
         display.lcd_sync()
 
     print("Initializing PB1000System...")
-    system = PB1000System(ret, debug={"sys": False, "lcd": False, "kb": False}, restore_registers=True)
+    system = PB1000System(ret, debug={"sys": False, "lcd": False, "kb": False}, restore_registers=False)
     print("PB1000System initialized.")
     system.touch = touch
     if console_uart is not None:
@@ -48,6 +48,8 @@ def load_default_roms(system):
     try:
         system.load_rom('/roms/rom0.bin', slot=0)
         system.load_rom('/roms/rom1.bin', slot=1)
+        if hasattr(system, "boot_virtual_fdd"):
+            system.boot_virtual_fdd()
     except Exception as e:
         print(f"ROM load warning: {e}")
 
@@ -82,13 +84,9 @@ def configure_c_keyboard(system, *, enable_usb_kbd):
             def _on_f11(_):
                 print("F11 pressed (Callback)")
                 system._save_requested = True
-            cpu_core.set_f11_callback(_on_f11)
-        if hasattr(cpu_core, 'set_f9_callback'):
-            def _on_f9(_):
-                print("F9 pressed (Callback)")
-                system.reset_emulator()
-            cpu_core.set_f9_callback(_on_f9)
-
+            # Keep a reference to the handler on the system object to prevent GC
+            system._f11_handler = _on_f11
+            cpu_core.set_f11_callback(system._f11_handler)
         import keymap
         if hasattr(cpu_core, 'keyboard_config_adv'):
             cpu_core.keyboard_config_adv(keymap.get_adv_map_list())

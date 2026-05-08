@@ -54,7 +54,19 @@ def tests_c4_cf(t, check):
         hd61700.set_reg(0,0xFF); hd61700.set_reg(1,0xFF)
         hd61700.set_reg(4,0xFF); hd61700.set_reg(5,0xFF)
     check("C5 NACM ~(FF&FF)=0 chk C", [0xC5,0x60,0x24], s,
-          [cr(0,0xFF)])  # no write-back; flags: Z=True, C=True
+          [cr(0,0xFF), cr(1,0xFF)])  # no write-back; flags: Z=True, C=True
+    # _C6: ORCM (OR check)
+    def s():
+        hd61700.set_reg(0,0); hd61700.set_reg(1,0)
+        hd61700.set_reg(4,0); hd61700.set_reg(5,0)
+    check("C6 ORCM 0|0=0 chk Z,C", [0xC6,0x60,0x24], s,
+          [cr(0,0), cr(1,0), cf(z=True,c=True)])
+    # _C7: XRCM (XOR check)
+    def s():
+        hd61700.set_reg(0,0xAA); hd61700.set_reg(1,0x55)
+        hd61700.set_reg(4,0xAA); hd61700.set_reg(5,0x55)
+    check("C7 XRCM same=0 chk Z", [0xC7,0x60,0x24], s,
+          [cr(0,0xAA), cr(1,0x55), cf(z=True)])
     # _CD: NAM (NAND write-back)
     def s():
         hd61700.set_reg(0,0xFF); hd61700.set_reg(1,0xFF)

@@ -82,7 +82,7 @@ def _create_input_managers():
     touch_input = TouchInputManager()
     return keyboard_input, touch_input
 
-
+TRACE_FLAG=False
 def _trace_one_step(system, *, trace_index, logger):
 #     if trace_index<=120:
 #         system.print_registers()
@@ -90,10 +90,16 @@ def _trace_one_step(system, *, trace_index, logger):
         
 #     if trace_index>120:
 #         sys.exit()
-        
+    global TRACE_FLAG
+
+    system.step(stop_pc=0xE40C)
+
+    if system.pc==0xE40C:
+        TRACE_FLAG=True
+
     return system.debug_step(
         pause=False,
-        trace=True,
+        trace=TRACE_FLAG,
         prt=True,
         trace_index=trace_index,
         out=logger.print,
@@ -123,7 +129,8 @@ def main():
     configure_usb_keyboard_routing()
 
     system.power_on()
-
+    system.set_debug({"sys":True})
+    
     print(f"Trace target steps: {trace_steps}")
     print(f"System initialized. PC={system.pc:#06x}")
 
@@ -135,7 +142,8 @@ def main():
     traced = 0
 
     try:
-        while traced < trace_steps:
+        while True:
+#         while traced < trace_steps:
             service_pio_uart_bridge(system, cpu_core)
 
             now = time.ticks_ms()
@@ -181,10 +189,10 @@ def main():
             )
             time.sleep_ms(LOOP_IDLE_MS)
 
-        print(f"Trace completed: {traced} steps.")
-        if trace_exit_on_finish:
-            print("Trace exit requested by debug.ini")
-            return
+#         print(f"Trace completed: {traced} steps.")
+#         if trace_exit_on_finish:
+#             print("Trace exit requested by debug.ini")
+#             return
     except KeyboardInterrupt:
         print("\nTrace stopped by user.")
     except Exception as e:

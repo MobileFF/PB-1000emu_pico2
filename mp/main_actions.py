@@ -1,15 +1,20 @@
 import time
 
 
-def handle_key_status_and_capture(system):
+def handle_key_status_and_capture(system, sc=-1):
     try:
         import hd61700
-        sc = hd61700.get_last_key()
+        if sc < 0:
+            sc = hd61700.get_last_key()
         if sc < 0:
             return
 
         import keymap
         system.set_status(keymap.get_label(sc))
+
+        if sc == 0x42:
+            system.reset_emulator()
+            return
 
         if sc != 0x46:
             return

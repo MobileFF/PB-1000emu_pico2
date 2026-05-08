@@ -64,6 +64,9 @@ def run_cpu_slice(system, *, active_steps, sleep_ms, step_chunk):
 def update_frame_if_due(system, now, frame_time, *, frame_interval_ms):
     import time
     if time.ticks_diff(now, frame_time) >= frame_interval_ms:
+        # Avoid rendering during active SPI transfers (SD Card)
+        if getattr(system, "_fdd_active", False):
+            return frame_time
         system.update_display(x_offset=16, y_offset=40)
         return now
     return frame_time

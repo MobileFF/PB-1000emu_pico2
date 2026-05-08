@@ -7,6 +7,9 @@ import sys
 import time
 import machine
 from ili9341 import ILI9341
+from fdd_protocol import FDDProtocol
+from fdd_storage import ImageStorageBackend
+from md100_dos import MD100Dos
 
 try:
     from lcd_controller_c import LCDControllerC as LCDController
@@ -34,6 +37,13 @@ BL_PIN = 22
 SD_CS_PIN = 15
 T_CS_PIN = 16
 T_IRQ_PIN = 17
+PD_RES = 0x08
+PD_PWR = 0x10
+PD_STR = 0x04
+PD_ACK = 0x10  # Port B bit 4
+VFDD_IO_READ_ADDR = 0x0C03
+VFDD_IO_WRITE_ADDR = 0x0C04
+ENABLE_VIRTUAL_FDD = True
 
 def init_sdcard(spi):
     try:
@@ -139,6 +149,45 @@ class RAMView:
     def __repr__(self):
         return f"<RAMView {self._size} bytes at 0x{self._start:04X}>"
 
+def load_virtual_fdd_config(path):
+    try:
+        os.stat(path)
+    except OSError:
+        return None
+    section = ""
+    values = {}
+    with open(path, "r") as fh:
+        for raw in fh:
+            line = raw.strip()
+            if not line or line[0] in ("#", ";"):
+                continue
+            if line.startswith("[") and line.endswith("]"):
+                section = line[1:-1].strip().lower()
+                continue
+            if section != "disk" or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            k = k.strip().lower()
+            v = v.split(";", 1)[0].split("#", 1)[0].strip()
+            values[k] = v
+    if not values:
+        return None
+    def _bool(s):
+        return s.lower() in ("1", "true", "yes", "on")
+    raw_path = values.get("path", "").strip()
+    if raw_path and not raw_path.startswith("/"):
+        parts = path.rsplit("/", 1)
+        base = parts[0] if len(parts) > 1 else ""
+        raw_path = base + "/" + raw_path if base else raw_path
+    return {
+        "config_path": path,
+        "enabled": _bool(values.get("enabled", "false")),
+        "backend": values.get("backend", "image").strip().lower() or "image",
+        "path": raw_path,
+        "readonly": _bool(values.get("readonly", "false")),
+    }
+
+
 class PB1000System:
     INT_ROM_LIMIT    = 0x2000   
     RAM_START        = 0x6000
@@ -227,6 +276,24 @@ class PB1000System:
         self.status_expiry_ms = 0
         self._status_rendered_msg = None
         self.pio_uart = None      # Set externally from main.py
+        self.virtual_fdd = None
+        self._virtual_fdd_ack = False
+        self._last_vfdd_transfer_time = 0
+        self.virtual_fdd_controller = FDDProtocol()
+        self.virtual_fdd_config = None
+        self._pending_virtual_fdd_config = None
+        self._io_wr_regs = bytearray((0, 0, 0, 0, 0, 0xFF, 0x03, 0))
+        # index 0 (0x0C00): receive/data register; must have bit0=0 (LB Error flag)
+        # and bit4=0 (FM Error flag) to avoid spurious FDD errors.
+        self._io_rd_regs = bytearray((0x00, 0x00, 0x00, 0x00, 0x55, 0x00, 0x00, 0x00))
+        self._port_last_write = 0x1C
+        self._virtual_fdd_ack = False
+        self._virtual_fdd_interface_powered = False
+        self._pc_trace = []
+        self._pc_trace_size = 128
+        self._last_logged_crash_pc = -1
+        self._fdd_active = False # SPI Bus Lock flag
+        self._gpo_parity = 0   # Tracks gpo call parity for D92E P1/P0 protocol
 
         # Raw UART Pins for bit-level passthrough
         self._tx_pin = machine.Pin(6, machine.Pin.OUT, value=1)
@@ -247,13 +314,20 @@ class PB1000System:
         if hasattr(cpu_core, "set_lcd_debug"):
             cpu_core.set_lcd_debug(self.debug_cfg["sys"] and self.debug_cfg["lcd"])
               
-        self._cb_mem_read = self._mem_read
-        self._cb_mem_write = self._mem_write
-        self._cb_port_read = self._port_read
-        self._cb_port_write = self._port_write
-
-        cpu_core.set_mem_callbacks(self._cb_mem_read, self._cb_mem_write)
-        cpu_core.set_port_callbacks(self._cb_port_read, self._cb_port_write)
+        # GC Protection: Hold explicit references to all bound methods passed to C
+        self._cb_refs = {
+            "mem_read": self._mem_read,
+            "mem_write": self._mem_write,
+            "port_read": self._port_read,
+            "port_write": self._port_write,
+            "io_read": self._fdd_read_bridge_fn,
+            "io_write": self._fdd_write_bridge_fn,
+        }
+        
+        cpu_core.set_mem_callbacks(self._cb_refs["mem_read"], self._cb_refs["mem_write"])
+        cpu_core.set_port_callbacks(self._cb_refs["port_read"], self._cb_refs["port_write"])
+        if hasattr(cpu_core, "set_io_callbacks"):
+            cpu_core.set_io_callbacks(self._cb_refs["io_read"], self._cb_refs["io_write"])
         
         if hasattr(cpu_core, "use_c_memory"):
             # Keep direct C memory enabled by default even in sys debug mode.
@@ -274,12 +348,13 @@ class PB1000System:
         try:
             with open(path, 'rb') as f:
                 data = f.read()
+                must_keep_copy = bool(keep_copy or not self._ram_is_c_managed or self.has_virtual_fdd())
                 if slot == 0:
-                    self.rom0 = data if keep_copy else None
+                    self.rom0 = data if must_keep_copy else None
                     if hasattr(cpu_core, "load_rom"):
                         cpu_core.load_rom(0, data)
                 else:
-                    self.rom1 = data if keep_copy else None
+                    self.rom1 = data if must_keep_copy else None
                     if hasattr(cpu_core, "load_rom"):
                         cpu_core.load_rom(1, data)
         except OSError as e:
@@ -291,23 +366,17 @@ class PB1000System:
     def _mem_read_impl(self, segment, offset):
         if offset < 0x8000:
             if offset < 0x2000:
+                if (
+                    self.has_virtual_fdd()
+                    and 0x0C00 <= offset <= 0x0C07
+                ):
+                    return self._read_io_register(offset)
                 if self.rom0 is not None:
-                    if offset == 0x0C00:
-                        # Status register: Bit 0=RX Ready, Bit 1=TX Ready
-                        status = 0x02 # TX Ready
-                        if self.pio_uart and self.pio_uart.any():
-                            status |= 0x01 # RX Ready
-                        return status
-                    if offset == 0x0C01:
-                        # RX Data Register
-                        if self.pio_uart:
-                            data = self.pio_uart.read(1)
-                            return data[0] if data else 0
-                        return 0
                     if offset < len(self.rom0):
                         return self.rom0[offset]
-                elif hasattr(cpu_core, "read_mem"):
+                elif self._ram_is_c_managed and hasattr(cpu_core, "read_mem"):
                     return cpu_core.read_mem(offset, segment)
+                return 0xFF
             elif offset >= self.RAM_START:
                 return self.ram[(offset - self.RAM_START) % len(self.ram)]
             else:
@@ -320,7 +389,7 @@ class PB1000System:
                 if self.rom1 is not None:
                     if rom_off < len(self.rom1):
                         return self.rom1[rom_off]
-                elif hasattr(cpu_core, "read_mem"):
+                elif self._ram_is_c_managed and hasattr(cpu_core, "read_mem"):
                     return cpu_core.read_mem(offset, segment)
             elif bank == 1 and self.has_exp:
                 exp_off = offset - 0x8000
@@ -331,14 +400,19 @@ class PB1000System:
     def _mem_write(self, segment, offset, data):
         if self.RAM_START <= offset < self.SYS_ROM_START:
             ram_index = (offset - self.RAM_START) % len(self.ram)
-            pc = cpu_core.get_pc() if hasattr(cpu_core, "get_pc") else 0
-            ua = cpu_core.get_reg8(3) if hasattr(cpu_core, "get_reg8") else 0
             if self.PROG_TRACE_START <= offset <= self.PROG_TRACE_END:
+                pc = cpu_core.get_pc() if hasattr(cpu_core, "get_pc") else 0
+                ua = cpu_core.get_reg8(3) if hasattr(cpu_core, "get_reg8") else 0
                 print(f"[HD61700] PROG-WR PC={pc:04X} UA={ua:02X} BANK={segment & 0x03} RAM[{offset & 0xFFFF:04X}] <= {data & 0xFF:02X}")
             if self._ram_is_c_managed and hasattr(cpu_core, "write_mem"):
                 cpu_core.write_mem(offset & 0xFFFF, data & 0xFF, segment)
             else:
                 self.ram[ram_index] = data
+        elif (
+            self.has_virtual_fdd()
+            and 0x0C00 <= offset <= 0x0C07
+        ):
+            self._write_io_register(offset, data)
         elif offset == 0x0C03:
             # TX Data Register: Output character to pio_uart and console
             if self.pio_uart:
@@ -373,26 +447,225 @@ class PB1000System:
         return self._display_probe_hit
 
     def _port_read(self):
-        # Bit 3 is RXD for RS-232C bit-banging
+        # Physical IO reads
         rx_bit = self._rx_pin.value()
         
         if not hasattr(self, '_port_read_count'):
             self._port_read_count = 0
         self._port_read_count += 1
-        
+
+        if self.has_virtual_fdd() and self._virtual_fdd_interface_powered:
+            # During MD-100 access, the ROM reads the same port twice and waits
+            # until both reads match, then checks bit 0 as the transfer-direction
+            # acknowledge signal. Return a stable port snapshot instead of
+            # alternating pseudo P1/P0 values.
+            res = 0x01 if (self.port_data & PD_STR) == 0 else 0x00
+            return res
+
         # PB-1000 ROM boot sequence waits for ON key (bit 0) PRESSED (0) then RELEASED (1).
-        # We simulate the key being held down for the first 100 port reads.
         on_key_state = 0 if self._port_read_count < 100 else 1
-        
-        # Mirror RX bit into port_data bit 3 and inject ON key state into bit 0
-        self.port_data = (self.port_data & ~0x09) | (rx_bit << 3) | on_key_state
-        return self.port_data
+        res = on_key_state
+        res |= (rx_bit << 3)
+        return res
 
     def _port_write(self, data):
         self.port_data = data
-        # Bit 2 is TXD for RS-232C bit-banging
-        # Output the bit directly to the physical pin
-        self._tx_pin.value((data >> 2) & 1)
+        self._handle_virtual_fdd_port_write(data)
+        
+        # Bit 2 is TXD for RS-232C bit-banging OR PD_STR for FDD
+        # Only write to physical pin if FDD interface is NOT powered
+        if not (self.has_virtual_fdd() and self._virtual_fdd_interface_powered):
+            self._tx_pin.value((data >> 2) & 1)
+
+    def _read_io_register(self, offset):
+        index = offset & 0x07
+        
+        if index == 0:
+            # Mask LB (bit0) and FM (bit4) from the receive register to prevent
+            # spurious hardware error triggers in the ROM's FDD check routine.
+            val0 = self._io_rd_regs[0] & 0xEE
+            return val0
+            
+        elif index == 1:
+            # Status Register: Return ready flags
+            status = 0xC0
+            if self.has_virtual_fdd() and self._virtual_fdd_interface_powered:
+                # SPI Bus Arbitration: Ensure LCD DMA is finished
+                if hasattr(self.lcd, "wait_for_idle"):
+                    self.lcd.wait_for_idle()
+                    time.sleep_us(50) # Allow physical signals to settle
+                
+                # FDD Mode: Signal "Data Ready" (Bit 0) AND "Interface Ready" (Bit 1)
+                # Ensure rendering is inhibited during polling
+                self._fdd_active = True
+                try:
+                    # PB-1000 MD-100 Status:
+                    # Bit 0: Low Battery (LB) flag (Active High).
+                    # Bit 1: FDD Present / battery OK path for MD-100 polling.
+                    # Bit 6: Interface Ready (Active High/1).
+                    # Bit 7: Power Ready (Active High/1).
+                    # Keep bit 0 clear to avoid ROM D8D0 -> LB Error.
+                    status |= 0x02
+                finally:
+                    # Note: We keep it active if many polls are expected, but here we 
+                    # toggle it per-poll to be safe.
+                    self._fdd_active = False
+            elif self.pio_uart and self.pio_uart.any():
+                status |= 0x01 # RX Ready (RS-232C mode)
+            else:
+                status |= 0x02 # TX Ready
+            return status
+            
+        elif index == 2:
+            if self.pio_uart:
+                data = self.pio_uart.read(1)
+                self._io_rd_regs[2] = data[0] if data else 0
+            else:
+                self._io_rd_regs[2] = 0
+            return self._io_rd_regs[2]
+            
+        elif index == 3:
+            if not self._virtual_fdd_interface_powered:
+                # Always return 0x55 (MD-100 identifier) when the VFDD is
+                # configured but powered off. This prevents the ROM from
+                # storing 0xFF in OPTCD (which would switch it to the non-
+                # MD-100 code path that checks every dir-entry byte for errors).
+                return 0x55
+
+            # Return the FDD data register value without any error-bit masking.
+            # LB/FM error prevention is handled upstream by the D8D0 PC-based
+            # approach (returning 0x55 for non-D924 reads), so masking here
+            # is no longer needed and only corrupts legitimate data bytes
+            # (e.g., status=0x10 would become 0x00 with the old 0xEE mask).
+            return self._io_rd_regs[4]
+        elif index == 4:
+            # Data register: Return last received data byte
+            return self._io_rd_regs[4]
+            
+        return self._io_rd_regs[index]
+
+    def _write_io_register(self, offset, data):
+        index = offset & 0x07
+        self._io_wr_regs[index] = data
+        
+        if index == 0:
+            pass # Port 0 is not used as a data port in standard MD-100 logic
+                
+        elif index == 5:
+            # Port D Control (Signals to external interface)
+            self._handle_virtual_fdd_port_write(data)
+            
+        elif index == 3:
+            if self.pio_uart:
+                self.pio_uart.write(data)
+            char = chr(data & 0x7F)
+            if self.console_uart:
+                self.console_uart.write(char)
+            else:
+                print(char, end="")
+
+    def _fdd_read_bridge_fn(self, segment, offset):
+        # Explicit bridge method for C selective hooking
+        # Dispatch based on address to avoid collisions between Internal IO and MMIO
+        return self._read_io_register(offset)
+        
+    def _fdd_write_bridge_fn(self, segment, offset, data):
+        # Explicit bridge method for C selective hooking
+        self._write_io_register(offset, data)
+
+    def _log_vfdd(self, msg):
+        print(f"[VFDD] {msg}") # Enabled for current debugging phase
+
+    def _handle_virtual_fdd_port_write(self, data):
+        if not self.has_virtual_fdd():
+            self._port_last_write = data & 0xFF
+            return
+
+        current = data & 0xFF
+        previous = self._port_last_write
+        was_powered = (previous & PD_PWR) == 0
+        powered_now = (current & PD_PWR) == 0
+        self._virtual_fdd_interface_powered = powered_now
+        # True only when RES is released in THIS same CTRL write (not a persistent flag).
+        # Used to detect the boot pulse where STR falls simultaneously with RES release.
+        res_released_now = (current & PD_RES) == 0 and (previous & PD_RES) != 0
+
+        if (current & PD_PWR) != (previous & PD_PWR):
+            print(f"[VFDD] Power: {'ON' if powered_now else 'OFF'}")
+            if powered_now:
+                # Power just turned ON: pre-load 0x55 so boot detection works
+                # even before any RES/STR pulse occurs
+                self._io_rd_regs[4] = 0x55  # MD-100 identifier
+                self._gpo_parity = 0         # Reset parity for clean D92E P1/P0 pairs
+            else:
+                self._virtual_fdd_ack = False
+                self.virtual_fdd_controller.close()
+
+        if powered_now:
+            # Power is ON (Active Low)
+            if (current & PD_RES) != 0 and (previous & PD_RES) == 0:
+                # Rising edge of RES: Device Enters Reset (Active HIGH)
+                self._log_vfdd(f"Reset Detected (Active HIGH)")
+                self._virtual_fdd_ack = False
+                self.virtual_fdd_controller.open()
+            elif (current & PD_RES) == 0 and (previous & PD_RES) != 0:
+                # Falling edge of RES: Reset Released (Run Mode)
+                self._log_vfdd("Reset released")
+                # Initialize data register to MD-100 identifier (0x55).
+                # The boot ROM reads 0x0C03 to detect the FDD: it stores this
+                # value into OPTCD and later checks OPTCD == 0x55 to confirm
+                # the MD-100 interface is present.
+                self._io_rd_regs[4] = 0x55  # MD-100 identifier for boot detection
+                if hasattr(cpu_core, "set_vfdd_data"):
+                    cpu_core.set_vfdd_data(0x55)
+                self._inject_optcd_signature("reset-release")
+
+            # Allow transfer whenever power is on, ensuring P3 is always updated by STR
+            # Handle STR (Strobe) toggling
+            if (current & PD_STR) == 0 and (previous & PD_STR) != 0:
+                # Falling edge of STR: Start of transfer cycle.
+                # Data was already pre-fetched at the end of the previous cycle.
+                self._virtual_fdd_ack = True
+
+                # Retrieve the latest data written by the CPU to 0x0C04.
+                # NOTE: cpu_core.get_vfdd_write_data() is broken (always returns 0x00).
+                # Use _io_wr_regs[4] which is correctly updated by the _write_io_register callback.
+                val_in = self._io_wr_regs[4]
+
+                if res_released_now:
+                    # Boot pulse: RES released in this same CTRL write as STR fell
+                    # (e.g. CTRL 1C->00). Keep _io_rd_regs[4]=0x55 so the ROM's
+                    # boot OPTCD detection read at 0x0C03 sees the MD-100 identifier.
+                    # Do NOT call transfer() here, as it would advance the state
+                    # before the real command is issued.
+                    pass
+                else:
+                    val_out_next = self.virtual_fdd_controller.transfer(val_in)
+                    self._io_rd_regs[4] = val_out_next
+                    if hasattr(cpu_core, "set_vfdd_data"):
+                        cpu_core.set_vfdd_data(val_out_next)
+                
+            elif (current & PD_STR) != 0 and (previous & PD_STR) == 0:
+                # Rising edge of STR: End of transfer cycle.
+                self._virtual_fdd_ack = False
+        else:
+            self._virtual_fdd_ack = False
+            if was_powered and not powered_now:
+                self._log_vfdd("Interface entered power-off state")
+        if (current & PD_RES) != 0 and (previous & PD_RES) == 0:
+            # FDD Reset rising edge outside powered block: reset state machine
+            self.virtual_fdd_controller.open()
+
+        self._port_last_write = current
+
+    def _inject_optcd_signature(self, reason="runtime"):
+        try:
+            ram_idx = 0x6BFA - 0x6000
+            if 0 <= ram_idx < len(self.ram):
+                self.ram[ram_idx] = 0x55
+                print(f"[VFDD] Injected OPTCD=0x55 at 0x6BFA ({reason})")
+        except Exception as e:
+            print(f"[VFDD] Failed to inject OPTCD ({reason}): {e}")
 
     def _register_dump_path(self):
         return "/roms/register.bin"
@@ -449,6 +722,150 @@ class PB1000System:
             return True
         except OSError:
             return False
+
+    def _virtual_fdd_config_candidates(self):
+        return (
+            "/sd/profile.ini",
+            "/sd/virtual_fdd.ini",
+            "/roms/profile.ini",
+        )
+
+    def discover_virtual_fdd_config(self):
+        if not ENABLE_VIRTUAL_FDD:
+            self.virtual_fdd_config = {"enabled": False, "reason": "disabled by flag"}
+            self._pending_virtual_fdd_config = None
+            return None
+        for config_path in self._virtual_fdd_config_candidates():
+            cfg = load_virtual_fdd_config(config_path)
+            if cfg:
+                print(f"[VFDD] Found config: {config_path}")
+                self.virtual_fdd_config = cfg
+                self._pending_virtual_fdd_config = cfg
+                return cfg
+        
+        if ENABLE_VIRTUAL_FDD:
+            # Fallback to default
+            default_path = "/sd/disks/disk1.img"
+            print(f"[VFDD] No config file found. Using default: {default_path}")
+            cfg = {
+                "enabled": True,
+                "backend": "image",
+                "path": default_path,
+                "readonly": False
+            }
+            self.virtual_fdd_config = cfg
+            self._pending_virtual_fdd_config = cfg
+            return cfg
+            
+        return None
+
+    def configure_virtual_fdd(self, path=None, readonly=False, enabled=True):
+        if not enabled:
+            self.disable_virtual_fdd()
+            return False
+
+        if not path:
+            raise ValueError("virtual FDD path is required")
+
+        # Create image file if it does not exist yet
+        new_disk = False
+        try:
+            os.stat(path)
+        except OSError:
+            ImageStorageBackend.create(path, 256)
+            new_disk = True
+            print(f"[VFDD] Created new disk image: {path}")
+
+        # Inject MD-100 identifier into OPTCD (&H6BFA) in main RAM.
+        # This may be overwritten later by ROM error paths, so we also refresh it
+        # on reset-release.
+        self._inject_optcd_signature("configure")
+
+        backend = ImageStorageBackend(path, readonly=readonly)
+        dos = MD100Dos()
+        dos.dos_init(backend)
+        if new_disk:
+            dos.format_disk()
+        self.virtual_fdd = backend
+        self.virtual_fdd_controller.attach_dos(dos)
+        self.virtual_fdd_controller.fdd_open()
+
+        # New C-side Selective Hooking:
+        # We stay in C-managed memory mode (Full Speed) and only hook 0x0C00 range.
+        if hasattr(cpu_core, "set_io_callbacks"):
+            # I/O callbacks are already registered during __init__.
+            # Re-registering here is unnecessary and can destabilize boot on-device.
+            print("[VFDD] C-side selective MMIO hooking already active")
+
+        self.virtual_fdd_config = {
+            "enabled": True,
+            "backend": "image",
+            "path": path,
+            "readonly": bool(readonly),
+        }
+        # Ensure Python-side ROM copies exist for the callback path (Bug #1)
+        self._ensure_rom_copies()
+        
+        print(
+            "Virtual FDD enabled: "
+            f"path={path} readonly={1 if readonly else 0}"
+        )
+        return True
+
+    def _ensure_rom_copies(self):
+        """Reload ROM data into Python copies when C direct memory is disabled."""
+        if self.rom0 is None or len(self.rom0) == 0:
+            self.load_rom('/roms/rom0.bin', slot=0, keep_copy=True)
+        if self.rom1 is None or len(self.rom1) == 0:
+            self.load_rom('/roms/rom1.bin', slot=1, keep_copy=True)
+
+    def disable_virtual_fdd(self):
+        if self.virtual_fdd is not None:
+            try:
+                self.virtual_fdd.close()
+            except Exception:
+                pass
+        self.virtual_fdd_controller.attach_dos(None)
+        if hasattr(cpu_core, "use_c_memory"):
+            cpu_core.use_c_memory(True)
+            self._ram_is_c_managed = True
+        self.virtual_fdd = None
+        self.virtual_fdd_config = {"enabled": False}
+
+    def activate_pending_virtual_fdd(self):
+        cfg = self._pending_virtual_fdd_config
+        if not cfg or not cfg.get("enabled", False):
+            self._pending_virtual_fdd_config = None
+            return False
+        try:
+            result = self.configure_virtual_fdd(
+                path=cfg.get("path"),
+                readonly=cfg.get("readonly", False),
+                enabled=True,
+            )
+            if result:
+                self._pending_virtual_fdd_config = None
+            return result
+        except Exception as exc:
+            print(f"[VFDD] Auto-config failed: {exc}")
+            import sys
+            sys.print_exception(exc)
+            return False
+
+    def try_auto_configure_virtual_fdd(self):
+        self.discover_virtual_fdd_config()
+        return self.activate_pending_virtual_fdd()
+
+    def boot_virtual_fdd(self):
+        """Robust initialization: Discovery + Activation in one call."""
+        cfg = self.discover_virtual_fdd_config()
+        if cfg:
+            return self.activate_pending_virtual_fdd()
+        print("[VFDD] No config found")
+        return False
+
+    def has_virtual_fdd(self):
+        return self.virtual_fdd is not None
 
     def _ram_path(self, slot=0):
         return f"/roms/ram{slot}.bin"
@@ -578,20 +995,15 @@ class PB1000System:
                 if reg_path.endswith(".json"):
                     with open(reg_path, "r") as f:
                         regs = json.load(f)
-                    cpu_core.set_pc(0x0000) # User requested: resetting PC to 0x0000 after RAM load
-                    if hasattr(cpu_core, "set_flags"):
-                        cpu_core.set_flags(int(regs["flags"]))
-                    cpu_core.set_reg8(4, int(regs["ia"]))
-                    cpu_core.set_reg8(2, 0) # Clear IB (Interrupt Request) to prevent instant IRQ on PC=0000
-                    cpu_core.set_reg8(5, 0) # Clear IE (Interrupt Enable)
-                    cpu_core.set_reg8(3, int(regs["ua"]))
-                    for i, v in enumerate(regs["regmain"]):
-                        cpu_core.set_reg(i, int(v))
-                    for i, v in enumerate(regs["regsir"]):
-                        cpu_core.set_sreg(i, int(v))
-                    for i, v in enumerate(regs["reg16"]):
-                        cpu_core.set_reg16(i, int(v))
-                    print(f"Registers restored (RAM/Regs loaded, PC set to 0x0000 per request)")
+                    # Saved execution registers do not mix safely with a forced PC=0x0000.
+                    # Start from a clean CPU state and keep the restored RAM only.
+                    cpu_core.reset(self.debug_cfg["sys"])
+                    cpu_core.set_pc(0x0000)
+                    cpu_core.set_reg8(2, 0)  # Clear IB
+                    cpu_core.set_reg8(5, 0)  # Clear IE
+                    cpu_core.set_reg8(4, 0)  # Clear IA
+                    cpu_core.set_reg8(3, 0)  # Clear UA
+                    print("CPU reset after RAM load (saved registers ignored, PC=0x0000)")
                 else:
                     self._restore_registers_from_dump()
             else:
@@ -600,7 +1012,91 @@ class PB1000System:
             print(f"Error loading registers: {e}")
 
     def step(self, cycles=100, stop_pc=-1):
-        return cpu_core.execute(cycles, stop_pc)
+        cycles = int(cycles)
+        stop_pc = int(stop_pc)
+
+        # Prefer the current C API 'execute'.
+        if hasattr(cpu_core, "execute"):
+            try:
+                # When FDD transfer is active, use stop_pc to catch error entries
+                effective_stop = stop_pc
+                fdd_active = (self.has_virtual_fdd()
+                              and self._virtual_fdd_interface_powered
+                              and self.virtual_fdd_controller._index != 0)
+                if fdd_active and stop_pc == -1:
+                    effective_stop = 0xABE0  # NF Error handler entry
+
+                if fdd_active:
+                    res = 0
+                    for _ in range(cycles):
+                        res += cpu_core.execute(1, effective_stop)
+                        current_pc = cpu_core.get_pc()
+                        self._pc_trace.append(current_pc)
+                        if len(self._pc_trace) > 512:
+                            self._pc_trace.pop(0)
+                        if current_pc == effective_stop or current_pc == 0xD8D0:
+                            break
+                else:
+                    res = cpu_core.execute(cycles, effective_stop)
+                    current_pc = cpu_core.get_pc()
+                    self._pc_trace.append(current_pc)
+                    if len(self._pc_trace) > self._pc_trace_size:
+                        self._pc_trace.pop(0)
+                
+                # Catch the exact moment the CPU enters error handlers
+                if current_pc in (0xD8D0, 0xABE0):
+                    regs = [cpu_core.get_reg(i) for i in range(8)]
+                    vfdd_status = self.virtual_fdd_controller.status_str if self.has_virtual_fdd() else "N/A"
+                    self._log_vfdd(f"*** HIT {current_pc:04X} (Error Handler Entry) ***")
+                    self._log_vfdd(f"  $0={regs[0]:02X} $1={regs[1]:02X} $2={regs[2]:02X} $3={regs[3]:02X}")
+                    self._log_vfdd(f"  $4={regs[4]:02X} $5={regs[5]:02X} $6={regs[6]:02X} $7={regs[7]:02X}")
+                    self._log_vfdd(f"  VFDD: {vfdd_status}")
+                    self._log_vfdd(f"  IO_RD[4]={self._io_rd_regs[4]:02X} PD={self.port_data:02X}")
+                    
+                    self._log_vfdd("  PC Trace(last 512):")
+                    trace_list = self._pc_trace[-512:]
+                    for i in range(0, len(trace_list), 16):
+                        chunk = trace_list[i:i+16]
+                        trace_str = " ".join([f"{p:04X}" for p in chunk])
+                        self._log_vfdd(f"    {trace_str}")
+                elif 0xD8D0 < current_pc <= 0xD8E1:
+                    if self._last_logged_crash_pc == -1:
+                        self._last_logged_crash_pc = current_pc
+                        self._log_vfdd(f"*** CRASH in D8D0-D8E1 at PC={current_pc:04X} ***")
+                else:
+                    self._last_logged_crash_pc = -1
+                
+                return res
+            except TypeError:
+                if not getattr(self, "_step_api_warned", False):
+                    print("step(): execute(cycles, stop_pc) unavailable; trying compatibility path")
+                    self._step_api_warned = True
+                if stop_pc == -1:
+                    try:
+                        return cpu_core.execute(cycles)
+                    except TypeError:
+                        pass
+        
+        # Legacy fallback to 'cpu_run' if execute is not found
+        if hasattr(cpu_core, "cpu_run"):
+            try:
+                return cpu_core.cpu_run(cycles, stop_pc)
+            except TypeError:
+                try:
+                    return cpu_core.cpu_run(cycles)
+                except TypeError:
+                    pass
+
+        if not getattr(self, "_step_api_warned", False):
+            print("step(): falling back to single-step execution path")
+            self._step_api_warned = True
+        consumed = 0
+        while consumed < cycles:
+            if stop_pc != -1 and cpu_core.get_pc() == stop_pc:
+                break
+            cpu_core.step()
+            consumed += 1
+        return consumed
 
     def reset_emulator(self):
         """Perform a hardware-like reset (PC=0x0000)."""
@@ -750,25 +1246,30 @@ class PB1000System:
             if coord:
                 cpu_core.release_row_ki(coord[0], coord[1])
 
-    def power_on(self, force=False):
+    def power_on(self, *, force_reset=False, force_power_on=False):
         cpu_core.set_input(cpu_core.SW, 1)
         if hasattr(cpu_core, "set_pc"):
             current_pc = cpu_core.get_pc()
-            # If the user has explicitly loaded a state (which sets PC=0 in our new logic),
-            # or if it's a completely fresh start where we want the default vector 0x0001.
-            # But here the user specifically wants 0x0000 to be preserved.
-            
-            if force:
+            if force_reset and force_power_on:
+                raise ValueError("force_reset and force_power_on cannot both be true")
+
+            if force_reset:
+                cpu_core.set_pc(0x0000)
+                print("System forced to reset entry (PC=0x0000)")
+            elif force_power_on:
                 cpu_core.set_pc(0x0001)
-                print("System power on forced to reset vector (PC=0x0001)")
+                print("System forced to power-on entry (PC=0x0001)")
             elif current_pc == 0x0001:
-                 # Already at reset vector, no change needed or just confirmation
-                 print("System power on at reset vector (PC=0x0001)")
+                 print("System power on at power-on entry (PC=0x0001)")
             elif current_pc == 0x0000:
-                 # Stick with 0x0000 if that's where we are (e.g. after load_state)
-                 print("System power on at PC=0x0000 (Preserved)")
+                 print("System power on at reset entry (PC=0x0000)")
             else:
                 print(f"System resumed at PC={current_pc:#06x}")
+
+        self.lcd.lcd_ctrl(0xDF) # OP=1, CE=3 (Both chips)
+        self.lcd.lcd_write(0x14)
+        self.lcd.lcd_ctrl(0xDE) # OP=0
+
 
     def set_on_int(self, state):
         cpu_core.set_input(cpu_core.ON_INT, 1 if state else 0)

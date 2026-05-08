@@ -3,6 +3,8 @@ PB-1000 Emulator - Normal Run Script
 """
 import machine
 #import machine.freq(150000000)
+import hd61700
+
 import sys
 import time
 from main_boot import (
@@ -80,14 +82,25 @@ def main():
     system.power_on()
 
     print(f"System initialized. PC={system.pc:#06x}")
-    print("Interactive Mode: Type in REPL to send keys (ESC for MENU).")
+    print("Interactive Mode: USB keyboard input enabled.")
 
     tick_step_accum = 0
     frame_time = time.ticks_ms()
+    startup_guard_until = time.ticks_add(frame_time, 1500)
+    startup_recovery_done = False
+    gui_active_until = 0
 
     try:
         while True:
             service_pio_uart_bridge(system, cpu_core)
+
+            if (not startup_recovery_done
+                    and system.is_sleeping
+                    and time.ticks_diff(startup_guard_until, time.ticks_ms()) >= 0):
+                startup_recovery_done = True
+                print("Startup sleep detected; forcing cold boot recovery.")
+                system.reset_emulator()
+                system.power_on(force_reset=True)
 
             if not system.is_sleeping:
                 tick_step_accum += run_cpu_slice(
@@ -98,10 +111,16 @@ def main():
                 )
 
             now = time.ticks_ms()
+            sc = hd61700.get_last_key()
+            if sc == 0xE3 or sc == 0xE7: # LGUI or RGUI
+                gui_active_until = time.ticks_add(now, 500)
+            elif sc == 0x29: # ESC
+                if time.ticks_diff(gui_active_until, now) > 0:
+                    raise KeyboardInterrupt
             keyboard_input.poll(system)
             touch_input.poll(system)
 
-            handle_key_status_and_capture(system)
+            handle_key_status_and_capture(system, sc)
             handle_save_state_request(system, enable_usb_kbd=ENABLE_USB_KBD)
 
             frame_time = update_frame_if_due(

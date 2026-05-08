@@ -17,6 +17,7 @@ WORKAREA_DIC = {
     "BASDI":(0x6949,2),
     "DIREN":(0x694B,2),
     "ACJMP":(0x694D,2),
+    "OPTCD":(0x6BFA,1),
 }
 
 def peek_workarea(system,name):

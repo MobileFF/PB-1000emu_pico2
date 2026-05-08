@@ -107,7 +107,7 @@ def main():
     else:
         display = ret
         touch = None
-    display.fill_rect(0, 0, 320, 240, 0xC618)
+    #display.fill_rect(0, 0, 320, 240, 0xC618)
     draw_bezel(display)
     
     if hasattr(display, 'lcd_sync'):
@@ -117,10 +117,14 @@ def main():
 
     # debug=True to see CPU/LCD logs while testing
     system = PB1000System(display=display)
+    system.lcd.set_display_scale(1.5)
     #system.lcd.setup_display(spi_id=1, cs_pin=9, dc_pin=8, scale=1, x_offset=16, y_offset=40)
     system.load_rom("/roms/rom0.bin", slot=0)
     system.load_rom("/roms/rom1.bin", slot=1)
-    system.lcd.lcd_ctrl(system.lcd.CMD_DISPLAY_ON)
+    system.lcd.lcd_ctrl(0xDF) # OP=1, CE=3 (Both chips)
+    system.lcd.lcd_write(0x14)
+    system.lcd.lcd_ctrl(0xDE) # OP=0
+    #system.lcd.lcd_ctrl(system.lcd.CMD_DISPLAY_ON)
     
     #update_step = int(input("update display step?>"))
 

@@ -346,8 +346,19 @@ static uint8_t dma_buffer[288 * 48 * 2]; /* 1.5x scale max size, 2 bytes/pixel *
 void lcd_wait_for_idle(lcd_state_t *lcd) {
   if (lcd_dma_chan >= 0) {
     dma_channel_wait_for_finish_blocking(lcd_dma_chan);
-    gpio_put(lcd->pin_cs, 1);
   }
+#ifdef __arm__
+  /* Flush SPI RX FIFO to prevent garbage data from poisoning the next 
+     SD card or Virtual FDD operation. During LCD DMA (TX-only), 
+     the RX FIFO fills with meaningless bytes from the MISO line. */
+  if (lcd->spi_inst) {
+      spi_inst_t *spi = (spi_inst_t *)lcd->spi_inst;
+      while (spi_is_readable(spi)) {
+          (void)spi_get_hw(spi)->dr;
+      }
+  }
+  gpio_put(lcd->pin_cs, 1);
+#endif
 }
 
 void lcd_setup_display(lcd_state_t *lcd, void *spi_inst, uint8_t pin_cs,
@@ -429,6 +440,26 @@ static void ili_set_window(lcd_state_t *lcd, uint16_t x0, uint16_t y0,
 void lcd_render_to_display(lcd_state_t *lcd) {
   if (!lcd->spi_initialized || !lcd->dirty)
     return;
+
+  /* SPI Bus Arbitration: Ensure SD Card (GP15) and Touch (GP16) are deselected */
+#ifdef __arm__
+  gpio_put(15, 1);
+  gpio_put(16, 1);
+  /* Explicitly re-enforce SPI settings in case they were changed by Python */
+  spi_set_baudrate((spi_inst_t *)lcd->spi_inst, 40000000);
+  spi_set_format((spi_inst_t *)lcd->spi_inst, 8, SPI_CPOL_0, SPI_CPHA_0, SPI_MSB_FIRST);
+#endif
+
+  /* Safety guard: restore colors if they've been corrupted in RAM */
+  if (lcd->color_off == 0xFFFF || lcd->color_off == 0x0000) {
+    lcd->color_off = 0xB5E6; /* Olive green */
+  }
+  if (lcd->color_on == 0xFFFF) {
+    lcd->color_on = 0x0000; /* Black */
+  }
+  if (lcd->color_lcd_off == 0xFFFF) {
+    lcd->color_lcd_off = 0x8410; /* Gray */
+  }
 
   /* Find range of dirty pages to minimize ili_set_window calls */
   int first_page = -1, last_page = -1;
@@ -545,6 +576,7 @@ void lcd_render_to_display(lcd_state_t *lcd) {
                        dma_buffer, buf_idx, true);
 
 clear_dirty:
+  lcd_wait_for_idle(lcd);
   lcd->dirty = false;
   for (int i = 0; i < LCD_PAGES; i++) {
     lcd->dirty_pages[i] = false;

@@ -31,13 +31,13 @@ def tests_44_4f(t, check):
     check("44 ANC FF&0F chk", [0x44,0x00,0x0F], s, [cf(z=False), cr(0,0xFF)])
     # --- 0x45 NAC (NAND check imm) ---
     def s(): hd61700.set_reg(0,0xFF)
-    check("45 NAC ~(FF&FF)=0 C", [0x45,0x00,0xFF], s, [cf(z=True,c=True)])
+    check("45 NAC ~(FF&FF)=0 C", [0x45,0x00,0xFF], s, [cf(z=True,c=True), cr(0,0xFF)])
     # --- 0x46 ORC (OR check imm) ---
     def s(): hd61700.set_reg(0,0)
-    check("46 ORC 0|0=0 Z,C", [0x46,0x00,0x00], s, [cf(z=True,c=True)])
+    check("46 ORC 0|0=0 Z,C", [0x46,0x00,0x00], s, [cf(z=True,c=True), cr(0,0)])
     # --- 0x47 XRC (XOR check imm) ---
     def s(): hd61700.set_reg(0,0xAA)
-    check("47 XRC AA^AA=0 Z", [0x47,0x00,0xAA], s, [cf(z=True)])
+    check("47 XRC AA^AA=0 Z", [0x47,0x00,0xAA], s, [cf(z=True), cr(0,0xAA)])
     # --- 0x48 AD $,IM8 (write-back) ---
     def s(): hd61700.set_reg(0,10)
     check("48 AD imm 10+20=30", [0x48,0x00,20], s, [cr(0,30)])

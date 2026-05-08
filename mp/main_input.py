@@ -1,6 +1,4 @@
-import sys
 import time
-import uselect
 
 
 def _keypos(row, ki_col):
@@ -33,9 +31,6 @@ class KeyboardInputManager:
         self._key_candidates = {
             "EXE": [KEY_EXE],
         }
-
-        self._stdin_poll = uselect.poll()
-        self._stdin_poll.register(sys.stdin, uselect.POLLIN)
 
         self._key_queue = []
         self._active_key = None
@@ -89,41 +84,6 @@ class KeyboardInputManager:
             return
         self._on_int_active = True
         self._on_int_release_at_ms = time.ticks_add(now_ms, self._on_int_pulse_ms)
-
-    def _poll_repl_input(self, system):
-        if not self._stdin_poll.poll(0):
-            return
-        try:
-            chars = sys.stdin.read(1)
-            if chars == "\x1b":
-                next_chars = sys.stdin.read(4) if self._stdin_poll.poll(10) else ""
-                if "[23~" in next_chars:
-                    print("F11 detected via REPL! Saving state...")
-                    system._save_requested = True
-                    return
-                if "[20~" in next_chars:
-                    print("F9 detected via REPL! Resetting...")
-                    system.reset_emulator()
-                    return
-                for char in next_chars:
-                    self._key_queue.append(self._map_input_char(char))
-            else:
-                for char in chars:
-                    if char == "\x03":
-                        print("\n[REPL] Break received")
-                        self._key_queue.append(self._map_input_char("^"))
-                    elif char in ("\r", "\n"):
-                        if self._auto_exe_on_enter and self._typed_since_enter:
-                            self._key_queue.append((KEY_EXE, "EXE"))
-                            self._typed_since_enter = False
-                    else:
-                        key, label = self._map_input_char(char)
-                        if key is not None:
-                            self._key_queue.append((key, label))
-                            if key != KEY_EXE:
-                                self._typed_since_enter = True
-        except Exception as e:
-            print(f"REPL input error: {e}")
 
     def _poll_uart_input(self, system):
         if not self._enable_uart_kbd or self._uart_kbd is None:
@@ -269,7 +229,6 @@ class KeyboardInputManager:
             finally:
                 self._on_int_active = False
 
-        self._poll_repl_input(system)
         self._poll_uart_input(system)
 
         now = time.ticks_ms()

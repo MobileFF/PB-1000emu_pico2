@@ -1,16 +1,12 @@
-/*
- * MicroPython C Module wrapper for HD61700 CPU
- * Exposes HD61700 CPU core to MicroPython as 'hd61700' module
- */
 #include <stdint.h>
 #include <string.h>
+#include <stdio.h>
 #include <sys/stat.h>
+#include "mpconfigport.h"
+#include "py/runtime.h"
+#include "py/mphal.h"
 #include "hd61700.h"
 #include "lcd_controller.h"
-#include "py/binary.h"
-#include "py/mphal.h"
-#include "py/obj.h"
-#include "py/runtime.h"
 
 /* Static CPU state */
 static hd61700_state_t cpu_state;
@@ -18,7 +14,6 @@ static bool cpu_debug_enabled = false;
 static bool cpu_key_debug_enabled = false;
 static bool cpu_lcd_debug_enabled = false;
 
-/* Extern from modlcd_controller.c */
 extern lcd_state_t *lcd_c_get_state(void);
 
 /* C-side memory map buffers */
@@ -73,6 +68,8 @@ static const int C_KB_POST_RELEASE_PULSES_MAX = 4;
 /* Python callbacks (set from Python) */
 static mp_obj_t py_f11_callback = MP_OBJ_NULL;
 static mp_obj_t py_f9_callback = MP_OBJ_NULL;
+static mp_obj_t py_io_read_callback = MP_OBJ_NULL;
+static mp_obj_t py_io_write_callback = MP_OBJ_NULL;
 
 /* UART RX/TX FIFO (Internal) */
 #define UART_RX_FIFO_SIZE 256
@@ -82,6 +79,9 @@ static uint8_t uart_rx_head = 0;
 static uint8_t uart_rx_tail = 0;
 static uint8_t uart_tx_head = 0;
 static uint8_t uart_tx_tail = 0;
+
+static uint8_t vfdd_data_reg = 0x55; // Default to MD-100 ID (Read)
+static uint8_t vfdd_write_reg = 0x00; // Captured write data
 
 /* Polling-based key notification (ISR-safe: no mp_sched_schedule) */
 static volatile int16_t c_kb_last_pressed_scancode = -1;
@@ -135,6 +135,28 @@ static uint16_t c_kb_compute_ky(void) {
     }
   }
   return result & 0xFFFF;
+}
+
+/* I/O callback wrappers for selective MMIO hooking */
+static uint8_t c_io_read_wrapper(void *ctx, uint8_t segment, uint32_t offset) {
+    if (py_io_read_callback != MP_OBJ_NULL) {
+        mp_obj_t args[2];
+        args[0] = MP_OBJ_NEW_SMALL_INT(segment);
+        args[1] = MP_OBJ_NEW_SMALL_INT(offset);
+        mp_obj_t res = mp_call_function_n_kw(py_io_read_callback, 2, 0, args);
+        return (uint8_t)mp_obj_get_int(res);
+    }
+    return 0;
+}
+
+static void c_io_write_wrapper(void *ctx, uint8_t segment, uint32_t offset, uint8_t data) {
+    if (py_io_write_callback != MP_OBJ_NULL) {
+        mp_obj_t args[3];
+        args[0] = MP_OBJ_NEW_SMALL_INT(segment);
+        args[1] = MP_OBJ_NEW_SMALL_INT(offset);
+        args[2] = MP_OBJ_NEW_SMALL_INT(data);
+        mp_call_function_n_kw(py_io_write_callback, 3, 0, args);
+    }
 }
 
 
@@ -652,52 +674,37 @@ static uint8_t c_mem_direct_read(void *ctx, uint8_t segment, uint32_t offset) {
   }
 
   uint8_t bank = normalize_bank(segment);
-  /* 0x0000-0x1FFF: Internal ROM / IO area */
-  if (offset < 0x2000) {
-    if (offset >= 0x0C00 && offset <= 0x0C03) {
-      /* MMIO UART: Trap in all banks (matching Python behavior) */
-      if (offset == 0x0C00) {
-        /* Status register:
-         * Bit 0: TX Busy (1 = Full/Busy, 0 = Ready) -> PB-1000 technical ref says Bit 0 is TX Busy
-         * Bit 1: RX Ready (1 = Data available)
-         * Bit 2: CTS (1 = Ready)
-         * Bit 3: DSR (1 = Ready)
-         * Bit 4: DCD (1 = Ready)
-         */
-        uint8_t status = 0x1C; /* Hardcode modem lines to ready (Bits 2,3,4) */
-        if ((uint8_t)(uart_tx_head + 1) == uart_tx_tail) {
-          status |= 0x01; // TX Busy
-        }
-        if (uart_rx_head != uart_rx_tail) {
-          status |= 0x02; // RX Ready
-        }
-        return status;
-      }
-      if (offset == 0x0C01) {
-        return 0x00;
-      }
-      if (offset == 0x0C02) {
-        uint8_t val = 0;
-        if (uart_rx_head != uart_rx_tail) {
-          val = uart_rx_fifo[uart_rx_tail++];
-          /* DEBUG log for C core consumption: focus on ':' (0x3A) and 0x8F */
-          if (val == 0x3A || val == 0x8F) {
-            mp_printf(&mp_plat_print, "DB: UART RX READ (0x0C02) val=%02X PC=%04X tail=%d\n", val, cpu_state.pc, uart_rx_tail-1);
-          }
-          if (uart_rx_head == uart_rx_tail) {
-            /* Clear INT1 both in IRQ controller and input state */
-            hd61700_set_input(&cpu_state, HD61700_INT1, 0);
-            cpu_state.irq_status &= ~(1 << HD61700_INT1);
-            cpu_state.reg8bit[2] &= ~(1 << HD61700_INT1); /* REG_IB */
-            // mp_printf(&mp_plat_print, "DB: UART RX EMPTY -> INT1 CLEARED\n");
-          }
-          return val;
-        }
-        /* DEBUG log for empty read */
-        // mp_printf(&mp_plat_print, "DB: UART RX READ EMPTY (0x0C02) (PC=%04X)\n", cpu_state.pc);
-        return 0x00;
-      }
+  uint32_t logical_addr = offset & 0xFFFF;
+
+  /* Priority 1: MMIO UART/FDD (0x0C00-0x0C0F) 
+     We trap this first regardless of bank/segment because these ports are 
+     always mapped to the logical IO space in PB-1000. */
+  if (logical_addr >= 0x0C00 && logical_addr <= 0x0C04) {
+    if (logical_addr == 0x0C00 || logical_addr == 0x0C01 || logical_addr == 0x0C03 || logical_addr == 0x0C04) {
+      return c_io_read_wrapper(NULL, bank, logical_addr);
     }
+    if (logical_addr == 0x0C02) {
+      uint8_t val = 0;
+      if (uart_rx_head != uart_rx_tail) {
+        val = uart_rx_fifo[uart_rx_tail++];
+        /* DEBUG log for C core consumption: focus on ':' (0x3A) and 0x8F */
+        if (val == 0x3A || val == 0x8F) {
+          mp_printf(&mp_plat_print, "DB: UART RX READ (0x0C02) val=%02X PC=%04X tail=%d\n", val, cpu_state.pc, uart_rx_tail-1);
+        }
+        if (uart_rx_head == uart_rx_tail) {
+          /* Clear INT1 both in IRQ controller and input state */
+          hd61700_set_input(&cpu_state, HD61700_INT1, 0);
+          cpu_state.irq_status &= ~(1 << HD61700_INT1);
+          cpu_state.reg8bit[2] &= ~(1 << HD61700_INT1); /* REG_IB */
+        }
+        return val;
+      }
+      return 0x00;
+    }
+  }
+
+  /* Priority 2: Fixed Bank 0 / Internal ROM area (0x0000-0x1FFF) */
+  if (offset < 0x2000) {
     return (offset < rom0_size) ? rom0_buf[offset] : 0xFF;
   }
   /* 0x6000-0x7FFF: RAM */
@@ -714,8 +721,10 @@ static uint8_t c_mem_direct_read(void *ctx, uint8_t segment, uint32_t offset) {
         return 0xFF;
       return rom1_buf[off % rom1_size];
     } else if (bank_u32 == 1 && has_exp_ram) {
-      /* Bank 1: Expanded RAM */
-      return exp_ram_buf[off];
+      /* Bank 1: Expanded RAM (Limit to 32KB) */
+      if (off < 0x8000) {
+        return exp_ram_buf[off];
+      }
     }
     return 0xFF;
   }
@@ -726,7 +735,15 @@ static void c_mem_direct_write(void *ctx, uint8_t segment, uint32_t offset,
                                uint8_t data) {
   (void)ctx;
   uint8_t bank = normalize_bank(segment);
-  /* Only write to RAM area (0x6000-0x7FFF) */
+  uint32_t logical_addr = offset & 0xFFFF;
+
+  /* Priority 1: MMIO Trap for Writes (0x0C00-0x0C0F) */
+  if (logical_addr >= 0x0C00 && logical_addr <= 0x0C0F) {
+    c_io_write_wrapper(NULL, bank, logical_addr, data);
+    return;
+  }
+
+  /* Priority 2: Main RAM (0x6000-0x7FFF) */
   if (offset >= 0x6000 && offset < 0x8000) {
     ram_buf[offset - 0x6000] = data;
     /*
@@ -752,11 +769,12 @@ static void c_mem_direct_write(void *ctx, uint8_t segment, uint32_t offset,
                 (unsigned int)offset, (unsigned int)data);
     }
   }
-  /* 0x0C00-0x0C03: MMIO UART area */
-  else if (offset < 0x2000) {
-    if (offset >= 0x0C00 && offset <= 0x0C03) {
+  /* 0x0C00-0x0C04: MMIO UART/FDD area (High Speed Trap) */
+  if (offset >= 0x0C00 && offset <= 0x0C04) {
+    if (offset == 0x0C03 || offset == 0x0C04) {
+      vfdd_write_reg = data;
       if (offset == 0x0C03) {
-        /* TX Data Register: Push to TX FIFO */
+        /* TX Data Register: Push to TX FIFO (Legacy UART path) */
         if ((uint8_t)(uart_tx_head + 1) != uart_tx_tail) {
           uart_tx_fifo[uart_tx_head++] = data;
         }
@@ -767,9 +785,13 @@ static void c_mem_direct_write(void *ctx, uint8_t segment, uint32_t offset,
   /* Bank 1 Expanded RAM Write (0x8000-0xFFFF) */
   else if (offset >= 0x8000 && bank == 1) {
     if (has_exp_ram) {
-      exp_ram_buf[offset - 0x8000] = data;
-      if (ENABLE_PROG_WRITE_TRACE && is_prog_trace_addr(offset)) {
-        log_watch_write("PROG-WR", bank, offset, data, NULL);
+      /* Limit write to expanded RAM bounds (32KB) */
+      uint32_t off = offset - 0x8000;
+      if (off < 0x8000) {
+        exp_ram_buf[off] = data;
+        if (ENABLE_PROG_WRITE_TRACE && is_prog_trace_addr(offset)) {
+          log_watch_write("PROG-WR", bank, offset, data, NULL);
+        }
       }
     } else if (is_prog_trace_addr(offset)) {
       log_watch_write("PROG-WR-IGN", bank, offset, data, "no exp RAM");
@@ -820,6 +842,8 @@ static mp_obj_t mod_reset(size_t n_args, const mp_obj_t *args) {
   /* Register C callbacks */
   cpu_state.mem_read = use_c_mem ? c_mem_direct_read : c_mem_read;
   cpu_state.mem_write = use_c_mem ? c_mem_direct_write : c_mem_write;
+  cpu_state.io_read = c_io_read_wrapper;
+  cpu_state.io_write = c_io_write_wrapper;
   cpu_state.lcd_read = use_c_lcd ? c_lcd_direct_read : c_lcd_read;
   cpu_state.lcd_write = use_c_lcd ? c_lcd_direct_write : c_lcd_write;
   cpu_state.lcd_ctrl = use_c_lcd ? c_lcd_direct_ctrl : c_lcd_ctrl;
@@ -881,7 +905,7 @@ static mp_obj_t mod_execute(size_t n_args, const mp_obj_t *args) {
   if (n_args > 1) {
     stop_pc = (int32_t)mp_obj_get_int(args[1]);
   }
-  /* Service C keyboard KEY_INT pulses before executing */
+
   c_kb_service_input_lines();
   int consumed = hd61700_execute(&cpu_state, cycles, stop_pc);
   return MP_OBJ_NEW_SMALL_INT(consumed);
@@ -1386,6 +1410,52 @@ static mp_obj_t mod_lcd_sync(void) {
 static MP_DEFINE_CONST_FUN_OBJ_0(mod_lcd_sync_obj, mod_lcd_sync);
 
 
+/* hd61700.set_io_callbacks(read_fn, write_fn) */
+static mp_obj_t mod_set_io_callbacks(mp_obj_t read_fn, mp_obj_t write_fn) {
+    if (read_fn != mp_const_none && !mp_obj_is_callable(read_fn)) {
+        mp_raise_TypeError(MP_ERROR_TEXT("read_fn must be callable"));
+    }
+    if (write_fn != mp_const_none && !mp_obj_is_callable(write_fn)) {
+        mp_raise_TypeError(MP_ERROR_TEXT("write_fn must be callable"));
+    }
+
+    py_io_read_callback = read_fn;
+    py_io_write_callback = write_fn;
+    
+    if (read_fn != mp_const_none) {
+        anchor_callbacks(read_fn);
+        cpu_state.io_read = c_io_read_wrapper;
+    } else {
+        cpu_state.io_read = NULL;
+    }
+    
+    if (write_fn != mp_const_none) {
+        anchor_callbacks(write_fn);
+        cpu_state.io_write = c_io_write_wrapper;
+    } else {
+        cpu_state.io_write = NULL;
+    }
+    
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(mod_set_io_callbacks_obj, mod_set_io_callbacks);
+
+
+/* hd61700.set_vfdd_data(val) */
+static mp_obj_t mod_set_vfdd_data(mp_obj_t val_obj) {
+    vfdd_data_reg = (uint8_t)mp_obj_get_int(val_obj);
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(mod_set_vfdd_data_obj, mod_set_vfdd_data);
+
+
+/* hd61700.get_vfdd_write_data() -> int */
+static mp_obj_t mod_get_vfdd_write_data(void) {
+    return MP_OBJ_NEW_SMALL_INT(vfdd_write_reg);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(mod_get_vfdd_write_data_obj, mod_get_vfdd_write_data);
+
+
 /* ====== Module definition ====== */
 static const mp_rom_map_elem_t hd61700_module_globals_table[] = {
     {MP_ROM_QSTR(MP_QSTR___name__), MP_ROM_QSTR(MP_QSTR_hd61700)},
@@ -1404,6 +1474,12 @@ static const mp_rom_map_elem_t hd61700_module_globals_table[] = {
      MP_ROM_PTR(&mod_set_kb_callbacks_obj)},
     {MP_ROM_QSTR(MP_QSTR_set_port_callbacks),
      MP_ROM_PTR(&mod_set_port_callbacks_obj)},
+    {MP_ROM_QSTR(MP_QSTR_set_vfdd_data),
+     MP_ROM_PTR(&mod_set_vfdd_data_obj)},
+    {MP_ROM_QSTR(MP_QSTR_get_vfdd_write_data),
+     MP_ROM_PTR(&mod_get_vfdd_write_data_obj)},
+    {MP_ROM_QSTR(MP_QSTR_set_io_callbacks),
+     MP_ROM_PTR(&mod_set_io_callbacks_obj)},
     {MP_ROM_QSTR(MP_QSTR_set_input), MP_ROM_PTR(&mod_set_input_obj)},
     {MP_ROM_QSTR(MP_QSTR_timer_tick), MP_ROM_PTR(&mod_timer_tick_obj)},
     {MP_ROM_QSTR(MP_QSTR_get_pc), MP_ROM_PTR(&mod_get_pc_obj)},

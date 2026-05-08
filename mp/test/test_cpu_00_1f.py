@@ -21,9 +21,9 @@ def tests_00_0b(t, check):
     def s(): hd61700.set_reg(0,5); hd61700.set_reg(1,4); hd61700.set_sreg(1,1)
     check("01 SBC chk 5-4 noC", [0x01,0x20], s, [cf(z=False,c=False), cr(0,5)])
     def s(): hd61700.set_reg(0,3); hd61700.set_reg(1,5); hd61700.set_sreg(1,1)
-    check("01 SBC chk borrow", [0x01,0x20], s, [cf(c=True)])
+    check("01 SBC chk borrow", [0x01,0x20], s, [cf(c=True), cr(0,3)])
     def s(): hd61700.set_reg(0,5); hd61700.set_reg(1,5); hd61700.set_sreg(1,1)
-    check("01 SBC chk zero", [0x01,0x20], s, [cf(z=True,c=False)])
+    check("01 SBC chk zero", [0x01,0x20], s, [cf(z=True,c=False), cr(0,5)])
 
     # --- 0x02 LD $,$ ---
     def s(): hd61700.set_reg(0,0); hd61700.set_reg(1,0xAB); hd61700.set_sreg(1,1)
@@ -31,6 +31,10 @@ def tests_00_0b(t, check):
     # sec=3 explicit: LD $5,$10
     def s(): hd61700.set_reg(5,0); hd61700.set_reg(10,0xCD)
     check("02 LD R5,R10 explicit", [0x02,0x65,0x0A], s, [cr(5,0xCD)])
+    # JR explicit check:
+    def s(): hd61700.set_reg(5,0); hd61700.set_reg(31,0xCD); hd61700.set_sreg(0, 0x1F)
+    check("02 LD R5,(SX) with JR +15", [0x02,0x85,0x0F], s, [cr(5,0xCD), cp(0x7011)])
+
 
     # --- 0x03 LDC (no-op) ---
     def s(): hd61700.set_reg(0,0x99); hd61700.set_reg(1,0x11); hd61700.set_sreg(1,1)
@@ -40,25 +44,25 @@ def tests_00_0b(t, check):
     def s(): hd61700.set_reg(0,0xAA); hd61700.set_reg(1,0x55); hd61700.set_sreg(1,1)
     check("04 ANC AA&55=0 Z", [0x04,0x20], s, [cf(z=True), cr(0,0xAA)])
     def s(): hd61700.set_reg(0,0xFF); hd61700.set_reg(1,0x0F); hd61700.set_sreg(1,1)
-    check("04 ANC FF&0F", [0x04,0x20], s, [cf(z=False)])
+    check("04 ANC FF&0F", [0x04,0x20], s, [cf(z=False), cr(0,0xFF)])
 
     # --- 0x05 NAC (NAND check) ---
     def s(): hd61700.set_reg(0,0xFF); hd61700.set_reg(1,0xFF); hd61700.set_sreg(1,1)
-    check("05 NAC ~(FF&FF)=00 Z,C", [0x05,0x20], s, [cf(z=True,c=True)])
+    check("05 NAC ~(FF&FF)=00 Z,C", [0x05,0x20], s, [cf(z=True,c=True), cr(0,0xFF)])
     def s(): hd61700.set_reg(0,0xF0); hd61700.set_reg(1,0x0F); hd61700.set_sreg(1,1)
-    check("05 NAC ~(F0&0F)=FF C", [0x05,0x20], s, [cf(z=False,c=True)])
+    check("05 NAC ~(F0&0F)=FF C", [0x05,0x20], s, [cf(z=False,c=True), cr(0,0xF0)])
 
     # --- 0x06 ORC (OR check) ---
     def s(): hd61700.set_reg(0,0); hd61700.set_reg(1,0); hd61700.set_sreg(1,1)
-    check("06 ORC 0|0=0 Z,C", [0x06,0x20], s, [cf(z=True,c=True)])
+    check("06 ORC 0|0=0 Z,C", [0x06,0x20], s, [cf(z=True,c=True), cr(0,0)])
     def s(): hd61700.set_reg(0,0xA0); hd61700.set_reg(1,0x0B); hd61700.set_sreg(1,1)
-    check("06 ORC A0|0B=AB C", [0x06,0x20], s, [cf(z=False,c=True)])
+    check("06 ORC A0|0B=AB C", [0x06,0x20], s, [cf(z=False,c=True), cr(0,0xA0)])
 
     # --- 0x07 XRC (XOR check) ---
     def s(): hd61700.set_reg(0,0xAA); hd61700.set_reg(1,0xAA); hd61700.set_sreg(1,1)
-    check("07 XRC AA^AA=00 Z", [0x07,0x20], s, [cf(z=True,c=False)])
+    check("07 XRC AA^AA=00 Z", [0x07,0x20], s, [cf(z=True,c=False), cr(0,0xAA)])
     def s(): hd61700.set_reg(0,0xFF); hd61700.set_reg(1,0x0F); hd61700.set_sreg(1,1)
-    check("07 XRC FF^0F=F0", [0x07,0x20], s, [cf(z=False,c=False)])
+    check("07 XRC FF^0F=F0", [0x07,0x20], s, [cf(z=False,c=False), cr(0,0xFF)])
 
     # --- 0x08 AD (add with write-back) ---
     def s(): hd61700.set_reg(0,5); hd61700.set_reg(1,3); hd61700.set_sreg(1,1)
