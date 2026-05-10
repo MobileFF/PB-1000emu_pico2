@@ -25,6 +25,7 @@
 #define ILI9341_RAMWR 0x2C
 #define LCD_PAGES 4
 #define LCD_VRAM_SIZE (LCD_WIDTH * LCD_PAGES) /* 768 bytes */
+#define LCD_COLOR_VRAM_SIZE (LCD_WIDTH * 64)  /* 192 x 64 = 12,288 bytes */
 #define LCD_CHARSET_SIZE 2048
 
 /* LCD.s command IDs (mode low nibble) */
@@ -91,6 +92,18 @@ typedef struct {
   uint8_t charset_buf[LCD_CHARSET_SIZE];
   bool charset_loaded;
 
+  /* Per-pixel color VRAM: each byte is RGB332.
+     ON pixel  → stamped with current_fg_rgb332 at write time.
+     OFF pixel → stamped with current_bg_rgb332 at write time.
+     Rendering reads color_vram directly; global color_on/color_off are
+     only used for initial values and LCD-off fill. */
+  uint8_t color_vram[LCD_COLOR_VRAM_SIZE];
+  uint16_t rgb332_to_565_table[256];
+
+  /* Current fg/bg colors in RGB332, updated by lcd_set_colors / lcd_set_bg_colors */
+  uint8_t current_fg_rgb332;
+  uint8_t current_bg_rgb332;
+
   /* Debug flag */
   bool debug;
 
@@ -119,6 +132,7 @@ void lcd_set_x_mirror(lcd_state_t *lcd, bool enabled);
 void lcd_set_draw_bitimage_reverse(lcd_state_t *lcd, bool enabled);
 void lcd_load_charset(lcd_state_t *lcd, const uint8_t *data, int len);
 void lcd_set_bg_colors(lcd_state_t *lcd, uint16_t on_bg, uint16_t off_bg);
+void lcd_set_colors(lcd_state_t *lcd, uint16_t fg, uint16_t bg);
 
 
 /* SPI display rendering (direct hardware access) */

@@ -22,9 +22,12 @@ static size_t rom0_size = 0;
 static uint8_t rom1_buf[0x8000]; // 32KB System ROM
 static size_t rom1_size = 0;
 static uint8_t ram_buf[0x2000];     // 8KB RAM (0x6000-0x7FFF)
-static uint8_t exp_ram_buf[0x8000]; // 32KB Expanded RAM (Bank 1: 0x8000-0xFFFF)
-static bool has_exp_ram = false;
-static bool has_exp_ram_forced = false;
+static uint8_t bank1_buf[0x8000]; // 32KB RAM Bank 1 (0x8000-0xFFFF)
+static uint8_t bank2_buf[0x8000]; // 32KB RAM Bank 2 (0x8000-0xFFFF)
+static uint8_t bank3_buf[0x8000]; // 32KB RAM Bank 3 (0x8000-0xFFFF)
+/* has_bank[0]=ROM1 always present; [1..3] set when load_ram(slot,data) called */
+static bool has_bank[4] = {true, false, false, false};
+static bool has_bank_forced = false; /* true = Python override via set_has_exp_ram */
 
 /* Dedup trace state for SSTOP/SBOT (0x6931-0x6934). */
 static uint8_t sstop_sbot_last[4];
@@ -70,6 +73,12 @@ static mp_obj_t py_f11_callback = MP_OBJ_NULL;
 static mp_obj_t py_f9_callback = MP_OBJ_NULL;
 static mp_obj_t py_io_read_callback = MP_OBJ_NULL;
 static mp_obj_t py_io_write_callback = MP_OBJ_NULL;
+
+/* CAL hook table (address → Python/native callable) */
+#define CALL_HOOK_MAX 16
+static uint16_t call_hook_addrs[CALL_HOOK_MAX];
+static mp_obj_t  call_hook_fns[CALL_HOOK_MAX];  /* static = scanned by conservative GC */
+static int       call_hook_count = 0;
 
 /* UART RX/TX FIFO (Internal) */
 #define UART_RX_FIFO_SIZE 256
@@ -557,15 +566,22 @@ static void log_watch_write(const char *tag, uint8_t bank, uint32_t offset,
 }
 
 /* Auto-detect expanded RAM image from common paths. */
-static bool detect_exp_ram_file(void) {
+static bool detect_bank_file(int slot) {
   struct stat st;
-  if (stat("/roms/ram1.bin", &st) == 0) {
-    return true;
-  }
-  if (stat("roms/ram1.bin", &st) == 0) {
-    return true;
-  }
+  char path[32];
+  snprintf(path, sizeof(path), "/roms/ram%d.bin", slot);
+  if (stat(path, &st) == 0) return true;
+  snprintf(path, sizeof(path), "roms/ram%d.bin", slot);
+  if (stat(path, &st) == 0) return true;
+  snprintf(path, sizeof(path), "/sd/ram%d.bin", slot);
+  if (stat(path, &st) == 0) return true;
   return false;
+}
+
+static void detect_all_banks(void) {
+  for (int i = 1; i <= 3; i++) {
+    has_bank[i] = detect_bank_file(i);
+  }
 }
 
 static void anchor_callbacks(mp_obj_t obj) {
@@ -713,19 +729,16 @@ static uint8_t c_mem_direct_read(void *ctx, uint8_t segment, uint32_t offset) {
   }
   /* 0x8000-0xFFFF: Banked Memory */
   if (offset >= 0x8000) {
-    uint32_t bank_u32 = (uint32_t)bank;
     uint32_t off = offset - 0x8000u;
-    if (bank_u32 == 0) {
+    if (off >= 0x8000) return 0xFF;
+    if (bank == 0) {
       /* Bank 0: System ROM */
-      if (rom1_size == 0)
-        return 0xFF;
-      return rom1_buf[off % rom1_size];
-    } else if (bank_u32 == 1 && has_exp_ram) {
-      /* Bank 1: Expanded RAM (Limit to 32KB) */
-      if (off < 0x8000) {
-        return exp_ram_buf[off];
-      }
+      return (rom1_size > 0) ? rom1_buf[off % rom1_size] : 0xFF;
     }
+    /* Banks 1-3: RAM */
+    static uint8_t * const bank_bufs[3] = {bank1_buf, bank2_buf, bank3_buf};
+    if (bank >= 1 && bank <= 3 && has_bank[bank])
+      return bank_bufs[bank - 1][off];
     return 0xFF;
   }
   return 0xFF;
@@ -782,19 +795,18 @@ static void c_mem_direct_write(void *ctx, uint8_t segment, uint32_t offset,
     }
     return;
   }
-  /* Bank 1 Expanded RAM Write (0x8000-0xFFFF) */
-  else if (offset >= 0x8000 && bank == 1) {
-    if (has_exp_ram) {
-      /* Limit write to expanded RAM bounds (32KB) */
-      uint32_t off = offset - 0x8000;
-      if (off < 0x8000) {
-        exp_ram_buf[off] = data;
-        if (ENABLE_PROG_WRITE_TRACE && is_prog_trace_addr(offset)) {
-          log_watch_write("PROG-WR", bank, offset, data, NULL);
-        }
+  /* Banks 1-3: RAM Write (0x8000-0xFFFF) */
+  else if (offset >= 0x8000 && bank >= 1 && bank <= 3) {
+    uint32_t off = offset - 0x8000;
+    if (off < 0x8000 && has_bank[bank]) {
+      static uint8_t * const bank_bufs[3] = {bank1_buf, bank2_buf, bank3_buf};
+      bank_bufs[bank - 1][off] = data;
+      if (ENABLE_PROG_WRITE_TRACE && is_prog_trace_addr(offset)) {
+        log_watch_write("PROG-WR", bank, offset, data, NULL);
       }
     } else if (is_prog_trace_addr(offset)) {
-      log_watch_write("PROG-WR-IGN", bank, offset, data, "no exp RAM");
+      log_watch_write("PROG-WR-IGN", bank, offset, data,
+                      has_bank[bank] ? "out of range" : "no RAM");
     }
   } else if (is_prog_trace_addr(offset)) {
     log_watch_write("PROG-WR-IGN", bank, offset, data, "bank not writable");
@@ -836,8 +848,8 @@ static mp_obj_t mod_reset(size_t n_args, const mp_obj_t *args) {
   memset(sstop_sbot_last_valid, 0, sizeof(sstop_sbot_last_valid));
   /* Fallback auto-detection so C direct-memory mode also works without
      explicit Python-side set_has_exp_ram(). */
-  if (!has_exp_ram_forced) {
-    has_exp_ram = detect_exp_ram_file();
+  if (!has_bank_forced) {
+    detect_all_banks();
   }
   /* Register C callbacks */
   cpu_state.mem_read = use_c_mem ? c_mem_direct_read : c_mem_read;
@@ -856,15 +868,22 @@ static mp_obj_t mod_reset(size_t n_args, const mp_obj_t *args) {
 
   /* Connect direct memory pointers for high-performance path */
   if (use_c_mem) {
-    cpu_state.rom0_ptr = rom0_buf;
-    cpu_state.rom1_ptr = rom1_buf;
-    cpu_state.ram_ptr = ram_buf;
-    cpu_state.exp_ram_ptr = has_exp_ram ? exp_ram_buf : NULL;
+    static uint8_t * const bank_bufs[3] = {bank1_buf, bank2_buf, bank3_buf};
+    cpu_state.rom0_ptr    = rom0_buf;
+    cpu_state.ram_ptr     = ram_buf;
+    cpu_state.bank_ptr[0] = rom1_buf;
+    cpu_state.bank_is_ram[0] = false;
+    for (int i = 1; i <= 3; i++) {
+      cpu_state.bank_ptr[i]    = has_bank[i] ? bank_bufs[i - 1] : NULL;
+      cpu_state.bank_is_ram[i] = true;
+    }
   } else {
     cpu_state.rom0_ptr = NULL;
-    cpu_state.rom1_ptr = NULL;
-    cpu_state.ram_ptr = NULL;
-    cpu_state.exp_ram_ptr = NULL;
+    cpu_state.ram_ptr  = NULL;
+    for (int i = 0; i < 4; i++) {
+      cpu_state.bank_ptr[i]    = NULL;
+      cpu_state.bank_is_ram[i] = (i > 0);
+    }
   }
   return mp_const_none;
 }
@@ -1135,18 +1154,35 @@ static mp_obj_t mod_load_rom(mp_obj_t slot_obj, mp_obj_t data_obj) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_2(mod_load_rom_obj, mod_load_rom);
 
-/* hd61700.load_ram(slot, data) */
+/* hd61700.load_ram(slot, data)  slot: 0=main RAM, 1..3=bank RAM */
 static mp_obj_t mod_load_ram(mp_obj_t slot_obj, mp_obj_t data_obj) {
   int slot = mp_obj_get_int(slot_obj);
   mp_buffer_info_t bufinfo;
   mp_get_buffer_raise(data_obj, &bufinfo, MP_BUFFER_READ);
 
+  uint8_t *dst = NULL;
+  size_t   cap = 0;
   if (slot == 0) {
-    size_t to_copy = (bufinfo.len > sizeof(ram_buf)) ? sizeof(ram_buf) : bufinfo.len;
-    memcpy(ram_buf, bufinfo.buf, to_copy);
+    dst = ram_buf;   cap = sizeof(ram_buf);
+  } else if (slot == 1) {
+    dst = bank1_buf; cap = sizeof(bank1_buf);
+  } else if (slot == 2) {
+    dst = bank2_buf; cap = sizeof(bank2_buf);
+  } else if (slot == 3) {
+    dst = bank3_buf; cap = sizeof(bank3_buf);
   } else {
-    size_t to_copy = (bufinfo.len > sizeof(exp_ram_buf)) ? sizeof(exp_ram_buf) : bufinfo.len;
-    memcpy(exp_ram_buf, bufinfo.buf, to_copy);
+    return mp_const_none; /* unknown slot */
+  }
+
+  size_t to_copy = (bufinfo.len < cap) ? bufinfo.len : cap;
+  memcpy(dst, bufinfo.buf, to_copy);
+
+  if (slot >= 1 && slot <= 3) {
+    has_bank[slot] = true;
+    /* Update bank_ptr immediately so subsequent reads without reset() also work */
+    static uint8_t * const bank_bufs[3] = {bank1_buf, bank2_buf, bank3_buf};
+    if (use_c_mem)
+      cpu_state.bank_ptr[slot] = bank_bufs[slot - 1];
   }
   return mp_const_none;
 }
@@ -1177,20 +1213,91 @@ static mp_obj_t mod_get_ram_view(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(mod_get_ram_view_obj, mod_get_ram_view);
 
-/* hd61700.get_exp_ram_view() */
+/* hd61700.get_exp_ram_view()  — backward-compatible alias for get_bank_view(1) */
 static mp_obj_t mod_get_exp_ram_view(void) {
-  return mp_obj_new_memoryview('B', sizeof(exp_ram_buf), exp_ram_buf);
+  return mp_obj_new_memoryview('B', sizeof(bank1_buf), bank1_buf);
 }
-static MP_DEFINE_CONST_FUN_OBJ_0(mod_get_exp_ram_view_obj,
-                                 mod_get_exp_ram_view);
+static MP_DEFINE_CONST_FUN_OBJ_0(mod_get_exp_ram_view_obj, mod_get_exp_ram_view);
 
-/* hd61700.set_has_exp_ram(bool) */
+/* hd61700.get_bank_view(bank)  bank: 1..3 */
+static mp_obj_t mod_get_bank_view(mp_obj_t bank_obj) {
+  int bank = mp_obj_get_int(bank_obj);
+  uint8_t *ptr = NULL;
+  size_t   sz  = 0;
+  if      (bank == 1) { ptr = bank1_buf; sz = sizeof(bank1_buf); }
+  else if (bank == 2) { ptr = bank2_buf; sz = sizeof(bank2_buf); }
+  else if (bank == 3) { ptr = bank3_buf; sz = sizeof(bank3_buf); }
+  else return mp_const_none;
+  return mp_obj_new_memoryview('B', sz, ptr);
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(mod_get_bank_view_obj, mod_get_bank_view);
+
+/* hd61700.set_has_exp_ram(bool)  — sets Bank 1 presence flag (backward compat) */
 static mp_obj_t mod_set_has_exp_ram(mp_obj_t enable_obj) {
-  has_exp_ram = mp_obj_is_true(enable_obj);
-  has_exp_ram_forced = true;
+  has_bank[1]    = mp_obj_is_true(enable_obj);
+  has_bank_forced = true;
   return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(mod_set_has_exp_ram_obj, mod_set_has_exp_ram);
+
+/* ---- CAL hook dispatcher ---- */
+
+/* Called from hd61700.c CAL handler.
+ * Returns true if address is registered (intercept), false otherwise. */
+static bool c_call_hook_dispatcher(void *ctx, uint16_t addr) {
+  (void)ctx;
+  for (int i = 0; i < call_hook_count; i++) {
+    if (call_hook_addrs[i] == addr) {
+      mp_call_function_1(call_hook_fns[i], MP_OBJ_NEW_SMALL_INT(addr));
+      return true;
+    }
+  }
+  return false;
+}
+
+/* hd61700.set_call_hook(address, callable)
+ * Register a Python function or native C function for the given CAL address.
+ * Overwrites any existing entry for the same address. */
+static mp_obj_t mod_set_call_hook(mp_obj_t addr_obj, mp_obj_t fn_obj) {
+  uint16_t addr = (uint16_t)mp_obj_get_int(addr_obj);
+  /* Overwrite existing entry */
+  for (int i = 0; i < call_hook_count; i++) {
+    if (call_hook_addrs[i] == addr) {
+      call_hook_fns[i] = fn_obj;
+      return mp_const_none;
+    }
+  }
+  /* New entry */
+  if (call_hook_count < CALL_HOOK_MAX) {
+    call_hook_addrs[call_hook_count] = addr;
+    call_hook_fns[call_hook_count]   = fn_obj;
+    call_hook_count++;
+  }
+  cpu_state.call_hook = c_call_hook_dispatcher;
+  return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(mod_set_call_hook_obj, mod_set_call_hook);
+
+/* hd61700.clear_call_hook(address)
+ * Unregister the hook for the given address. */
+static mp_obj_t mod_clear_call_hook(mp_obj_t addr_obj) {
+  uint16_t addr = (uint16_t)mp_obj_get_int(addr_obj);
+  for (int i = 0; i < call_hook_count; i++) {
+    if (call_hook_addrs[i] == addr) {
+      /* Fill hole with last entry */
+      call_hook_count--;
+      call_hook_addrs[i] = call_hook_addrs[call_hook_count];
+      call_hook_fns[i]   = call_hook_fns[call_hook_count];
+      call_hook_fns[call_hook_count] = MP_OBJ_NULL; /* release GC ref */
+      break;
+    }
+  }
+  if (call_hook_count == 0) {
+    cpu_state.call_hook = NULL;
+  }
+  return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(mod_clear_call_hook_obj, mod_clear_call_hook);
 
 /* hd61700.read_mem(addr, [segment]) */
 static mp_obj_t mod_read_mem(size_t n_args, const mp_obj_t *args) {
@@ -1506,8 +1613,14 @@ static const mp_rom_map_elem_t hd61700_module_globals_table[] = {
     {MP_ROM_QSTR(MP_QSTR_get_ram_view), MP_ROM_PTR(&mod_get_ram_view_obj)},
     {MP_ROM_QSTR(MP_QSTR_get_exp_ram_view),
      MP_ROM_PTR(&mod_get_exp_ram_view_obj)},
+    {MP_ROM_QSTR(MP_QSTR_get_bank_view),
+     MP_ROM_PTR(&mod_get_bank_view_obj)},
     {MP_ROM_QSTR(MP_QSTR_set_has_exp_ram),
      MP_ROM_PTR(&mod_set_has_exp_ram_obj)},
+    {MP_ROM_QSTR(MP_QSTR_set_call_hook),
+     MP_ROM_PTR(&mod_set_call_hook_obj)},
+    {MP_ROM_QSTR(MP_QSTR_clear_call_hook),
+     MP_ROM_PTR(&mod_clear_call_hook_obj)},
     {MP_ROM_QSTR(MP_QSTR_read_mem), MP_ROM_PTR(&mod_read_mem_obj)},
     {MP_ROM_QSTR(MP_QSTR_write_mem), MP_ROM_PTR(&mod_write_mem_obj)},
     {MP_ROM_QSTR(MP_QSTR__anchor_callbacks),

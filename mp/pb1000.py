@@ -2,6 +2,7 @@
 #
 #
 import hd61700 as cpu_core
+import gc
 import os
 import sys
 import time
@@ -16,6 +17,11 @@ try:
     _LCD_BACKEND = "C"
 except ImportError:
     pass
+
+try:
+    import lcd_c
+except ImportError:
+    lcd_c = None
 
 # original keyboard.py is kept but unused.
 
@@ -220,7 +226,8 @@ class PB1000System:
         flag = bool(debug)
         return {"sys": flag, "lcd": flag, "kb": flag}
 
-    def __init__(self, display=None, debug=False, restore_registers=True):
+    def __init__(self, display=None, debug=False, restore_registers=True,
+                 profile_dir=None, config=None):
         direct_mem_override = None
         direct_lcd_override = None
         if isinstance(debug, dict):
@@ -237,25 +244,51 @@ class PB1000System:
             # display[0] is the display object itself
             display = display[0]
 
-        self._exp_ram_path = self._get_storage_path("ram1.bin")
-        self.has_exp = self._file_exists(self._exp_ram_path)
-        print(f"Expanded RAM detection: {'FOUND' if self.has_exp else 'NOT FOUND'} ({self._exp_ram_path})")
+        # Profile dir and merged config (must be set before _get_storage_path is called)
+        self.profile_dir = profile_dir
+        self._config = config
+
+        # Bank presence detection: has_bank[0]=ROM1 (always), [1..3]=RAM banks
+        self.has_bank = [True, False, False, False]
+        for slot in range(1, 4):
+            path = self._get_storage_path(f"ram{slot}.bin")
+            self.has_bank[slot] = self._file_exists(path)
+        print(f"Bank detection: RAM1={'Y' if self.has_bank[1] else 'N'} "
+              f"RAM2={'Y' if self.has_bank[2] else 'N'} "
+              f"RAM3={'Y' if self.has_bank[3] else 'N'}")
         if hasattr(cpu_core, "set_has_exp_ram"):
-            cpu_core.set_has_exp_ram(self.has_exp)
+            cpu_core.set_has_exp_ram(self.has_bank[1])
 
         if hasattr(cpu_core, "get_ram_view"):
             raw_view = cpu_core.get_ram_view()
             self.ram = RAMView(cpu_core, memoryview(raw_view), self.RAM_SIZE, self.RAM_START)
             self._ram_is_c_managed = True
-            
-            if self.has_exp and hasattr(cpu_core, "get_exp_ram_view"):
+            # Bank 1 (exp_ram): backward-compat view
+            if self.has_bank[1] and hasattr(cpu_core, "get_exp_ram_view"):
                 exp_raw_view = cpu_core.get_exp_ram_view()
-                self.exp_ram = RAMView(cpu_core, memoryview(exp_raw_view), self.EXP_RAM_SIZE, self.SYS_ROM_START, segment=1)
+                _b1 = RAMView(cpu_core, memoryview(exp_raw_view), self.EXP_RAM_SIZE, self.SYS_ROM_START, segment=0x10)
+            elif self.has_bank[1]:
+                _b1 = bytearray(self.EXP_RAM_SIZE)
             else:
-                self.exp_ram = bytearray(self.EXP_RAM_SIZE)
+                _b1 = bytearray(0)
+            # Banks 2 and 3
+            _bank_views = []
+            for slot in range(2, 4):
+                if self.has_bank[slot] and hasattr(cpu_core, "get_bank_view"):
+                    rv = cpu_core.get_bank_view(slot)
+                    _bank_views.append(RAMView(cpu_core, memoryview(rv), self.EXP_RAM_SIZE, self.SYS_ROM_START, segment=slot << 4))
+                elif self.has_bank[slot]:
+                    _bank_views.append(bytearray(self.EXP_RAM_SIZE))
+                else:
+                    _bank_views.append(bytearray(0))
         else:
             self.ram = bytearray(self.RAM_SIZE)
-            self.exp_ram = bytearray(self.EXP_RAM_SIZE)
+            _b1 = bytearray(self.EXP_RAM_SIZE)
+            _bank_views = [bytearray(self.EXP_RAM_SIZE), bytearray(self.EXP_RAM_SIZE)]
+
+        # _bank_ram[0]=unused, [1]=RAM1, [2]=RAM2, [3]=RAM3
+        self.exp_ram = _b1
+        self._bank_ram = [None, _b1, _bank_views[0], _bank_views[1]]
             
         self.rom0 = bytearray(0)
         self.rom1 = bytearray(0)
@@ -294,6 +327,7 @@ class PB1000System:
         self._last_logged_crash_pc = -1
         self._fdd_active = False # SPI Bus Lock flag
         self._gpo_parity = 0   # Tracks gpo call parity for D92E P1/P0 protocol
+        self._vdp_init()
 
         # Raw UART Pins for bit-level passthrough
         self._tx_pin = machine.Pin(6, machine.Pin.OUT, value=1)
@@ -346,6 +380,7 @@ class PB1000System:
             
     def load_rom(self, path, slot=0, keep_copy=False):
         try:
+            gc.collect()
             with open(path, 'rb') as f:
                 data = f.read()
                 must_keep_copy = bool(keep_copy or not self._ram_is_c_managed or self.has_virtual_fdd())
@@ -360,12 +395,18 @@ class PB1000System:
         except OSError as e:
             print(f"ROM load error ({path}): {e}")
 
+    @property
+    def has_exp(self):
+        return self.has_bank[1]
+
     def _mem_read(self, segment, offset):
         return self._mem_read_impl(segment, offset)
 
     def _mem_read_impl(self, segment, offset):
         if offset < 0x8000:
             if offset < 0x2000:
+                if 0x0C20 <= offset <= 0x0C24:
+                    return self._vdp_read(offset)
                 if (
                     self.has_virtual_fdd()
                     and 0x0C00 <= offset <= 0x0C07
@@ -382,7 +423,7 @@ class PB1000System:
             else:
                 return 0xFF
 
-        bank = segment & 0x03
+        bank = (segment >> 4) & 0x03
         if offset >= 0x8000:
             if bank == 0:
                 rom_off = offset - 0x8000
@@ -391,10 +432,11 @@ class PB1000System:
                         return self.rom1[rom_off]
                 elif self._ram_is_c_managed and hasattr(cpu_core, "read_mem"):
                     return cpu_core.read_mem(offset, segment)
-            elif bank == 1 and self.has_exp:
-                exp_off = offset - 0x8000
-                if exp_off < len(self.exp_ram):
-                    return self.exp_ram[exp_off]
+            elif 1 <= bank <= 3 and self.has_bank[bank]:
+                off = offset - 0x8000
+                buf = self._bank_ram[bank]
+                if off < len(buf):
+                    return buf[off]
         return 0xFF
 
     def _mem_write(self, segment, offset, data):
@@ -408,6 +450,8 @@ class PB1000System:
                 cpu_core.write_mem(offset & 0xFFFF, data & 0xFF, segment)
             else:
                 self.ram[ram_index] = data
+        elif 0x0C20 <= offset <= 0x0C24:
+            self._vdp_write(offset, data)
         elif (
             self.has_virtual_fdd()
             and 0x0C00 <= offset <= 0x0C07
@@ -423,17 +467,20 @@ class PB1000System:
                 self.console_uart.write(char)
             else:
                 print(char, end='')
-        elif offset >= 0x8000 and (segment & 0x03) == 1 and self.has_exp:
-            exp_off = offset - 0x8000
-            if exp_off < len(self.exp_ram):
-                pc = cpu_core.get_pc() if hasattr(cpu_core, "get_pc") else 0
-                ua = cpu_core.get_reg8(3) if hasattr(cpu_core, "get_reg8") else 0
-                if self.PROG_TRACE_START <= offset <= self.PROG_TRACE_END:
-                    print(f"[HD61700] PROG-WR PC={pc:04X} UA={ua:02X} BANK={segment & 0x03} RAM[{offset & 0xFFFF:04X}] <= {data & 0xFF:02X}")
-                if self._ram_is_c_managed and hasattr(cpu_core, "write_mem"):
-                    cpu_core.write_mem(offset & 0xFFFF, data & 0xFF, segment)
-                else:
-                    self.exp_ram[exp_off] = data
+        elif offset >= 0x8000:
+            bank = (segment >> 4) & 0x03
+            if 1 <= bank <= 3 and self.has_bank[bank]:
+                off = offset - 0x8000
+                buf = self._bank_ram[bank]
+                if off < len(buf):
+                    if self.PROG_TRACE_START <= offset <= self.PROG_TRACE_END:
+                        pc = cpu_core.get_pc() if hasattr(cpu_core, "get_pc") else 0
+                        ua = cpu_core.get_reg8(3) if hasattr(cpu_core, "get_reg8") else 0
+                        print(f"[HD61700] PROG-WR PC={pc:04X} UA={ua:02X} BANK={bank} RAM[{offset & 0xFFFF:04X}] <= {data & 0xFF:02X}")
+                    if self._ram_is_c_managed and hasattr(cpu_core, "write_mem"):
+                        cpu_core.write_mem(offset & 0xFFFF, data & 0xFF, segment)
+                    else:
+                        buf[off] = data
 
     def _is_lcd_vram_addr(self, offset):
         return (0x6100 <= offset <= 0x61FF) or (0x6201 <= offset <= 0x6850)
@@ -556,22 +603,85 @@ class PB1000System:
             self._handle_virtual_fdd_port_write(data)
             
         elif index == 3:
-            if self.pio_uart:
-                self.pio_uart.write(data)
-            char = chr(data & 0x7F)
-            if self.console_uart:
-                self.console_uart.write(char)
-            else:
-                print(char, end="")
+            # 0x0C03 = TX Data Register (UART) OR FDD read-data port (when FDD powered).
+            # pio_uart shares pins with the FDD interface; suppress serial output while
+            # the FDD interface is powered to avoid sending FDD protocol bytes as UART TX.
+            if not (self.has_virtual_fdd() and self._virtual_fdd_interface_powered):
+                if self.pio_uart:
+                    self.pio_uart.write(data)
+                char = chr(data & 0x7F)
+                if self.console_uart:
+                    self.console_uart.write(char)
+                else:
+                    print(char, end="")
 
     def _fdd_read_bridge_fn(self, segment, offset):
-        # Explicit bridge method for C selective hooking
-        # Dispatch based on address to avoid collisions between Internal IO and MMIO
+        if 0x0C20 <= offset <= 0x0C24:
+            return self._vdp_read(offset)
         return self._read_io_register(offset)
-        
+
     def _fdd_write_bridge_fn(self, segment, offset, data):
-        # Explicit bridge method for C selective hooking
-        self._write_io_register(offset, data)
+        if 0x0C20 <= offset <= 0x0C24:
+            self._vdp_write(offset, data)
+        else:
+            self._write_io_register(offset, data)
+
+    def _vdp_init(self):
+        self._vdp_addr = 0
+        self._vdp_fg   = 0x00   # 黒（デフォルト前景色）
+        self._vdp_bg   = 0xFF   # 白（デフォルト背景色）
+        if hasattr(lcd_c, 'get_color_vram'):
+            self._color_vram = lcd_c.get_color_vram()
+        else:
+            self._color_vram = None
+
+    @staticmethod
+    def _rgb332_to_565(c):
+        r = (c >> 5) & 0x07
+        g = (c >> 2) & 0x07
+        b =  c       & 0x03
+        return ((r * 31 // 7) << 11) | ((g * 63 // 7) << 5) | (b * 31 // 3)
+
+    def _vdp_apply_colors(self):
+        fg565 = self._rgb332_to_565(self._vdp_fg)
+        bg565 = self._rgb332_to_565(self._vdp_bg)
+        if hasattr(lcd_c, 'set_colors'):
+            lcd_c.set_colors(fg565, bg565)
+        elif hasattr(self.lcd, 'set_colors'):
+            self.lcd.set_colors(fg565, bg565)
+
+    def _vdp_write(self, offset, data):
+        reg = offset - 0x0C20
+        if reg == 0:
+            self._vdp_addr = (self._vdp_addr & 0x3F00) | (data & 0xFF)
+        elif reg == 1:
+            self._vdp_addr = (self._vdp_addr & 0x00FF) | ((data & 0x3F) << 8)
+        elif reg == 2:
+            if self._color_vram is not None and self._vdp_addr < 12288:
+                self._color_vram[self._vdp_addr] = data
+                if hasattr(lcd_c, 'mark_dirty'):
+                    lcd_c.mark_dirty()
+            self._vdp_addr = (self._vdp_addr + 1) & 0x3FFF
+        elif reg == 3:
+            self._vdp_fg = data & 0xFF
+            self._vdp_apply_colors()
+        elif reg == 4:
+            self._vdp_bg = data & 0xFF
+            self._vdp_apply_colors()
+
+    def _vdp_read(self, offset):
+        reg = offset - 0x0C20
+        if reg == 0:   return self._vdp_addr & 0xFF
+        if reg == 1:   return (self._vdp_addr >> 8) & 0x3F
+        if reg == 2:
+            val = 0xFF
+            if self._color_vram is not None and self._vdp_addr < 12288:
+                val = self._color_vram[self._vdp_addr]
+            self._vdp_addr = (self._vdp_addr + 1) & 0x3FFF
+            return val
+        if reg == 3:   return self._vdp_fg
+        if reg == 4:   return self._vdp_bg
+        return 0xFF
 
     def _log_vfdd(self, msg):
         print(f"[VFDD] {msg}") # Enabled for current debugging phase
@@ -696,22 +806,25 @@ class PB1000System:
             pass
 
     def _get_storage_path(self, filename):
-        """Return the best path for a file, prioritizing SD card."""
+        """Return the best path for a file. Profile dir takes highest priority."""
+        if self.profile_dir:
+            return self.profile_dir + "/" + filename
+
         sd_path = "/sd/" + filename
         roms_path = "/roms/" + filename
         root_path = "/" + filename
-        
+
         if self.sd_mounted:
-            if filename in ("ram0.bin", "ram1.bin", "regs.json"):
+            if filename in ("ram0.bin", "ram1.bin", "ram2.bin", "ram3.bin", "regs.json"):
                 if self._file_exists(sd_path):
                     return sd_path
                 if self._file_exists(roms_path):
                     return roms_path
                 return sd_path
-            
+
             if self._file_exists(sd_path):
                 return sd_path
-        
+
         if self._file_exists(roms_path):
             return roms_path
         return root_path
@@ -735,6 +848,29 @@ class PB1000System:
             self.virtual_fdd_config = {"enabled": False, "reason": "disabled by flag"}
             self._pending_virtual_fdd_config = None
             return None
+
+        # Use [disk] section from merged pb1000.ini config if available
+        if self._config is not None and "disk" in self._config:
+            disk = self._config["disk"]
+            enabled = disk.get("enabled", "false").lower() in ("1", "true", "yes", "on")
+            if not enabled:
+                self.virtual_fdd_config = {"enabled": False, "reason": "disabled in pb1000.ini"}
+                self._pending_virtual_fdd_config = None
+                return None
+            raw_path = disk.get("path", "").strip()
+            if raw_path and not raw_path.startswith("/"):
+                raw_path = "/sd/" + raw_path
+            cfg = {
+                "enabled": True,
+                "backend": disk.get("backend", "raw").strip(),
+                "path": raw_path,
+                "readonly": disk.get("readonly", "false").lower() in ("1", "true", "yes", "on"),
+            }
+            print(f"[VFDD] Config from pb1000.ini: {raw_path}")
+            self.virtual_fdd_config = cfg
+            self._pending_virtual_fdd_config = cfg
+            return cfg
+
         for config_path in self._virtual_fdd_config_candidates():
             cfg = load_virtual_fdd_config(config_path)
             if cfg:
@@ -805,7 +941,7 @@ class PB1000System:
         }
         # Ensure Python-side ROM copies exist for the callback path (Bug #1)
         self._ensure_rom_copies()
-        
+
         print(
             "Virtual FDD enabled: "
             f"path={path} readonly={1 if readonly else 0}"
@@ -901,27 +1037,39 @@ class PB1000System:
         
         if path is None:
             path0 = self._get_storage_path("ram0.bin")
-            path1 = self._get_storage_path("ram1.bin")
             reg_path = self._get_storage_path("regs.json")
         else:
             path0 = f"{path}/ram0.bin"
-            path1 = f"{path}/ram1.bin"
             reg_path = f"{path}/regs.json"
 
-        # Ensure directory for saving exists if it's on SD
-        if path0.startswith("/sd/"):
-            self._ensure_dir("/sd")
+        # Ensure the target directory exists (handles profile subdirs like /sd/rams/work/)
+        dir_path = path0.rsplit("/", 1)[0]
+        if dir_path.startswith("/sd"):
+            self._ensure_dir(dir_path)
 
         try:
             with open(path0, "wb") as f:
                 buf = self.ram._view if isinstance(self.ram, RAMView) else self.ram
                 f.write(buf)
-            if self.has_exp:
-                with open(path1, "wb") as f:
-                    buf = self.exp_ram._view if isinstance(self.exp_ram, RAMView) else self.exp_ram
-                    f.write(buf)
+            print(f"RAM0 saved: {path0} ({len(buf)} bytes)")
         except Exception as e:
-            print(f"Error saving RAM: {e}")
+            print(f"Error saving RAM0: {e}")
+
+        for slot in range(1, 4):
+            if not self.has_bank[slot]:
+                continue
+            rp = (self._get_storage_path(f"ram{slot}.bin") if path is None else f"{path}/ram{slot}.bin")
+            try:
+                sbuf = self._bank_ram[slot]
+                data = sbuf._view if isinstance(sbuf, RAMView) else sbuf
+                if len(data) == 0:
+                    print(f"RAM{slot} skipped: buffer empty")
+                    continue
+                with open(rp, "wb") as f:
+                    f.write(data)
+                print(f"RAM{slot} saved: {rp} ({len(data)} bytes)")
+            except Exception as e:
+                print(f"Error saving RAM{slot}: {e}")
 
         try:
             regs = {
@@ -945,18 +1093,35 @@ class PB1000System:
         """Compatibility alias for save_state."""
         self.save_state()
 
+    def register_call_hook(self, address, fn):
+        """Register a callable for the given CAL destination address.
+        fn may be a Python function or a native C MicroPython function.
+        Only CAL instructions targeting this address will invoke fn;
+        JP/JR to the same address will not fire.
+        """
+        if not hasattr(self, "_call_hook_refs"):
+            self._call_hook_refs = {}
+        self._call_hook_refs[address] = fn  # Python-side GC anchor
+        if hasattr(cpu_core, "set_call_hook"):
+            cpu_core.set_call_hook(address, fn)
+
+    def unregister_call_hook(self, address):
+        """Unregister the hook for the given CAL destination address."""
+        if hasattr(self, "_call_hook_refs"):
+            self._call_hook_refs.pop(address, None)
+        if hasattr(cpu_core, "clear_call_hook"):
+            cpu_core.clear_call_hook(address)
+
     def load_state(self, path=None):
         import json
         if path is None:
             path0 = self._get_storage_path("ram0.bin")
-            path1 = self._get_storage_path("ram1.bin")
             reg_path = self._get_storage_path("regs.json")
         else:
             path0 = f"{path}/ram0.bin"
-            path1 = f"{path}/ram1.bin"
             reg_path = f"{path}/regs.json"
 
-        print(f"Loading state: RAM={path0}, EXP={path1}, REGS={reg_path}")
+        print(f"Loading state: RAM={path0}, REGS={reg_path}")
         import gc
         gc.collect()
 
@@ -965,6 +1130,7 @@ class PB1000System:
                  print(f"RAM file not found: {file_path}")
                  return False
             try:
+                gc.collect()
                 with open(file_path, "rb") as f:
                     if hasattr(cpu_core, "load_ram"):
                         data = f.read()
@@ -987,8 +1153,10 @@ class PB1000System:
                 return False
 
         _load_to_ram(path0, self.ram, 0)
-        if self.has_exp:
-            _load_to_ram(path1, self.exp_ram, 1)
+        for slot in range(1, 4):
+            if self.has_bank[slot]:
+                rp = (self._get_storage_path(f"ram{slot}.bin") if path is None else f"{path}/ram{slot}.bin")
+                _load_to_ram(rp, self._bank_ram[slot], slot)
 
         try:
             if self._file_exists(reg_path):

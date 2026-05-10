@@ -65,7 +65,7 @@ static uint8_t mem_readbyte(hd61700_state_t *cpu, uint8_t segment,
   uint8_t bank = (segment >> 4) & 0x03;
   offset &= 0xFFFF;
 
-  if (offset >= 0x0C00 && offset <= 0x0C07) {
+  if (offset >= 0x0C00 && offset <= 0x0CFF) {
     if (cpu->io_read) return cpu->io_read(cpu->cb_ctx, bank, offset);
   }
 
@@ -74,8 +74,7 @@ static uint8_t mem_readbyte(hd61700_state_t *cpu, uint8_t segment,
   } else if (offset >= 0x6000 && offset < 0x8000) {
     if (cpu->ram_ptr) return cpu->ram_ptr[offset - 0x6000];
   } else if (offset >= 0x8000) {
-    if (bank == 0 && cpu->rom1_ptr) return cpu->rom1_ptr[offset - 0x8000];
-    if (bank == 1 && cpu->exp_ram_ptr) return cpu->exp_ram_ptr[offset - 0x8000];
+    if (bank < 4 && cpu->bank_ptr[bank]) return cpu->bank_ptr[bank][offset - 0x8000];
   }
 
   if (cpu->mem_read)
@@ -88,7 +87,7 @@ static void mem_writebyte(hd61700_state_t *cpu, uint8_t segment,
   uint8_t bank = (segment >> 4) & 0x03;
   offset &= 0xFFFF;
 
-  if (offset >= 0x0C00 && offset <= 0x0C07) {
+  if (offset >= 0x0C00 && offset <= 0x0CFF) {
     if (cpu->io_write) {
       cpu->io_write(cpu->cb_ctx, bank, offset, data);
       return;
@@ -100,9 +99,9 @@ static void mem_writebyte(hd61700_state_t *cpu, uint8_t segment,
       cpu->ram_ptr[offset - 0x6000] = data;
       return;
     }
-  } else if (offset >= 0x8000 && bank == 1) {
-    if (cpu->exp_ram_ptr) {
-      cpu->exp_ram_ptr[offset - 0x8000] = data;
+  } else if (offset >= 0x8000) {
+    if (bank < 4 && cpu->bank_is_ram[bank] && cpu->bank_ptr[bank]) {
+      cpu->bank_ptr[bank][offset - 0x8000] = data;
       return;
     }
   }
@@ -116,7 +115,7 @@ static uint8_t mem_readbyte_iz(hd61700_state_t *cpu, uint8_t segment,
   uint8_t bank = (segment >> 6) & 0x03;
   offset &= 0xFFFF;
 
-  if (offset >= 0x0C00 && offset <= 0x0C07) {
+  if (offset >= 0x0C00 && offset <= 0x0CFF) {
     if (cpu->io_read) return cpu->io_read(cpu->cb_ctx, bank, offset);
   }
 
@@ -125,8 +124,7 @@ static uint8_t mem_readbyte_iz(hd61700_state_t *cpu, uint8_t segment,
   } else if (offset >= 0x6000 && offset < 0x8000) {
     if (cpu->ram_ptr) return cpu->ram_ptr[offset - 0x6000];
   } else if (offset >= 0x8000) {
-    if (bank == 0 && cpu->rom1_ptr) return cpu->rom1_ptr[offset - 0x8000];
-    if (bank == 1 && cpu->exp_ram_ptr) return cpu->exp_ram_ptr[offset - 0x8000];
+    if (bank < 4 && cpu->bank_ptr[bank]) return cpu->bank_ptr[bank][offset - 0x8000];
   }
 
   if (cpu->mem_read)
@@ -139,7 +137,7 @@ static void mem_writebyte_iz(hd61700_state_t *cpu, uint8_t segment,
   uint8_t bank = (segment >> 6) & 0x03;
   offset &= 0xFFFF;
 
-  if (offset >= 0x0C00 && offset <= 0x0C07) {
+  if (offset >= 0x0C00 && offset <= 0x0CFF) {
     if (cpu->io_write) {
       cpu->io_write(cpu->cb_ctx, bank, offset, data);
       return;
@@ -151,9 +149,9 @@ static void mem_writebyte_iz(hd61700_state_t *cpu, uint8_t segment,
       cpu->ram_ptr[offset - 0x6000] = data;
       return;
     }
-  } else if (offset >= 0x8000 && bank == 1) {
-    if (cpu->exp_ram_ptr) {
-      cpu->exp_ram_ptr[offset - 0x8000] = data;
+  } else if (offset >= 0x8000) {
+    if (bank < 4 && cpu->bank_is_ram[bank] && cpu->bank_ptr[bank]) {
+      cpu->bank_ptr[bank][offset - 0x8000] = data;
       return;
     }
   }
@@ -167,7 +165,7 @@ static uint8_t mem_readbyte_stack(hd61700_state_t *cpu, uint8_t segment,
   uint8_t bank = (segment >> 2) & 0x03;
   offset &= 0xFFFF;
 
-  if (offset >= 0x0C00 && offset <= 0x0C07) {
+  if (offset >= 0x0C00 && offset <= 0x0CFF) {
     if (cpu->io_read) return cpu->io_read(cpu->cb_ctx, bank, offset);
   }
 
@@ -176,8 +174,7 @@ static uint8_t mem_readbyte_stack(hd61700_state_t *cpu, uint8_t segment,
   } else if (offset >= 0x6000 && offset < 0x8000) {
     if (cpu->ram_ptr) return cpu->ram_ptr[offset - 0x6000];
   } else if (offset >= 0x8000) {
-    if (bank == 0 && cpu->rom1_ptr) return cpu->rom1_ptr[offset - 0x8000];
-    if (bank == 1 && cpu->exp_ram_ptr) return cpu->exp_ram_ptr[offset - 0x8000];
+    if (bank < 4 && cpu->bank_ptr[bank]) return cpu->bank_ptr[bank][offset - 0x8000];
   }
 
   if (cpu->mem_read)
@@ -190,7 +187,7 @@ static void mem_writebyte_stack(hd61700_state_t *cpu, uint8_t segment,
   uint8_t bank = (segment >> 2) & 0x03;
   offset &= 0xFFFF;
 
-  if (offset >= 0x0C00 && offset <= 0x0C07) {
+  if (offset >= 0x0C00 && offset <= 0x0CFF) {
     if (cpu->io_write) {
       cpu->io_write(cpu->cb_ctx, bank, offset, data);
       return;
@@ -202,9 +199,9 @@ static void mem_writebyte_stack(hd61700_state_t *cpu, uint8_t segment,
       cpu->ram_ptr[offset - 0x6000] = data;
       return;
     }
-  } else if (offset >= 0x8000 && bank == 1) {
-    if (cpu->exp_ram_ptr) {
-      cpu->exp_ram_ptr[offset - 0x8000] = data;
+  } else if (offset >= 0x8000) {
+    if (bank < 4 && cpu->bank_is_ram[bank] && cpu->bank_ptr[bank]) {
+      cpu->bank_ptr[bank][offset - 0x8000] = data;
       return;
     }
   }
@@ -223,8 +220,7 @@ static uint8_t prog_readbyte(hd61700_state_t *cpu, uint8_t segment,
   } else if (offset >= 0x6000 && offset < 0x8000) {
     if (cpu->ram_ptr) return cpu->ram_ptr[offset - 0x6000];
   } else if (offset >= 0x8000) {
-    if (bank == 0 && cpu->rom1_ptr) return cpu->rom1_ptr[offset - 0x8000];
-    if (bank == 1 && cpu->exp_ram_ptr) return cpu->exp_ram_ptr[offset - 0x8000];
+    if (bank < 4 && cpu->bank_ptr[bank]) return cpu->bank_ptr[bank][offset - 0x8000];
   }
 
   if (cpu->mem_read)
@@ -1476,11 +1472,17 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
       case 0x77: { /* CAL IM16 */
         uint16_t addr = read_imm16_aligned(cpu);
         if (check_cond(cpu, op)) {
-          uint16_t ret = (uint16_t)(cpu->pc - 1);
-          push(cpu, &REG_SS, (uint8_t)(ret >> 8));
-          push(cpu, &REG_SS, (uint8_t)ret);
-          set_pc(cpu, addr);
-          cpu->icount -= 12;
+          /* CAL hook: if registered, intercept and skip normal push/set_pc.
+           * PC already points to the next instruction after operands. */
+          if (cpu->call_hook && cpu->call_hook(cpu->cb_ctx, addr)) {
+            cpu->icount -= 12;
+          } else {
+            uint16_t ret = (uint16_t)(cpu->pc - 1);
+            push(cpu, &REG_SS, (uint8_t)(ret >> 8));
+            push(cpu, &REG_SS, (uint8_t)ret);
+            set_pc(cpu, addr);
+            cpu->icount -= 12;
+          }
         }
         cpu->icount -= 3;
       } break;

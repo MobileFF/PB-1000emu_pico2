@@ -69,6 +69,14 @@ static void write_vram_pixel_byte(lcd_state_t *lcd, int chip, int x_local,
     lcd->vram[off] = data;
     lcd->dirty = true;
     lcd->dirty_pages[y_page] = true;
+    /* Stamp per-pixel color: ON bits → current fg, OFF bits → current bg */
+    uint8_t fg = lcd->current_fg_rgb332;
+    uint8_t bg = lcd->current_bg_rgb332;
+    int row_base = y_page * 8 * LCD_WIDTH + x;
+    for (int bit = 0; bit < 8; bit++) {
+      lcd->color_vram[row_base + bit * LCD_WIDTH] =
+          (data & (1 << bit)) ? fg : bg;
+    }
   }
 }
 
@@ -207,6 +215,15 @@ void lcd_init(lcd_state_t *lcd) {
   lcd->cmd_expected = 0;
   lcd->charset_loaded = false;
   lcd->debug = false;
+  /* current_fg_rgb332: initial fg = black (LCD_COLOR_ON = 0x0000) → RGB332 0x00 */
+  lcd->current_fg_rgb332 = 0x00;
+  /* current_bg_rgb332: initial bg = LCD_COLOR_OFF = 0xB5E6 → RGB332 */
+  {
+    uint8_t r = (LCD_COLOR_OFF >> 13) & 0x07;
+    uint8_t g = (LCD_COLOR_OFF >>  8) & 0x07;
+    uint8_t b = (LCD_COLOR_OFF >>  3) & 0x03;
+    lcd->current_bg_rgb332 = (uint8_t)((r << 5) | (g << 2) | b);
+  }
 
   /* Initialize chip states */
   for (int i = 0; i < 2; i++) {
@@ -215,12 +232,26 @@ void lcd_init(lcd_state_t *lcd) {
     lcd->chip_state[i].mode = LCDC_CMD_DRAW_BITIMAGE;
   }
 
+  /* Initialize RGB332→RGB565 lookup table */
+  for (int i = 0; i < 256; i++) {
+    uint8_t r = (i >> 5) & 0x07;
+    uint8_t g = (i >> 2) & 0x07;
+    uint8_t b = i & 0x03;
+    lcd->rgb332_to_565_table[i] =
+        ((uint16_t)(r * 31 / 7) << 11) |
+        ((uint16_t)(g * 63 / 7) <<  5) |
+         (uint16_t)(b * 31 / 3);
+  }
+  /* color_vram: all pixels start as OFF → fill with initial bg color */
+  memset(lcd->color_vram, lcd->current_bg_rgb332, LCD_COLOR_VRAM_SIZE);
+
   /* Clear VRAM */
   lcd_clear(lcd);
 }
 
 void lcd_clear(lcd_state_t *lcd) {
   memset(lcd->vram, 0, LCD_VRAM_SIZE);
+  memset(lcd->color_vram, lcd->current_bg_rgb332, LCD_COLOR_VRAM_SIZE);
   lcd->dirty = true;
   for (int i = 0; i < LCD_PAGES; i++) {
     lcd->dirty_pages[i] = true;
@@ -329,7 +360,37 @@ void lcd_load_charset(lcd_state_t *lcd, const uint8_t *data, int len) {
 void lcd_set_bg_colors(lcd_state_t *lcd, uint16_t on_bg, uint16_t off_bg) {
   lcd->color_off = on_bg;
   lcd->color_lcd_off = off_bg;
+  uint8_t r = (on_bg >> 13) & 0x07;
+  uint8_t g = (on_bg >>  8) & 0x07;
+  uint8_t b = (on_bg >>  3) & 0x03;
+  lcd->current_bg_rgb332 = (uint8_t)((r << 5) | (g << 2) | b);
+  /* Refresh color_vram: ON pixels keep current fg, OFF pixels get new bg */
+  uint8_t fg = lcd->current_fg_rgb332;
+  uint8_t bg = lcd->current_bg_rgb332;
+  for (int page = 0; page < LCD_PAGES; page++) {
+    for (int col = 0; col < LCD_WIDTH; col++) {
+      uint8_t vbyte = lcd->vram[page * LCD_WIDTH + col];
+      for (int bit = 0; bit < 8; bit++) {
+        lcd->color_vram[(page * 8 + bit) * LCD_WIDTH + col] =
+            (vbyte & (1 << bit)) ? fg : bg;
+      }
+    }
+  }
   mark_all_dirty(lcd);
+}
+
+void lcd_set_colors(lcd_state_t *lcd, uint16_t fg, uint16_t bg) {
+  lcd->color_on  = fg;
+  lcd->color_off = bg;
+  /* Convert RGB565 → RGB332 for per-pixel stamping */
+  lcd->current_fg_rgb332 = (uint8_t)(((fg >> 13) & 0x07) << 5 |
+                                      ((fg >>  8) & 0x07) << 2 |
+                                      ((fg >>  3) & 0x03));
+  lcd->current_bg_rgb332 = (uint8_t)(((bg >> 13) & 0x07) << 5 |
+                                      ((bg >>  8) & 0x07) << 2 |
+                                      ((bg >>  3) & 0x03));
+  /* No mark_all_dirty: only pages dirtied by subsequent LCD writes
+     are re-rendered with the new colors. */
 }
 
 /* ======== SPI Display Rendering ======== */
@@ -450,14 +511,8 @@ void lcd_render_to_display(lcd_state_t *lcd) {
   spi_set_format((spi_inst_t *)lcd->spi_inst, 8, SPI_CPOL_0, SPI_CPHA_0, SPI_MSB_FIRST);
 #endif
 
-  /* Safety guard: restore colors if they've been corrupted in RAM */
-  if (lcd->color_off == 0xFFFF || lcd->color_off == 0x0000) {
-    lcd->color_off = 0xB5E6; /* Olive green */
-  }
-  if (lcd->color_on == 0xFFFF) {
-    lcd->color_on = 0x0000; /* Black */
-  }
-  if (lcd->color_lcd_off == 0xFFFF) {
+  /* Safety guard: restore LCD-off color if corrupted */
+  if (lcd->color_lcd_off == 0xFFFF || lcd->color_lcd_off == 0x0000) {
     lcd->color_lcd_off = 0x8410; /* Gray */
   }
 
@@ -490,11 +545,7 @@ void lcd_render_to_display(lcd_state_t *lcd) {
   uint16_t out_h = frac_scale ? (uint16_t)((LCD_HEIGHT * scale_num) / scale_den)
                                : (uint16_t)(LCD_HEIGHT * s);
 
-  /* Pre-split colors for 8-bit Big-Endian DMA */
-  uint8_t on_h = (uint8_t)(lcd->color_on >> 8);
-  uint8_t on_l = (uint8_t)(lcd->color_on & 0xFF);
-  uint8_t off_h = (uint8_t)(lcd->color_off >> 8);
-  uint8_t off_l = (uint8_t)(lcd->color_off & 0xFF);
+  /* Pre-split LCD-off color for 8-bit Big-Endian DMA */
   uint8_t lcd_off_h = (uint8_t)(lcd->color_lcd_off >> 8);
   uint8_t lcd_off_l = (uint8_t)(lcd->color_lcd_off & 0xFF);
 
@@ -533,29 +584,25 @@ void lcd_render_to_display(lcd_state_t *lcd) {
     uint32_t step_fp = (uint32_t)(((uint32_t)scale_den << 16) / scale_num);
     for (int dy = dy_start; dy <= dy_end; dy++) {
       uint16_t sy = (uint16_t)((dy * scale_den) / scale_num);
-      uint8_t bit = (uint8_t)(sy & 0x07);
-      int base = (sy >> 3) * LCD_WIDTH;
       uint32_t sx_fp = 0;
       for (int dx = 0; dx < out_w; dx++) {
         uint16_t sx = (uint16_t)(sx_fp >> 16);
         if (sx >= LCD_WIDTH) sx = LCD_WIDTH - 1;
-        bool pixel = (lcd->vram[base + sx] & (1 << bit)) != 0;
-        dma_buffer[buf_idx++] = pixel ? on_h : off_h;
-        dma_buffer[buf_idx++] = pixel ? on_l : off_l;
+        uint16_t c = lcd->rgb332_to_565_table[lcd->color_vram[(int)sy * LCD_WIDTH + sx]];
+        dma_buffer[buf_idx++] = (uint8_t)(c >> 8);
+        dma_buffer[buf_idx++] = (uint8_t)(c & 0xFF);
         sx_fp += step_fp;
       }
     }
   } else {
     for (int sy = first_page * 8; sy <= (last_page * 8 + 7); sy++) {
-      int base = (sy >> 3) * LCD_WIDTH;
-      uint8_t bit = (uint8_t)(sy & 0x07);
       for (int col = 0; col < LCD_WIDTH; col++) {
-        bool pixel = (lcd->vram[base + col] & (1 << bit)) != 0;
-        uint8_t h = pixel ? on_h : off_h;
-        uint8_t l = pixel ? on_l : off_l;
+        uint16_t c = lcd->rgb332_to_565_table[lcd->color_vram[sy * LCD_WIDTH + col]];
+        uint8_t h = (uint8_t)(c >> 8);
+        uint8_t l = (uint8_t)(c & 0xFF);
         for (int v = 0; v < s; v++) {
-            dma_buffer[buf_idx++] = h;
-            dma_buffer[buf_idx++] = l;
+          dma_buffer[buf_idx++] = h;
+          dma_buffer[buf_idx++] = l;
         }
       }
       if (s > 1) {

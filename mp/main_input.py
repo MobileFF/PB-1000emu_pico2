@@ -14,7 +14,7 @@ class KeyboardInputManager:
         *,
         uart_kbd=None,
         enable_uart_kbd=False,
-        auto_exe_on_enter=False,
+        uart_enter_always_exe=True,
         key_hold_ms=120,
         key_release_hard_timeout_ms=1200,
         inter_key_gap_ms=80,
@@ -22,7 +22,7 @@ class KeyboardInputManager:
     ):
         self._uart_kbd = uart_kbd
         self._enable_uart_kbd = enable_uart_kbd
-        self._auto_exe_on_enter = auto_exe_on_enter
+        self._uart_enter_always_exe = uart_enter_always_exe
         self._key_hold_ms = key_hold_ms
         self._key_release_hard_timeout_ms = key_release_hard_timeout_ms
         self._inter_key_gap_ms = inter_key_gap_ms
@@ -43,6 +43,7 @@ class KeyboardInputManager:
         self._release_hard_at_ms = 0
         self._next_press_at_ms = 0
         self._typed_since_enter = False
+        self._last_was_cr = False
         self._on_int_active = False
         self._on_int_release_at_ms = 0
         self._input_blocked_log_at_ms = 0
@@ -99,10 +100,15 @@ class KeyboardInputManager:
                 print("\n[UART] Break received")
                 char = "^"
             if char in ("\r", "\n"):
-                if self._auto_exe_on_enter and self._typed_since_enter:
+                if char == "\n" and self._last_was_cr:
+                    self._last_was_cr = False
+                    continue
+                self._last_was_cr = (char == "\r")
+                if self._uart_enter_always_exe or self._typed_since_enter:
                     self._key_queue.append((KEY_EXE, "EXE"))
                     self._typed_since_enter = False
                 continue
+            self._last_was_cr = False
             key, label = self._map_input_char(char)
             if key is not None:
                 if getattr(system, "is_sleeping", False) and label != "BRK":
@@ -278,3 +284,106 @@ class TouchInputManager:
         if self._active_touch_key is not None:
             system.release_key(self._active_touch_key)
             self._active_touch_key = None
+
+
+def _parse_joystick_key(value):
+    """
+    Resolve a config string to a PB-1000 key coordinate.
+    Accepts: named constant without prefix ("exe", "up", "ans", "shift", ...),
+             single-char KEY_MAP label ("a"-"z", "0"-"9"),
+             or raw "row,col" (e.g. "10,4").
+    Returns a (row, ki_col) tuple, or None if unresolvable.
+    """
+    if not value:
+        return None
+    v = value.strip().lower()
+    if "," in v:
+        parts = v.split(",", 1)
+        try:
+            return (int(parts[0].strip()), int(parts[1].strip()))
+        except ValueError:
+            return None
+    import keymap as _km
+    if v in _km.KEY_MAP:
+        return _km.KEY_MAP[v]
+    coord = getattr(_km, "KEY_" + v.upper(), None)
+    if coord is not None:
+        return coord
+    return None
+
+
+class JoystickInputManager:
+    DEFAULT_PIN_MAP = {
+        "up":    18,
+        "down":  19,
+        "left":  20,
+        "right": 21,
+        "fire1": 26,
+        "fire2": 27,
+    }
+
+    DEFAULT_KEY_MAP = {
+        "up":    (5,  9),   # KEY_UP
+        "down":  (4,  9),   # KEY_DOWN
+        "left":  (5, 10),   # KEY_LEFT
+        "right": (3,  9),   # KEY_RIGHT
+        "fire1": (10, 4),   # KEY_EXE
+        "fire2": (11, 2),   # KEY_SHIFT
+    }
+
+    def __init__(
+        self,
+        *,
+        pin_map=None,
+        key_map=None,
+        debounce_ms=20,
+        poll_interval_ms=10,
+        enable_fire2=True,
+    ):
+        from machine import Pin
+
+        pin_map = pin_map if pin_map is not None else self.DEFAULT_PIN_MAP
+        self._key_map = key_map if key_map is not None else dict(self.DEFAULT_KEY_MAP)
+        self._debounce_ms = debounce_ms
+        self._poll_interval_ms = poll_interval_ms
+
+        buttons = list(pin_map.keys())
+        if not enable_fire2 and "fire2" in buttons:
+            buttons.remove("fire2")
+
+        self._pins = {
+            btn: Pin(pin_map[btn], Pin.IN, Pin.PULL_UP)
+            for btn in buttons
+        }
+        self._raw_state = {btn: 1 for btn in buttons}
+        self._confirmed_state = {btn: False for btn in buttons}
+        self._debounce_deadline = {btn: 0 for btn in buttons}
+        self._next_poll_at = 0
+
+    def poll(self, system):
+        now = time.ticks_ms()
+        if time.ticks_diff(now, self._next_poll_at) < 0:
+            return
+        self._next_poll_at = time.ticks_add(now, self._poll_interval_ms)
+
+        for btn, pin in self._pins.items():
+            raw = pin.value()
+            if raw != self._raw_state[btn]:
+                self._raw_state[btn] = raw
+                self._debounce_deadline[btn] = time.ticks_add(now, self._debounce_ms)
+
+            if time.ticks_diff(now, self._debounce_deadline[btn]) < 0:
+                continue
+
+            new_on = (self._raw_state[btn] == 0)
+            if new_on == self._confirmed_state[btn]:
+                continue
+
+            self._confirmed_state[btn] = new_on
+            key = self._key_map.get(btn)
+            if key is None:
+                continue
+            if new_on:
+                system.press_key(key)
+            else:
+                system.release_key(key)

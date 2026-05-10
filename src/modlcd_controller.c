@@ -5,6 +5,7 @@
 #include "lcd_controller.h"
 #include "py/binary.h"
 #include "py/obj.h"
+#include "py/objarray.h"
 #include "py/runtime.h"
 
 #ifdef __arm__
@@ -94,6 +95,15 @@ static mp_obj_t mod_lcd_clear_dirty(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(mod_lcd_clear_dirty_obj, mod_lcd_clear_dirty);
 
+/* lcd_c.mark_dirty() — mark all pages dirty so next render repaints the display */
+static mp_obj_t mod_lcd_mark_dirty(void) {
+  lcd_state.dirty = true;
+  for (int i = 0; i < LCD_PAGES; i++)
+    lcd_state.dirty_pages[i] = true;
+  return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(mod_lcd_mark_dirty_obj, mod_lcd_mark_dirty);
+
 /* lcd_c.is_display_on() -> bool */
 static mp_obj_t mod_lcd_is_display_on(void) {
   return mp_obj_new_bool(lcd_state.display_on);
@@ -144,6 +154,17 @@ static mp_obj_t mod_lcd_set_bg_colors(mp_obj_t on_bg_obj, mp_obj_t off_bg_obj) {
 static MP_DEFINE_CONST_FUN_OBJ_2(mod_lcd_set_bg_colors_obj,
                                  mod_lcd_set_bg_colors);
 
+/* lcd_c.set_colors(fg, bg) — set ON-pixel color (fg) and OFF-pixel color (bg).
+   Does not force a full repaint; only pages dirtied by subsequent LCD writes
+   are re-rendered with the new colors. */
+static mp_obj_t mod_lcd_set_colors(mp_obj_t fg_obj, mp_obj_t bg_obj) {
+  uint16_t fg = (uint16_t)mp_obj_get_int(fg_obj);
+  uint16_t bg = (uint16_t)mp_obj_get_int(bg_obj);
+  lcd_set_colors(&lcd_state, fg, bg);
+  return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(mod_lcd_set_colors_obj, mod_lcd_set_colors);
+
 /* lcd_c.set_scale(num, den=1) */
 static mp_obj_t mod_lcd_set_scale(size_t n_args, const mp_obj_t *args) {
   uint8_t num = (uint8_t)mp_obj_get_int(args[0]);
@@ -182,6 +203,12 @@ static mp_obj_t mod_lcd_render(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(mod_lcd_render_obj, mod_lcd_render);
 
+/* lcd_c.get_color_vram() -> bytearray (direct reference to C static array) */
+static mp_obj_t mod_lcd_get_color_vram(void) {
+  return mp_obj_new_bytearray_by_ref(LCD_COLOR_VRAM_SIZE, lcd_state.color_vram);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(mod_lcd_get_color_vram_obj, mod_lcd_get_color_vram);
+
 /* lcd_c.wait_for_idle() */
 static mp_obj_t mod_lcd_wait_for_idle(void) {
 #ifdef __arm__
@@ -205,6 +232,7 @@ static const mp_rom_map_elem_t lcd_c_module_globals_table[] = {
      MP_ROM_PTR(&mod_lcd_get_vram_byte_obj)},
     {MP_ROM_QSTR(MP_QSTR_is_dirty), MP_ROM_PTR(&mod_lcd_is_dirty_obj)},
     {MP_ROM_QSTR(MP_QSTR_clear_dirty), MP_ROM_PTR(&mod_lcd_clear_dirty_obj)},
+    {MP_ROM_QSTR(MP_QSTR_mark_dirty), MP_ROM_PTR(&mod_lcd_mark_dirty_obj)},
     {MP_ROM_QSTR(MP_QSTR_is_display_on),
      MP_ROM_PTR(&mod_lcd_is_display_on_obj)},
     {MP_ROM_QSTR(MP_QSTR_set_x_mirror), MP_ROM_PTR(&mod_lcd_set_x_mirror_obj)},
@@ -214,15 +242,19 @@ static const mp_rom_map_elem_t lcd_c_module_globals_table[] = {
     {MP_ROM_QSTR(MP_QSTR_set_debug), MP_ROM_PTR(&mod_lcd_set_debug_obj)},
     {MP_ROM_QSTR(MP_QSTR_set_bg_colors),
      MP_ROM_PTR(&mod_lcd_set_bg_colors_obj)},
+    {MP_ROM_QSTR(MP_QSTR_set_colors),
+     MP_ROM_PTR(&mod_lcd_set_colors_obj)},
     {MP_ROM_QSTR(MP_QSTR_set_scale), MP_ROM_PTR(&mod_lcd_set_scale_obj)},
     {MP_ROM_QSTR(MP_QSTR_setup_display),
      MP_ROM_PTR(&mod_lcd_setup_display_obj)},
+    {MP_ROM_QSTR(MP_QSTR_get_color_vram), MP_ROM_PTR(&mod_lcd_get_color_vram_obj)},
     {MP_ROM_QSTR(MP_QSTR_render), MP_ROM_PTR(&mod_lcd_render_obj)},
     {MP_ROM_QSTR(MP_QSTR_wait_for_idle), MP_ROM_PTR(&mod_lcd_wait_for_idle_obj)},
     /* Constants */
     {MP_ROM_QSTR(MP_QSTR_WIDTH), MP_ROM_INT(LCD_WIDTH)},
     {MP_ROM_QSTR(MP_QSTR_HEIGHT), MP_ROM_INT(LCD_HEIGHT)},
     {MP_ROM_QSTR(MP_QSTR_VRAM_SIZE), MP_ROM_INT(LCD_VRAM_SIZE)},
+    {MP_ROM_QSTR(MP_QSTR_COLOR_VRAM_SIZE), MP_ROM_INT(LCD_COLOR_VRAM_SIZE)},
 };
 static MP_DEFINE_CONST_DICT(lcd_c_module_globals, lcd_c_module_globals_table);
 

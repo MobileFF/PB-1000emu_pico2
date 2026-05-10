@@ -147,6 +147,10 @@ typedef void (*hd61700_kb_write_cb)(void *ctx, uint8_t data);
 typedef uint8_t (*hd61700_port_read_cb)(void *ctx);
 typedef void (*hd61700_port_write_cb)(void *ctx, uint8_t data);
 typedef void (*hd61700_log_write_cb)(void *ctx, const char *msg);
+/* CAL hook: called when CAL targets a registered address.
+ * Returns true  = intercept (skip normal push/set_pc).
+ * Returns false = not registered (execute normal CAL). */
+typedef bool (*hd61700_call_hook_cb)(void *ctx, uint16_t address);
 
 /* CPU State */
 typedef struct {
@@ -195,11 +199,15 @@ typedef struct {
   hd61700_read_byte_cb io_read;
   hd61700_write_byte_cb io_write;
 
+  /* CAL hook: intercepts CAL instructions targeting registered addresses */
+  hd61700_call_hook_cb call_hook;
+
   /* Direct memory access pointers for C-side performance optimization */
   const uint8_t *rom0_ptr;
-  const uint8_t *rom1_ptr;
   uint8_t *ram_ptr;
-  uint8_t *exp_ram_ptr;
+  /* Banked 0x8000-0xFFFF region: bank_ptr[0]=ROM1, bank_ptr[1..3]=RAM1..3 */
+  uint8_t *bank_ptr[4];
+  bool bank_is_ram[4]; /* true = writable RAM; bank_ptr[0] is ROM (false) */
 
   // ステップ実行デバッグ用に追加
   uint8_t last_opcodes[8]; // HD61700の最大命令長に合わせて確保

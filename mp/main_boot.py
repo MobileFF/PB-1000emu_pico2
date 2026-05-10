@@ -1,6 +1,72 @@
 from pb1000 import PB1000System, init_display
 from pio_uart import PioUart
 
+_usb_host_initialized = False
+
+
+def init_usb_keyboard_early(*, enable_usb_kbd):
+    """Initialize USB host + C keyboard routing before system creation.
+    Called before select_profile_ui() so the selection UI accepts keyboard input.
+    """
+    global _usb_host_initialized
+    if not enable_usb_kbd:
+        return
+    try:
+        import usb_host
+        usb_host.init()
+        _usb_host_initialized = True
+        print("USB Host initialized (early).")
+    except Exception as e:
+        print(f"USB Host early init failed: {e}")
+        return
+    try:
+        import hd61700 as _cpu
+        if hasattr(_cpu, 'use_c_keyboard'):
+            _cpu.use_c_keyboard(True)
+    except Exception as e:
+        print(f"C keyboard early enable failed: {e}")
+    try:
+        import usb_host
+        if hasattr(usb_host, 'set_c_kb_routing'):
+            usb_host.set_c_kb_routing(True)
+        if hasattr(usb_host, 'start_bg_timer'):
+            usb_host.start_bg_timer(8)
+        print("USB keyboard routing enabled.")
+    except Exception as e:
+        print(f"USB keyboard routing failed: {e}")
+
+
+def init_display_only():
+    """Initialize display only, without creating PB1000System.
+    Returns the raw value from init_display() — (display, touch, ...) or display.
+    """
+    ret = init_display()
+    display = ret[0] if isinstance(ret, tuple) else ret
+    if hasattr(display, "lcd_sync"):
+        display.lcd_sync()
+    return ret
+
+
+def create_system(display_ret, profile_dir=None, config=None, *, console_uart=None):
+    """Create PB1000System with the given profile directory and merged config."""
+    display = display_ret[0] if isinstance(display_ret, tuple) else display_ret
+    touch = display_ret[1] if isinstance(display_ret, tuple) and len(display_ret) >= 2 else None
+
+    print("Initializing PB1000System...")
+    system = PB1000System(
+        display_ret,
+        debug={"sys": False, "lcd": False, "kb": False},
+        restore_registers=False,
+        profile_dir=profile_dir,
+        config=config,
+    )
+    print("PB1000System initialized.")
+    system.touch = touch
+    if console_uart is not None:
+        system.console_uart = console_uart
+    system.lcd.set_display_scale(1.5)
+    return system
+
 
 def create_console_uart(machine, *, enable_uart_kbd, baudrate, tx_pin, rx_pin):
     uart_kbd = None
@@ -59,9 +125,9 @@ def initialize_usb_host_and_pio(system, *, enable_usb_kbd):
         return
     try:
         import usb_host
-        usb_host.init()
-        print("USB Host initialized.")
-
+        if not _usb_host_initialized:
+            usb_host.init()
+            print("USB Host initialized.")
         try:
             pio_uart = PioUart(tx_pin=6, rx_pin=13, baudrate=4800, sm_tx=6, sm_rx=7)
             system.pio_uart = pio_uart

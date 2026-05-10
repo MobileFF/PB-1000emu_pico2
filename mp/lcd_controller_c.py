@@ -37,6 +37,7 @@ class LCDControllerC:
         self._hw_params = None  # (spi_id, cs, dc)
         self._current_cfg = (None, None, None)  # (x, y, scale)
         self._last_display_on = None
+        self._color_fg = 0x0000
         self._color_bg_on = 0xB5E6
         self._color_bg_off = 0x8410
         self._scale_num = 1
@@ -150,7 +151,7 @@ class LCDControllerC:
             for dx in range(out_w):
                 sx = (dx * self._scale_den) // self._scale_num
                 byte = vram[base + sx]
-                color = 0x0000 if (byte & (1 << bit)) else self._color_bg_on
+                color = self._color_fg if (byte & (1 << bit)) else self._color_bg_on
                 self.display.fill_rect(x_offset + dx, y_offset + dy, 1, 1, color)
         lcd_c.clear_dirty()
 
@@ -182,6 +183,14 @@ class LCDControllerC:
         self._color_bg_off = int(off_bg) & 0xFFFF
         if hasattr(lcd_c, "set_bg_colors"):
             lcd_c.set_bg_colors(self._color_bg_on, self._color_bg_off)
+
+    def set_colors(self, fg, bg):
+        """Set ON-pixel color (fg) and OFF-pixel background (bg) (RGB565).
+        Does not force a full-screen repaint."""
+        self._color_fg = int(fg) & 0xFFFF
+        self._color_bg_on = int(bg) & 0xFFFF
+        if hasattr(lcd_c, "set_colors"):
+            lcd_c.set_colors(self._color_fg, self._color_bg_on)
 
     def lcd_ctrl(self, data): lcd_c.ctrl(data)
     def lcd_write(self, data): lcd_c.write(data)
