@@ -1,5 +1,5 @@
 """
-PB-1000 Emulator - Normal Run Script
+PB-1000 Emulator - Normal Run ScriptCL
 """
 import machine
 import hd61700

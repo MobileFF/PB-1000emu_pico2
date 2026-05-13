@@ -66,16 +66,21 @@ static void write_vram_pixel_byte(lcd_state_t *lcd, int chip, int x_local,
   int x = x_local + (chip ? 96 : 0);
   int off = y_page * LCD_WIDTH + x;
   if (off >= 0 && off < LCD_VRAM_SIZE) {
+    uint8_t old = lcd->vram[off];
     lcd->vram[off] = data;
-    lcd->dirty = true;
-    lcd->dirty_pages[y_page] = true;
-    /* Stamp per-pixel color: ON bits → current fg, OFF bits → current bg */
-    uint8_t fg = lcd->current_fg_rgb332;
-    uint8_t bg = lcd->current_bg_rgb332;
-    int row_base = y_page * 8 * LCD_WIDTH + x;
-    for (int bit = 0; bit < 8; bit++) {
-      lcd->color_vram[row_base + bit * LCD_WIDTH] =
-          (data & (1 << bit)) ? fg : bg;
+    /* Update color_vram when:
+       - pixel data changed (new content), OR
+       - data is zero (CLS / blank write) so bg color is always current */
+    if (data != old || data == 0) {
+      lcd->dirty = true;
+      lcd->dirty_pages[y_page] = true;
+      uint8_t fg = lcd->current_fg_rgb332;
+      uint8_t bg = lcd->current_bg_rgb332;
+      int row_base = y_page * 8 * LCD_WIDTH + x;
+      for (int bit = 0; bit < 8; bit++) {
+        lcd->color_vram[row_base + bit * LCD_WIDTH] =
+            (data & (1 << bit)) ? fg : bg;
+      }
     }
   }
 }

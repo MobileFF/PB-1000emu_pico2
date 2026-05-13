@@ -629,7 +629,7 @@ class PB1000System:
     def _vdp_init(self):
         self._vdp_addr = 0
         self._vdp_fg   = 0x00   # 黒（デフォルト前景色）
-        self._vdp_bg   = 0xFF   # 白（デフォルト背景色）
+        self._vdp_bg   = 0xB4   # オリーブグリーン（LCD_COLOR_OFF=0xB5E6 のRGB332値）
         if hasattr(lcd_c, 'get_color_vram'):
             self._color_vram = lcd_c.get_color_vram()
         else:
@@ -664,9 +664,11 @@ class PB1000System:
             self._vdp_addr = (self._vdp_addr + 1) & 0x3FFF
         elif reg == 3:
             self._vdp_fg = data & 0xFF
+            print(f"[VDP] FG={data:02X} RGB565={self._rgb332_to_565(data):04X}")
             self._vdp_apply_colors()
         elif reg == 4:
             self._vdp_bg = data & 0xFF
+            print(f"[VDP] BG={data:02X} RGB565={self._rgb332_to_565(data):04X}")
             self._vdp_apply_colors()
 
     def _vdp_read(self, offset):
