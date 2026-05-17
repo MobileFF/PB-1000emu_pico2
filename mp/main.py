@@ -26,7 +26,7 @@ from main_runtime import (
     service_timer_ticks,
     update_frame_if_due,
 )
-from main_actions import handle_key_status_and_capture, handle_save_state_request
+from main_actions import handle_key_status_and_capture, handle_save_state_request, handle_disk_swap
 from main_cleanup import dump_shutdown_state
 
 
@@ -133,6 +133,11 @@ def main():
         del _rom_reserve
         gc.collect()
     load_default_roms(system)
+    gc.collect()
+    print("[MEM] after VFDD init: free=%d alloc=%d" %
+          (gc.mem_free(), gc.mem_alloc()))
+    print("[MEM] before load_state: free=%d alloc=%d" %
+          (gc.mem_free(), gc.mem_alloc()))
     system.load_state()  # Restore RAM + registers from profile dir (or default path)
     initialize_usb_host_and_pio(system, enable_usb_kbd=enable_usb_kbd)
     cpu_core = configure_c_keyboard(system, enable_usb_kbd=enable_usb_kbd)
@@ -182,6 +187,10 @@ def main():
             elif sc == 0x29:  # ESC
                 if time.ticks_diff(gui_active_until, now) > 0:
                     raise KeyboardInterrupt
+            elif sc == 0x3F:  # F6 → disk swap
+                if time.ticks_diff(gui_active_until, now) > 0:
+                    gui_active_until = 0
+                    handle_disk_swap(system, display)
             keyboard_input.poll(system)
             touch_input.poll(system)
             if joystick_input is not None:

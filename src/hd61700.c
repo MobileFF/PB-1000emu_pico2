@@ -565,6 +565,15 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
       check_irqs(cpu);
       uint16_t instr_pc = cpu->pc;
       cpu->last_op_len = 0; /* reset per instruction for reliable trace snapshots */
+      /* Execution trap: fire before fetch if PC == a registered hook address.
+       * Handles BASIC's CALL which uses push+JP (HD61700 has no indirect CAL). */
+      if (cpu->call_hook && cpu->call_hook(cpu->cb_ctx, instr_pc)) {
+        uint8_t lo = pop(cpu, &REG_SS);
+        uint8_t hi = pop(cpu, &REG_SS);
+        set_pc(cpu, (uint16_t)(((hi << 8) | lo) + 1));
+        cpu->icount -= 15;
+        continue;
+      }
       uint8_t op = read_op(cpu);
       if (cpu->debug_log && cpu->key_debug_log && instr_pc == 0x062C) {
         cpu_log(cpu,
@@ -800,7 +809,7 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
         case 1:
           WRITE_REG8(idx, src);
           if (cpu->port_write)
-            cpu->port_write(cpu->cb_ctx, REG_PD & REG_PE);
+            cpu->port_write(cpu->cb_ctx, REG_PD);
           break;
         case 2:
           REG_IB = (REG_IB & 0x1f) | (src & 0xe0);
@@ -1236,7 +1245,7 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
         case 1:
           WRITE_REG8(idx, src);
           if (cpu->port_write)
-            cpu->port_write(cpu->cb_ctx, REG_PD & REG_PE);
+            cpu->port_write(cpu->cb_ctx, REG_PD);
           break;
         case 2:
           REG_IB = (REG_IB & 0x1f) | (src & 0xe0);
@@ -2165,7 +2174,7 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
           case 1:
             WRITE_REG8(target_idx, data);
             if (target_idx == 1 && cpu->port_write)
-              cpu->port_write(cpu->cb_ctx, REG_PD & REG_PE);
+              cpu->port_write(cpu->cb_ctx, REG_PD);
             break;
           case 2:
             REG_IB = (REG_IB & 0x1f) | (data & 0xe0);

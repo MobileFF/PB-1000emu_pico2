@@ -327,8 +327,8 @@ class JoystickInputManager:
         "down":  (4,  9),   # KEY_DOWN
         "left":  (5, 10),   # KEY_LEFT
         "right": (3,  9),   # KEY_RIGHT
-        "fire1": (10, 4),   # KEY_EXE
-        "fire2": (11, 2),   # KEY_SHIFT
+        "fire1": (10, 1),   # KEY_EXE
+        "fire2": (10, 4),   # KEY_SHIFT
     }
 
     def __init__(
@@ -385,5 +385,7 @@ class JoystickInputManager:
                 continue
             if new_on:
                 system.press_key(key)
+                if hasattr(system, "set_status"):
+                    system.set_status(btn.upper())
             else:
                 system.release_key(key)

@@ -55,7 +55,7 @@ def create_system(display_ret, profile_dir=None, config=None, *, console_uart=No
     print("Initializing PB1000System...")
     system = PB1000System(
         display_ret,
-        debug={"sys": False, "lcd": False, "kb": False},
+        debug={"sys": False, "lcd": False, "kb": True},
         restore_registers=False,
         profile_dir=profile_dir,
         config=config,

@@ -1,6 +1,51 @@
 import time
 
 
+def handle_disk_swap(system, display):
+    """
+    GUI+F6 で呼ばれるディスク差し替えハンドラ。
+    CPU スライスはメインループが UI に入ることで自然に停止する。
+    """
+    try:
+        from disk_select_ui import list_disk_images, select_disk_ui
+    except ImportError as e:
+        print(f"[DiskSwap] disk_select_ui not available: {e}")
+        system.set_status("NO DISK UI", 2000)
+        return
+
+    images = list_disk_images(system)
+    current = (system.virtual_fdd_config or {}).get("path")
+
+    result = select_disk_ui(display, images, current)
+
+    if result is False:
+        # キャンセル — 何もしない
+        system.set_status("DISK:CANCEL", 1500)
+    elif result is None:
+        # イジェクト
+        system.swap_disk(None)
+        system.set_status("DISK EJECTED", 2000)
+    else:
+        # 新しいディスクをマウント
+        ok = system.swap_disk(result)
+        if ok:
+            name = result.split("/")[-1]
+            system.set_status(f"DISK:{name[:12]}", 2000)
+        else:
+            system.set_status("DISK ERR!", 3000)
+
+    # 元の LCD 表示に戻す
+    try:
+        # 1. 全画面を黒でクリア（ディスクUI の残像を消す）
+        display.fill_rect(0, 0, display.width, display.height, 0x0000)
+        # 2. PB-1000 LCD エリアを強制再描画
+        if hasattr(system.lcd, 'mark_dirty'):
+            system.lcd.mark_dirty()
+        system.update_display(x_offset=16, y_offset=40)
+    except Exception:
+        pass
+
+
 def handle_key_status_and_capture(system, sc=-1):
     try:
         import hd61700

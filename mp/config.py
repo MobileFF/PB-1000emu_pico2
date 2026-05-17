@@ -46,6 +46,12 @@ _DEFAULTS = {
         "key_fire1": "",
         "key_fire2": "",
     },
+    "beep": {
+        "enable":   "true",
+        "gpio_pin": "14",
+        "freq_hz":  "1000",
+        "duty":     "50",
+    },
 }
 
 

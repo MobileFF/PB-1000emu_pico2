@@ -43,23 +43,28 @@ KEY_MAP = {
     'tk13': (7, 9), 'tk14': (8, 9), 'tk15': (9, 9), 'tk16': (10, 9),
 }
 
-# Advanced Map (USB Scancode, Host Mod) -> List of (row, ki)
+# Advanced Map (USB Scancode, Host Mod) -> List of (KO,KI)
 # mod: bit0=Shift, bit1=Alt
 ADV_MAP = {
     (0xE2, 2): [KEY_SHIFT], # L_ALT -> SFT
     (0xE6, 2): [KEY_SHIFT], # R_ALT -> SFT
-    (0x1F, 1): [(2, 3)],    # Shift + 2 -> "
+    #(0x2A, 2): [KEY_INS],   # Alt + BS -> INS
+    (0x1E, 1): [KEY_SHIFT,( 2, 3)], # Shift + 1 -> !
+    (0x1F, 1): [(2, 3)],    		# Shift + 2 -> "
     (0x21, 1): [(2, 4)],            # Shift + 4 -> $
+    (0x22, 1): [KEY_SHIFT,( 2, 5)], # Shift + 5 -> SFT + 5 (%)
     (0x23, 1): [(2, 5)],            # Shift + 6 -> &
     (0x25, 1): [(7, 4)],            # Shift + 8 -> (
     (0x26, 1): [(6, 3)],            # Shift + 9 -> )
     (0x2D, 1): [(2, 6)],            # Shift + - -> =
     (0x33, 1): [(9, 3)],            # Shift + ; -> +
     (0x34, 1): [(8, 3)],            # Shift + : -> *
-    (0x20, 1): [KEY_SHIFT,( 2, 4)], # Shift + 3 -> #(SFT+$)
+    (0x20, 1): [KEY_SHIFT,( 2, 4)], # Shift + 3 -> SFT + $ (#)
     (0x24, 1): [KEY_SHIFT,( 2, 6)], # Shift + 7 -> SFT + = (')
     (0x32, 1): [KEY_SHIFT,( 7, 3)], # Shift + ] -> SFT + /
     (0x38, 1): [KEY_SHIFT,( 2, 1)], # Shift + / -> SFT + , (?)
+    (0x36, 1): [KEY_SHIFT,( 2, 7)], # Shift + , -> SFT + ; (<)
+    (0x37, 1): [KEY_SHIFT,( 2, 8)], # Shift + . -> SFT + : (>)
     
     # Unshifted symbols
     (0x37, 0): [(10, 6)],   # . (KO10, KI6)
@@ -83,6 +88,7 @@ USB_TO_CHAR = {
     0x22: '5', 0x23: '6', 0x24: '7', 0x25: '8',
     0x26: '9', 0x27: '0',
     0x2C: ' ',
+    0x38: '/',
 }
 
 # Special scancode mapping

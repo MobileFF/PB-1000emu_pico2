@@ -47,6 +47,7 @@ PD_RES = 0x08
 PD_PWR = 0x10
 PD_STR = 0x04
 PD_ACK = 0x10  # Port B bit 4
+PD_BEEP_MASK = 0xC0  # bit6 と bit7: BEEP 制御ビット
 VFDD_IO_READ_ADDR = 0x0C03
 VFDD_IO_WRITE_ADDR = 0x0C04
 ENABLE_VIRTUAL_FDD = True
@@ -195,11 +196,13 @@ def load_virtual_fdd_config(path):
 
 
 class PB1000System:
-    INT_ROM_LIMIT    = 0x2000   
+    INT_ROM_LIMIT    = 0x2000
     RAM_START        = 0x6000
     RAM_SIZE         = 0x2000   # 8KB
-    SYS_ROM_START    = 0x8000   
+    SYS_ROM_START    = 0x8000
     EXP_RAM_SIZE     = 0x8000   # 32KB Expanded RAM
+    EXT_WORK_BASE    = 0x5F00   # Extension API work area (256 B)
+    EXT_WORK_SIZE    = 0x100
     PROG_TRACE_START = 0xB5D6
     PROG_TRACE_END = 0xB7E6
     _KEY_TRACE_ADDRS = {
@@ -328,6 +331,8 @@ class PB1000System:
         self._fdd_active = False # SPI Bus Lock flag
         self._gpo_parity = 0   # Tracks gpo call parity for D92E P1/P0 protocol
         self._vdp_init()
+        self._beep_init()
+        self._ext_init()
 
         # Raw UART Pins for bit-level passthrough
         self._tx_pin = machine.Pin(6, machine.Pin.OUT, value=1)
@@ -420,6 +425,8 @@ class PB1000System:
                 return 0xFF
             elif offset >= self.RAM_START:
                 return self.ram[(offset - self.RAM_START) % len(self.ram)]
+            elif self.EXT_WORK_BASE <= offset < self.EXT_WORK_BASE + self.EXT_WORK_SIZE:
+                return self._ext_work[offset - self.EXT_WORK_BASE]
             else:
                 return 0xFF
 
@@ -467,6 +474,8 @@ class PB1000System:
                 self.console_uart.write(char)
             else:
                 print(char, end='')
+        elif self.EXT_WORK_BASE <= offset < self.EXT_WORK_BASE + self.EXT_WORK_SIZE:
+            self._ext_work[offset - self.EXT_WORK_BASE] = data & 0xFF
         elif offset >= 0x8000:
             bank = (segment >> 4) & 0x03
             if 1 <= bank <= 3 and self.has_bank[bank]:
@@ -518,11 +527,19 @@ class PB1000System:
     def _port_write(self, data):
         self.port_data = data
         self._handle_virtual_fdd_port_write(data)
-        
+
         # Bit 2 is TXD for RS-232C bit-banging OR PD_STR for FDD
         # Only write to physical pin if FDD interface is NOT powered
         if not (self.has_virtual_fdd() and self._virtual_fdd_interface_powered):
             self._tx_pin.value((data >> 2) & 1)
+
+        # BEEP 状態判定: bit6,7 が 0xC0 → ROM からの明示的終了通知
+        #                bit6,7 が 0x40 または 0x80 → 発音中
+        beep_bits = data & PD_BEEP_MASK
+        if beep_bits == PD_BEEP_MASK:
+            self._beep_set(False)
+        elif beep_bits == 0x40 or beep_bits == 0x80:
+            self._beep_set(True)
 
     def _read_io_register(self, offset):
         index = offset & 0x07
@@ -684,6 +701,80 @@ class PB1000System:
         if reg == 3:   return self._vdp_fg
         if reg == 4:   return self._vdp_bg
         return 0xFF
+
+    def _beep_init(self):
+        self._beep_on  = False
+        self._beep_pwm = None
+        cfg = (self._config or {}).get("beep", {})
+        enabled = cfg.get("enable", "true").lower() in ("1", "true", "yes", "on")
+        if not enabled:
+            print("BEEP: disabled by config")
+            return
+        try:
+            gpio_pin = int(cfg.get("gpio_pin", "2"))
+            freq_hz  = int(cfg.get("freq_hz",  "1000"))
+            duty_pct = int(cfg.get("duty",     "50"))
+        except (ValueError, TypeError):
+            gpio_pin, freq_hz, duty_pct = 2, 1000, 50
+        self._beep_duty = max(0, min(65535, duty_pct * 65535 // 100))
+        try:
+            self._beep_pwm = machine.PWM(machine.Pin(gpio_pin))
+            self._beep_pwm.freq(freq_hz)
+            self._beep_pwm.duty_u16(0)
+            print(f"BEEP: PWM on GP{gpio_pin} @ {freq_hz}Hz duty={duty_pct}%")
+        except Exception as e:
+            print(f"BEEP: init failed: {e}")
+            self._beep_pwm = None
+
+    def _beep_set(self, on):
+        if self._beep_on == on:
+            return
+        self._beep_on = on
+        if self._beep_pwm is None:
+            return
+        self._beep_pwm.duty_u16(self._beep_duty if on else 0)
+
+    # ------------------------------------------------------------------
+    # Extension API (EXT)
+    # ------------------------------------------------------------------
+
+    # Result codes written to _ext_work[0] by extension function handlers
+    EXT_OK          = 0x00
+    EXT_ERR_GENERAL = 0xFF
+
+    def _ext_init(self):
+        self._ext_work = bytearray(self.EXT_WORK_SIZE)
+        print(f"EXT: work area {self.EXT_WORK_BASE:#06x}-"
+              f"{self.EXT_WORK_BASE + self.EXT_WORK_SIZE - 1:#06x}")
+        self._ext_load_modules()
+
+    def _ext_load_modules(self):
+        """ext/ ディレクトリの拡張モジュールを自動ロードする。
+        検索順: /sd/ext/ → /ext/  (先に見つかった方を優先)
+        各モジュールは register(system) 関数を持つこと。
+        """
+        import os, sys
+        for ext_dir in ("/sd/ext", "/ext"):
+            try:
+                files = os.listdir(ext_dir)
+            except OSError:
+                continue
+            if ext_dir not in sys.path:
+                sys.path.insert(0, ext_dir)
+            for fname in sorted(files):
+                if not fname.endswith(".py") or fname.startswith("_"):
+                    continue
+                mod_name = fname[:-3]
+                try:
+                    mod = __import__(mod_name)
+                    if hasattr(mod, "register"):
+                        mod.register(self)
+                        print(f"EXT: loaded {mod_name} from {ext_dir}")
+                    else:
+                        print(f"EXT: {mod_name} has no register(), skipped")
+                except Exception as e:
+                    print(f"EXT: {mod_name} load error: {e}")
+            break  # 最初に見つかったディレクトリのみ使用
 
     def _log_vfdd(self, msg):
         print(f"[VFDD] {msg}") # Enabled for current debugging phase
@@ -970,6 +1061,19 @@ class PB1000System:
         self.virtual_fdd = None
         self.virtual_fdd_config = {"enabled": False}
 
+    def swap_disk(self, new_path):
+        """実行中にディスクイメージを差し替える。new_path=None でイジェクト。"""
+        if self.has_virtual_fdd():
+            self.disable_virtual_fdd()
+        if new_path is None:
+            print("[VFDD] Disk ejected.")
+            return True
+        try:
+            return self.configure_virtual_fdd(new_path)
+        except Exception as e:
+            print(f"[VFDD] swap_disk failed: {e}")
+            return False
+
     def activate_pending_virtual_fdd(self):
         cfg = self._pending_virtual_fdd_config
         if not cfg or not cfg.get("enabled", False):
@@ -1135,9 +1239,23 @@ class PB1000System:
                 gc.collect()
                 with open(file_path, "rb") as f:
                     if hasattr(cpu_core, "load_ram"):
-                        data = f.read()
-                        cpu_core.load_ram(slot, data)
-                        print(f"RAM slot {slot} restored via C-API from {file_path} ({len(data)} bytes)")
+                        gc.collect()
+                        try:
+                            data = f.read()
+                            cpu_core.load_ram(slot, data)
+                            print(f"RAM slot {slot} restored via C-API from {file_path} ({len(data)} bytes)")
+                            del data
+                            gc.collect()
+                        except MemoryError:
+                            f.seek(0)
+                            offset = 0
+                            while True:
+                                chunk = f.read(4096)
+                                if not chunk:
+                                    break
+                                ram_target[offset:offset + len(chunk)] = chunk
+                                offset += len(chunk)
+                            print(f"RAM slot {slot} restored (chunked) from {file_path} ({offset} bytes)")
                     else:
                         # Fallback for old/generic core
                         offset = 0
@@ -1359,7 +1477,7 @@ class PB1000System:
             '>':0x0041221408, '!':0x00005F0000, '^':0x0402010204, '&':0x3649552250,
         }
         curr_x = x
-        for char in text.upper():
+        for char in str(text).upper():
             bits = font.get(char, 0x7F7F7F7F7F) # Block for unknown
             # Hex bytes are ordered MSB...LSB, so i=0 (left) should be MSB
             for i in range(5):
@@ -1394,12 +1512,15 @@ class PB1000System:
 
         # Automatically show label on status bar
         if hasattr(self, 'set_status'):
-            label = key
             if isinstance(key, str):
                 if key.startswith("TK"):
                     label = f"TOUCH {key[2:]}"
                 else:
                     label = key.upper()
+            elif isinstance(key, tuple):
+                label = f"KEY {key[0]},{key[1]}"
+            else:
+                label = str(key)
             self.set_status(label)
 
     def release_key(self, key):

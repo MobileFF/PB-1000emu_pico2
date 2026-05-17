@@ -68,6 +68,18 @@ static uint32_t c_kb_pulse_interval_ms = C_KB_PULSE_INTERVAL_MS;
 static int c_kb_post_release_pulses_remaining = 0;
 static const int C_KB_POST_RELEASE_PULSES_MAX = 4;
 
+/* Two-phase SFT combo: press SFT alone first, add target key after KEY_INT fires */
+static bool c_kb_phase2_pending = false;
+static uint8_t c_kb_phase2_scancode = 0;
+static uint8_t c_kb_phase2_coords[3][2];
+static int c_kb_phase2_n_coords = 0;
+
+/* Deferred combo release: hold SFT+target in matrix until ROM has processed them */
+static uint32_t c_kb_deferred_combo_release_ms = 0;
+static uint8_t  c_kb_deferred_combo_coords[4][2];
+static int      c_kb_deferred_combo_n_coords = 0;
+#define C_KB_DEFERRED_COMBO_HOLD_MS 60u
+
 /* Python callbacks (set from Python) */
 static mp_obj_t py_f11_callback = MP_OBJ_NULL;
 static mp_obj_t py_f9_callback = MP_OBJ_NULL;
@@ -79,6 +91,7 @@ static mp_obj_t py_io_write_callback = MP_OBJ_NULL;
 static uint16_t call_hook_addrs[CALL_HOOK_MAX];
 static mp_obj_t  call_hook_fns[CALL_HOOK_MAX];  /* static = scanned by conservative GC */
 static int       call_hook_count = 0;
+static bool c_call_hook_dispatcher(void *ctx, uint16_t addr); /* forward decl */
 
 /* UART RX/TX FIFO (Internal) */
 #define UART_RX_FIFO_SIZE 256
@@ -283,8 +296,38 @@ static void c_kb_process_usb_key(uint8_t scancode, bool pressed) {
   if (!pressed) {
     for (int i = 0; i < c_kb_active_usb_count; i++) {
       if (c_kb_active_usb[i].scancode == scancode) {
-        for (int j = 0; j < c_kb_active_usb[i].n_coords; j++) {
-          c_kb_release(c_kb_active_usb[i].coords[j][0], c_kb_active_usb[i].coords[j][1]);
+        /* SFT combo fire-and-hold: if coords[0]==(11,2) with targets, ensure all keys
+           are pressed and hold the matrix state for ROM to process. If phase 2 had not
+           fired yet, fire it now so the character is not lost on a fast tap. */
+        bool had_sft_combo = (c_kb_active_usb[i].n_coords > 1 &&
+                              c_kb_active_usb[i].coords[0][0] == 11 &&
+                              c_kb_active_usb[i].coords[0][1] == 2);
+        if (had_sft_combo) {
+          if (c_kb_phase2_pending && c_kb_phase2_scancode == scancode) {
+            /* Phase 2 never fired — press targets now (fire-on-release) */
+            for (int j = 0; j < c_kb_phase2_n_coords; j++) {
+              c_kb_press(c_kb_phase2_coords[j][0], c_kb_phase2_coords[j][1]);
+            }
+            c_kb_phase2_pending = false;
+            c_kb_phase2_n_coords = 0;
+          }
+          /* Store all combo coords for deferred release; keys stay in matrix */
+          c_kb_deferred_combo_n_coords = c_kb_active_usb[i].n_coords;
+          for (int j = 0; j < c_kb_active_usb[i].n_coords; j++) {
+            c_kb_deferred_combo_coords[j][0] = c_kb_active_usb[i].coords[j][0];
+            c_kb_deferred_combo_coords[j][1] = c_kb_active_usb[i].coords[j][1];
+          }
+          c_kb_deferred_combo_release_ms = mp_hal_ticks_ms() + C_KB_DEFERRED_COMBO_HOLD_MS;
+          c_kb_next_pulse_ms = 0; /* ensure KEY_INT fires promptly for ROM to process */
+        } else {
+          /* Non-SFT combo or single key: cancel any pending phase 2 and release now */
+          if (c_kb_phase2_pending && c_kb_phase2_scancode == scancode) {
+            c_kb_phase2_pending = false;
+            c_kb_phase2_n_coords = 0;
+          }
+          for (int j = 0; j < c_kb_active_usb[i].n_coords; j++) {
+            c_kb_release(c_kb_active_usb[i].coords[j][0], c_kb_active_usb[i].coords[j][1]);
+          }
         }
         c_kb_active_usb[i] = c_kb_active_usb[--c_kb_active_usb_count];
         break;
@@ -336,6 +379,7 @@ static void c_kb_process_usb_key(uint8_t scancode, bool pressed) {
   c_kb_init_defaults();
   for (size_t i = 0; i < dynamic_adv_map_count; i++) {
     if (dynamic_adv_map[i].scancode == scancode && dynamic_adv_map[i].host_mod == current_mod) {
+      /* Collect all coords into ak (needed for correct release regardless of phase) */
       for (int j = 0; j < 4; j++) {
         uint8_t r = dynamic_adv_map[i].coords[j][0];
         uint8_t k = dynamic_adv_map[i].coords[j][1];
@@ -343,7 +387,25 @@ static void c_kb_process_usb_key(uint8_t scancode, bool pressed) {
         ak->coords[ak->n_coords][0] = r;
         ak->coords[ak->n_coords][1] = k;
         ak->n_coords++;
-        c_kb_press(r, k);
+      }
+      /* Two-phase press: if first coord is SFT (11,2) and more coords follow,
+         press SFT alone first so ROM can latch it before the target key arrives. */
+      bool is_sft_combo = (ak->n_coords > 1 &&
+                           ak->coords[0][0] == 11 &&
+                           ak->coords[0][1] == 2);
+      if (is_sft_combo) {
+        c_kb_press(11, 2); /* phase 1: SFT only */
+        c_kb_phase2_pending = true;
+        c_kb_phase2_scancode = scancode;
+        c_kb_phase2_n_coords = ak->n_coords - 1;
+        for (int j = 0; j < c_kb_phase2_n_coords; j++) {
+          c_kb_phase2_coords[j][0] = ak->coords[j + 1][0];
+          c_kb_phase2_coords[j][1] = ak->coords[j + 1][1];
+        }
+      } else {
+        for (int j = 0; j < ak->n_coords; j++) {
+          c_kb_press(ak->coords[j][0], ak->coords[j][1]);
+        }
       }
       found = true;
       break;
@@ -390,11 +452,33 @@ void c_kb_process_usb_key_extern(uint8_t scancode, bool pressed) {
 /* Service KEY_INT pulses - called from hd61700_execute wrapper */
 static void c_kb_service_input_lines(void) {
   if (!use_c_kb) return;
+  /* Deferred combo release: release SFT+target together after hold period expires */
+  if (c_kb_deferred_combo_release_ms != 0 &&
+      (int32_t)(mp_hal_ticks_ms() - c_kb_deferred_combo_release_ms) >= 0) {
+    for (int j = 0; j < c_kb_deferred_combo_n_coords; j++) {
+      c_kb_release(c_kb_deferred_combo_coords[j][0], c_kb_deferred_combo_coords[j][1]);
+    }
+    c_kb_deferred_combo_n_coords = 0;
+    c_kb_deferred_combo_release_ms = 0;
+    if (!c_kb_has_key_pressed()) {
+      c_kb_post_release_pulses_remaining = C_KB_POST_RELEASE_PULSES_MAX;
+    }
+  }
   /* Release pulse on next call (provides ~1 frame pulse duration) */
   if (c_kb_pulse_release_pending && c_kb_key_line_state) {
     hd61700_set_input(&cpu_state, HD61700_KEY_INT, 0);
     c_kb_key_line_state = false;
     c_kb_pulse_release_pending = false;
+    /* Phase 2: SFT-only KEY_INT has fired; now add the target key to the matrix.
+       Reset the timer so the next KEY_INT fires immediately (not after 25ms),
+       giving the ROM SFT+target before the key can be released. */
+    if (c_kb_phase2_pending && c_kb_phase2_n_coords > 0) {
+      for (int j = 0; j < c_kb_phase2_n_coords; j++) {
+        c_kb_press(c_kb_phase2_coords[j][0], c_kb_phase2_coords[j][1]);
+      }
+      c_kb_phase2_pending = false;
+      c_kb_next_pulse_ms = 0;  /* fire next KEY_INT immediately */
+    }
   }
   /* Check if IE allows KEY interrupts (bit 6) */
   bool key_ie_enabled = (cpu_state.reg8bit[5] & 0x40) != 0;
@@ -741,6 +825,10 @@ static uint8_t c_mem_direct_read(void *ctx, uint8_t segment, uint32_t offset) {
       return bank_bufs[bank - 1][off];
     return 0xFF;
   }
+  /* Extension work area 0x5F00-0x5FFF: delegate to Python callback */
+  if (logical_addr >= 0x5F00 && logical_addr < 0x6000) {
+    return c_mem_read(ctx, segment, offset);
+  }
   return 0xFF;
 }
 
@@ -793,6 +881,11 @@ static void c_mem_direct_write(void *ctx, uint8_t segment, uint32_t offset,
         }
       }
     }
+    return;
+  }
+  /* Extension work area 0x5F00-0x5FFF: delegate to Python callback */
+  if (offset >= 0x5F00 && offset < 0x6000) {
+    c_mem_write(ctx, segment, offset, data);
     return;
   }
   /* Banks 1-3: RAM Write (0x8000-0xFFFF) */
@@ -865,6 +958,11 @@ static mp_obj_t mod_reset(size_t n_args, const mp_obj_t *args) {
   cpu_state.port_write = c_port_write;
   cpu_state.log_write = c_log_write;
   cpu_state.log_ctx = NULL;
+  /* Restore call_hook dispatcher — hd61700_init() zeroed the whole struct */
+  if (call_hook_count > 0) {
+    cpu_state.call_hook = c_call_hook_dispatcher;
+    cpu_state.cb_ctx    = NULL;
+  }
 
   /* Connect direct memory pointers for high-performance path */
   if (use_c_mem) {
@@ -1248,7 +1346,7 @@ static bool c_call_hook_dispatcher(void *ctx, uint16_t addr) {
   (void)ctx;
   for (int i = 0; i < call_hook_count; i++) {
     if (call_hook_addrs[i] == addr) {
-      mp_call_function_1(call_hook_fns[i], MP_OBJ_NEW_SMALL_INT(addr));
+      mp_call_function_0(call_hook_fns[i]);
       return true;
     }
   }
