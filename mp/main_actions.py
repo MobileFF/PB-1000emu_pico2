@@ -1,7 +1,9 @@
 import time
+import hd61700
+import keymap
 
 
-def handle_disk_swap(system, display):
+def handle_disk_swap(system, display, fkbar=None):
     """
     GUI+F6 で呼ばれるディスク差し替えハンドラ。
     CPU スライスはメインループが UI に入ることで自然に停止する。
@@ -42,24 +44,21 @@ def handle_disk_swap(system, display):
         if hasattr(system.lcd, 'mark_dirty'):
             system.lcd.mark_dirty()
         system.update_display(x_offset=16, y_offset=40)
+        # 3. FuncKeyBar を再描画（全画面クリアで消えるため）
+        if fkbar is not None:
+            fkbar.draw()
     except Exception:
         pass
 
 
 def handle_key_status_and_capture(system, sc=-1):
     try:
-        import hd61700
         if sc < 0:
             sc = hd61700.get_last_key()
         if sc < 0:
             return
 
-        import keymap
         system.set_status(keymap.get_label(sc))
-
-        if sc == 0x42:
-            system.reset_emulator()
-            return
 
         if sc != 0x46:
             return
@@ -80,9 +79,8 @@ def handle_key_status_and_capture(system, sc=-1):
             system.lcd.save_pbm(pbm_path)
 
             ram_dump = bytearray(0x2000)
-            import hd61700 as cpu_core
             for addr in range(0x6000, 0x8000):
-                ram_dump[addr - 0x6000] = cpu_core.read_mem(addr)
+                ram_dump[addr - 0x6000] = hd61700.read_mem(addr)
 
             with open(vram_path, "wb") as f:
                 f.write(ram_dump)

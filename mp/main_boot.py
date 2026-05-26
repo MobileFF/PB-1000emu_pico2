@@ -27,8 +27,6 @@ def init_usb_keyboard_early(*, enable_usb_kbd):
         print(f"C keyboard early enable failed: {e}")
     try:
         import usb_host
-        if hasattr(usb_host, 'set_c_kb_routing'):
-            usb_host.set_c_kb_routing(True)
         if hasattr(usb_host, 'start_bg_timer'):
             usb_host.start_bg_timer(8)
         print("USB keyboard routing enabled.")
@@ -111,31 +109,38 @@ def initialize_system(*, console_uart=None):
 
 
 def load_default_roms(system):
+    import gc
+    for path, slot in (('/roms/rom0.bin', 0), ('/roms/rom1.bin', 1)):
+        try:
+            gc.collect()
+            system.load_rom(path, slot=slot)
+        except MemoryError as e:
+            print(f"ROM load warning ({path}): {e}")
+        except Exception as e:
+            print(f"ROM load error ({path}): {e}")
     try:
-        system.load_rom('/roms/rom0.bin', slot=0)
-        system.load_rom('/roms/rom1.bin', slot=1)
         if hasattr(system, "boot_virtual_fdd"):
             system.boot_virtual_fdd()
     except Exception as e:
-        print(f"ROM load warning: {e}")
+        print(f"VFDD init warning: {e}")
 
 
-def initialize_usb_host_and_pio(system, *, enable_usb_kbd):
-    if not enable_usb_kbd:
-        return
-    try:
-        import usb_host
-        if not _usb_host_initialized:
-            usb_host.init()
-            print("USB Host initialized.")
+def initialize_usb_host_and_pio(system, *, enable_usb_kbd, pio_uart_baudrate=9600):
+    if enable_usb_kbd:
         try:
-            pio_uart = PioUart(tx_pin=6, rx_pin=13, baudrate=4800, sm_tx=6, sm_rx=7)
-            system.pio_uart = pio_uart
-            print("PIO UART (GP6/GP13) initialized on SM 6/7.")
+            import usb_host
+            if not _usb_host_initialized:
+                usb_host.init()
+                print("USB Host initialized.")
         except Exception as e:
-            print(f"Failed to init PIO UART: {e}")
+            print(f"Failed to init USB Host: {e}")
+
+    try:
+        pio_uart = PioUart(tx_pin=6, rx_pin=13, baudrate=pio_uart_baudrate, sm_tx=6, sm_rx=7)
+        system.pio_uart = pio_uart
+        print(f"PIO UART (GP6/GP13) initialized on SM 6/7 @ {pio_uart_baudrate}bps.")
     except Exception as e:
-        print(f"Failed to init USB Host: {e}")
+        print(f"Failed to init PIO UART: {e}")
 
 
 def configure_c_keyboard(system, *, enable_usb_kbd):
@@ -170,9 +175,6 @@ def configure_usb_keyboard_routing():
     print("Configuring C keyboard routing...")
     try:
         import usb_host
-        if hasattr(usb_host, 'set_c_kb_routing'):
-            usb_host.set_c_kb_routing(True)
-            print("C keyboard routing enabled.")
         if hasattr(usb_host, 'start_bg_timer'):
             print("Starting USB background timer...")
             usb_host.start_bg_timer(8)

@@ -7,6 +7,9 @@
 #include "py/mphal.h"
 #include "hd61700.h"
 #include "lcd_controller.h"
+#include "hardware/gpio.h"
+#include "hardware/pwm.h"
+#include "hardware/clocks.h"
 
 /* Static CPU state */
 static hd61700_state_t cpu_state;
@@ -38,6 +41,22 @@ static bool use_c_mem = false;
 static bool use_c_lcd = false;
 static bool use_c_kb = false;
 
+/* LCD char output callback */
+static mp_obj_t py_lcd_char_cb    = MP_OBJ_NULL;
+static int8_t   c_lcd_char_last_y = -1;
+
+/* Raw pixel character accumulator (handles DRAW_BITIMAGE and other modes) */
+static uint8_t  _cdet_buf[6];
+static uint8_t  _cdet_col   = 0;
+static uint8_t  _cdet_chip  = 0;
+static uint8_t  _cdet_page  = 0;
+static uint8_t  _cdet_x0    = 0;
+static int8_t   _cdet_lpage = -1;
+static uint8_t  _cdet_mode  = 0;  /* mode at sequence start (for rb8 direction) */
+/* Per-position shadow: last char code emitted at [page][global_col 0-31].
+   0x00 = never written (no printable char has code 0x00). */
+static uint8_t  _cdet_shadow[4][32];
+
 /* ====== C Keyboard Matrix ====== */
 #define KB_ROWS 13
 #define KB_COLS 12
@@ -45,7 +64,9 @@ static bool c_kb_matrix[KB_ROWS][KB_COLS]; /* [row][col_index] */
 static uint8_t c_kb_ia_select = 0;
 /* Physical state trackers for host modifiers */
 static bool host_shift_physical = false;
-static bool host_alt_physical = false;
+static bool host_alt_physical   = false;
+static bool host_ctrl_physical  = false;
+static bool host_gui_physical   = false;
 
 /* Track scancode->coords for correct release */
 #define MAX_ACTIVE_USB_KEYS 8
@@ -105,6 +126,18 @@ static uint8_t uart_tx_tail = 0;
 static uint8_t vfdd_data_reg = 0x55; // Default to MD-100 ID (Read)
 static uint8_t vfdd_write_reg = 0x00; // Captured write data
 
+/* C-side port direct control state (RP2350 GPIO / PWM) */
+static bool     use_c_port        = false;
+static uint8_t  c_port_data       = 0;      /* last value written to port by CPU */
+static uint32_t c_port_read_count = 0;      /* boot-sequence ON key counter */
+static int      c_tx_pin          = 6;      /* RS-232C TXD (GP6) */
+static int      c_rx_pin          = 13;     /* RS-232C RXD (GP13) */
+static int      c_beep_pin        = -1;     /* PWM BEEP pin (-1 = disabled) */
+static uint     c_beep_pwm_slice  = 0;
+static uint     c_beep_channel    = 0;
+static uint32_t c_beep_duty       = 0;      /* 0-65535 */
+static bool     c_beep_on         = false;
+
 /* Polling-based key notification (ISR-safe: no mp_sched_schedule) */
 static volatile int16_t c_kb_last_pressed_scancode = -1;
 
@@ -161,6 +194,10 @@ static uint16_t c_kb_compute_ky(void) {
 
 /* I/O callback wrappers for selective MMIO hooking */
 static uint8_t c_io_read_wrapper(void *ctx, uint8_t segment, uint32_t offset) {
+    /* VDP registers (0x0C20-0x0C24): handle entirely in C, no Python call */
+    if (offset >= 0x0C20 && offset <= 0x0C24) {
+        return lcd_vdp_read(lcd_c_get_state(), offset - 0x0C20);
+    }
     if (py_io_read_callback != MP_OBJ_NULL) {
         mp_obj_t args[2];
         args[0] = MP_OBJ_NEW_SMALL_INT(segment);
@@ -172,6 +209,11 @@ static uint8_t c_io_read_wrapper(void *ctx, uint8_t segment, uint32_t offset) {
 }
 
 static void c_io_write_wrapper(void *ctx, uint8_t segment, uint32_t offset, uint8_t data) {
+    /* VDP registers (0x0C20-0x0C24): handle entirely in C, no Python call */
+    if (offset >= 0x0C20 && offset <= 0x0C24) {
+        lcd_vdp_write(lcd_c_get_state(), offset - 0x0C20, data);
+        return;
+    }
     if (py_io_write_callback != MP_OBJ_NULL) {
         mp_obj_t args[3];
         args[0] = MP_OBJ_NEW_SMALL_INT(segment);
@@ -267,30 +309,28 @@ static void c_kb_process_usb_key(uint8_t scancode, bool pressed) {
   /* 1. Update modifier state trackers */
   if (scancode == 0xE1 || scancode == 0xE5) {
     host_shift_physical = pressed;
-    /* We don't return here yet, we might need to search the map if Shift itself mapping matters, 
-       but usually we just record it. However, Alt is special. */
   }
   if (scancode == 0xE2 || scancode == 0xE6) {
     host_alt_physical = pressed;
   }
+  if (scancode == 0xE0 || scancode == 0xE4) {
+    host_ctrl_physical = pressed;
+  }
+  if (scancode == 0xE3 || scancode == 0xE7) {
+    host_gui_physical = pressed;
+  }
 
-  /* 2. Handle F11 specifically (Save state) */
+  /* 2. Handle F11: Win+F11 = Reset (Python detects via get_last_key + gui window),
+   *                plain F11 = KEY_OUT via normal map lookup (falls through). */
   if (scancode == 0x44 && pressed) {
-    mp_printf(&mp_plat_print, "C: F11 detect (Save Request)\n");
-    if (py_f11_callback != MP_OBJ_NULL && py_f11_callback != mp_const_none) {
-      mp_sched_schedule(py_f11_callback, mp_const_none);
+    if (host_gui_physical) {
+      /* Win+F11: do NOT fire save-state; Python main loop handles reset */
+      return;
     }
-    return;
+    /* plain F11: fall through to ADV/base map → KEY_OUT */
   }
 
-  /* 2B. Handle F9 specifically (Reset Request) */
-  if (scancode == 0x42 && pressed) {
-    mp_printf(&mp_plat_print, "C: F9 detect (Reset Request)\n");
-    if (py_f9_callback != MP_OBJ_NULL && py_f9_callback != mp_const_none) {
-      mp_sched_schedule(py_f9_callback, mp_const_none);
-    }
-    return;
-  }
+  /* 2B. F9 no longer intercepted here; falls through to base map → KEY_MEMO */
 
   /* 3. Handle key release */
   if (!pressed) {
@@ -364,6 +404,8 @@ static void c_kb_process_usb_key(uint8_t scancode, bool pressed) {
   uint8_t current_mod = 0;
   if (host_shift_physical) current_mod |= 1;
   if (host_alt_physical)   current_mod |= 2;
+  if (host_ctrl_physical)  current_mod |= 4;
+  if (host_gui_physical)   current_mod |= 8;
 
   usb_active_key_t *ak = 0;
   if (c_kb_active_usb_count < MAX_ACTIVE_USB_KEYS) {
@@ -739,8 +781,30 @@ static void c_kb_write(void *ctx, uint8_t data) {
   mp_call_function_n_kw(py_kb_write_cb, 1, 0, args);
 }
 
+/* Apply BEEP on/off state to PWM hardware without redundant register writes. */
+static void c_beep_apply(bool on) {
+  if (c_beep_on == on || c_beep_pin < 0) return;
+  c_beep_on = on;
+  pwm_set_chan_level(c_beep_pwm_slice, c_beep_channel,
+                    on ? (uint16_t)c_beep_duty : 0u);
+}
+
 static uint8_t c_port_read(void *ctx) {
   (void)ctx;
+  if (use_c_port) {
+    /* PD_PWR = bit4, active LOW: FDD interface is powered when bit4=0 */
+    bool fdd_powered = (c_port_data & 0x10u) == 0;
+    if (fdd_powered && py_port_read_cb != MP_OBJ_NULL) {
+      /* Delegate to Python for FDD transfer-direction ACK */
+      mp_obj_t result = mp_call_function_0(py_port_read_cb);
+      return (uint8_t)mp_obj_get_int(result);
+    }
+    /* Normal mode: read RX GPIO + boot-sequence ON key simulation */
+    uint8_t rx_bit = gpio_get((uint)c_rx_pin) ? 1u : 0u;
+    c_port_read_count++;
+    uint8_t on_key = (c_port_read_count < 100u) ? 0u : 1u;
+    return on_key | (uint8_t)(rx_bit << 3);
+  }
   if (py_port_read_cb == MP_OBJ_NULL)
     return 0;
   mp_obj_t result = mp_call_function_0(py_port_read_cb);
@@ -749,6 +813,34 @@ static uint8_t c_port_read(void *ctx) {
 
 static void c_port_write(void *ctx, uint8_t data) {
   (void)ctx;
+  if (use_c_port) {
+    uint8_t prev    = c_port_data;
+    c_port_data     = data;
+    bool was_fdd    = (prev & 0x10u) == 0;  /* PD_PWR was low (active) */
+    bool is_fdd     = (data & 0x10u) == 0;  /* PD_PWR is  low (active) */
+
+    /* TX GPIO for RS-232C bit-banging — suppress when FDD interface is powered */
+    if (!is_fdd) {
+      gpio_put((uint)c_tx_pin, (data >> 2) & 1u);
+    }
+
+    /* BEEP: bit6=0x40 or bit7=0x80 → sound; both set (0xC0) → silence */
+    if (c_beep_pin >= 0) {
+      uint8_t beep_bits = data & 0xC0u;
+      if (beep_bits == 0xC0u) {
+        c_beep_apply(false);
+      } else if (beep_bits == 0x40u || beep_bits == 0x80u) {
+        c_beep_apply(true);
+      }
+    }
+
+    /* FDD state machine: delegate to Python when interface was or is powered */
+    if ((was_fdd || is_fdd) && py_port_write_cb != MP_OBJ_NULL) {
+      mp_obj_t args[1] = {MP_OBJ_NEW_SMALL_INT(data)};
+      mp_call_function_n_kw(py_port_write_cb, 1, 0, args);
+    }
+    return;
+  }
   if (py_port_write_cb == MP_OBJ_NULL)
     return;
   mp_obj_t args[1] = {MP_OBJ_NEW_SMALL_INT(data)};
@@ -906,6 +998,33 @@ static void c_mem_direct_write(void *ctx, uint8_t segment, uint32_t offset,
   }
 }
 
+/* Bit-reverse one byte (bit7=top in charset.bin → bit0=top in VRAM) */
+static inline uint8_t cdet_rb8(uint8_t b) {
+  b = (b & 0xF0u) >> 4 | (b & 0x0Fu) << 4;
+  b = (b & 0xCCu) >> 2 | (b & 0x33u) << 2;
+  b = (b & 0xAAu) >> 1 | (b & 0x55u) << 1;
+  return b;
+}
+
+/* Match accumulated 6-byte pattern against charset.bin (printable ASCII).
+   DRAW_BITIMAGE data arrives bit7=top (direct match);
+   all other modes arrive bit0=top (rb8 needed before compare).
+   Returns ASCII code on match, -1 otherwise. */
+static int cdet_match_charset(lcd_state_t *lcd) {
+  if (!lcd->charset_loaded) return -1;
+  bool bitimg = (_cdet_mode == LCDC_CMD_DRAW_BITIMAGE);
+  for (int code = 0x20; code <= 0x7E; code++) {
+    const uint8_t *g = &lcd->charset_buf[code * 8 + 1];
+    bool match = true;
+    for (int i = 0; i < 6; i++) {
+      uint8_t b = bitimg ? _cdet_buf[i] : cdet_rb8(_cdet_buf[i]);
+      if (b != g[i]) { match = false; break; }
+    }
+    if (match) return code;
+  }
+  return -1;
+}
+
 static void c_lcd_direct_ctrl(void *ctx, uint8_t data) {
   (void)ctx;
   lcd_ctrl(lcd_c_get_state(), data);
@@ -913,7 +1032,64 @@ static void c_lcd_direct_ctrl(void *ctx, uint8_t data) {
 
 static void c_lcd_direct_write(void *ctx, uint8_t data) {
   (void)ctx;
-  lcd_write(lcd_c_get_state(), data);
+  lcd_state_t *lcd = lcd_c_get_state();
+  if (py_lcd_char_cb != MP_OBJ_NULL && !lcd->op_command) {
+    int chip = lcd->active_chip;
+    if (lcd->selected_ce & (1 << chip)) {
+      int mode = lcd->chip_state[chip].mode;
+      if (mode == LCDC_CMD_DRAW_CHAR) {
+        /* Legacy DRAW_CHAR path */
+        int8_t cur_y = (int8_t)(lcd->chip_state[chip].y & 0x03);
+        if (c_lcd_char_last_y >= 0 && cur_y != c_lcd_char_last_y) {
+          mp_call_function_1(py_lcd_char_cb, mp_const_none);
+        }
+        c_lcd_char_last_y = cur_y;
+        mp_call_function_1(py_lcd_char_cb, MP_OBJ_NEW_SMALL_INT(data));
+      } else {
+        /* Pixel write path: DRAW_BITIMAGE and all other modes */
+        uint8_t x    = (uint8_t)(lcd->chip_state[chip].x & 0xFF);
+        uint8_t page = (uint8_t)(lcd->chip_state[chip].y & 0x03);
+        /* Page change → signal row end */
+        if (_cdet_lpage >= 0 && page != (uint8_t)_cdet_lpage) {
+          mp_call_function_1(py_lcd_char_cb, mp_const_none);
+          _cdet_col = 0;
+        }
+        _cdet_lpage = (int8_t)page;
+        /* Column accumulation */
+        if (x % 6 == 0) {
+          _cdet_buf[0] = data;
+          _cdet_col  = 1;
+          _cdet_chip = (uint8_t)chip;
+          _cdet_page = page;
+          _cdet_x0   = x;
+          _cdet_mode = (uint8_t)mode;  /* remember mode for rb8 direction */
+        } else if (_cdet_col > 0 && _cdet_col < 6
+                   && (uint8_t)chip == _cdet_chip
+                   && page == _cdet_page
+                   && x == (uint8_t)(_cdet_x0 + _cdet_col)) {
+          _cdet_buf[_cdet_col++] = data;
+          if (_cdet_col == 6) {
+            int code = cdet_match_charset(lcd);
+            _cdet_col = 0;
+            if (code >= 0) {
+              /* Shadow dedup: skip if same char was last emitted here */
+              uint8_t gcol = (uint8_t)((_cdet_chip ? 16u : 0u) + (_cdet_x0 / 6u));
+              if (gcol < 32 && _cdet_shadow[_cdet_page][gcol] == (uint8_t)code) {
+                /* same content refresh – suppress */
+              } else {
+                if (gcol < 32) _cdet_shadow[_cdet_page][gcol] = (uint8_t)code;
+                mp_call_function_1(py_lcd_char_cb,
+                                   MP_OBJ_NEW_SMALL_INT(code));
+              }
+            }
+          }
+        } else {
+          _cdet_col = 0;
+        }
+      }
+    }
+  }
+  lcd_write(lcd, data);
 }
 
 static uint8_t c_lcd_direct_read(void *ctx) {
@@ -935,6 +1111,13 @@ static mp_obj_t mod_reset(size_t n_args, const mp_obj_t *args) {
   /* Reset UART buffers */
   uart_rx_head = 0;
   uart_rx_tail = 0;
+  /* Reset C-port state */
+  c_port_read_count = 0;
+  c_port_data = 0;
+  c_beep_on = false;
+  if (use_c_port && c_beep_pin >= 0) {
+    pwm_set_chan_level(c_beep_pwm_slice, c_beep_channel, 0); /* silence on reset */
+  }
   hd61700_set_key_debug(&cpu_state, cpu_debug_enabled && cpu_key_debug_enabled);
   hd61700_set_lcd_debug(&cpu_state, cpu_debug_enabled && cpu_lcd_debug_enabled);
   memset(sstop_sbot_last, 0, sizeof(sstop_sbot_last));
@@ -1061,6 +1244,27 @@ static mp_obj_t mod_set_lcd_callbacks(mp_obj_t read_fn, mp_obj_t write_fn,
 }
 static MP_DEFINE_CONST_FUN_OBJ_3(mod_set_lcd_callbacks_obj,
                                  mod_set_lcd_callbacks);
+
+/* hd61700.set_lcd_char_callback(fn)
+   Register a Python callable called for each character written to the LCD in
+   DRAW_CHAR mode when use_c_lcd is active.  Called as fn(code) where code is
+   an integer byte value, or fn(None) to signal a row change (newline).
+   Pass None to unregister. */
+static mp_obj_t mod_set_lcd_char_callback(mp_obj_t cb_obj) {
+  if (cb_obj == mp_const_none) {
+    py_lcd_char_cb = MP_OBJ_NULL;
+  } else {
+    py_lcd_char_cb = cb_obj;
+    anchor_callbacks(cb_obj);
+    c_lcd_char_last_y = -1;
+    memset(_cdet_shadow, 0, sizeof(_cdet_shadow));
+    _cdet_col  = 0;
+    _cdet_lpage = -1;
+  }
+  return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(mod_set_lcd_char_callback_obj,
+                                  mod_set_lcd_char_callback);
 
 /* hd61700.set_kb_callbacks(read_fn, write_fn) */
 static mp_obj_t mod_set_kb_callbacks(mp_obj_t read_fn, mp_obj_t write_fn) {
@@ -1502,6 +1706,34 @@ static mp_obj_t mod_uart_rx_put(mp_obj_t byte_obj) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(mod_uart_rx_put_obj, mod_uart_rx_put);
 
+/* hd61700.uart_rx_any() -> int: bytes pending in C UART RX FIFO */
+static mp_obj_t mod_uart_rx_any(void) {
+  return MP_OBJ_NEW_SMALL_INT((uint8_t)(uart_rx_head - uart_rx_tail));
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(mod_uart_rx_any_obj, mod_uart_rx_any);
+
+/* hd61700.uart_signal_rx(): Assert INT1 to wake CPU when Python PIO buffer
+   has data. Does NOT store data in C FIFO — bytes remain in Python buffer
+   and are served by the Python MMIO callback for 0x0C02 (IO read path). */
+static mp_obj_t mod_uart_signal_rx(void) {
+  hd61700_set_input(&cpu_state, HD61700_INT1, 1);
+  cpu_state.reg8bit[2] |= (1 << HD61700_INT1);
+  cpu_state.state &= ~CPU_SLP;
+  return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(mod_uart_signal_rx_obj, mod_uart_signal_rx);
+
+/* hd61700.uart_clear_rx_signal(): Deassert INT1 when Python PIO buffer
+   has been fully consumed. Called from _read_io_register(2) after the
+   last byte is read and the Python buffer is empty. */
+static mp_obj_t mod_uart_clear_rx_signal(void) {
+  hd61700_set_input(&cpu_state, HD61700_INT1, 0);
+  cpu_state.irq_status &= ~(1 << HD61700_INT1);
+  cpu_state.reg8bit[2] &= ~(1 << HD61700_INT1);
+  return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(mod_uart_clear_rx_signal_obj, mod_uart_clear_rx_signal);
+
 /* hd61700.set_kb_pulse_interval_ms(ms) */
 static mp_obj_t mod_set_kb_pulse_interval_ms(mp_obj_t ms_obj) {
   int ms = mp_obj_get_int(ms_obj);
@@ -1646,6 +1878,76 @@ static mp_obj_t mod_set_io_callbacks(mp_obj_t read_fn, mp_obj_t write_fn) {
 static MP_DEFINE_CONST_FUN_OBJ_2(mod_set_io_callbacks_obj, mod_set_io_callbacks);
 
 
+/* hd61700.set_port_direct(tx_pin, rx_pin, beep_pin [, freq_hz [, duty_pct]])
+ * Configure RP2350 GPIO and PWM for C-side port_read/write.
+ * beep_pin = -1 disables BEEP.  Initialises GPIO output/input and, when
+ * beep_pin >= 0, sets up the corresponding PWM slice. */
+static mp_obj_t mod_set_port_direct(size_t n_args, const mp_obj_t *args) {
+  c_tx_pin   = mp_obj_get_int(args[0]);
+  c_rx_pin   = mp_obj_get_int(args[1]);
+  c_beep_pin = mp_obj_get_int(args[2]);
+  int freq_hz  = (n_args > 3) ? mp_obj_get_int(args[3]) : 1000;
+  int duty_pct = (n_args > 4) ? mp_obj_get_int(args[4]) : 50;
+
+  /* TX: output, idle HIGH */
+  gpio_init((uint)c_tx_pin);
+  gpio_set_dir((uint)c_tx_pin, GPIO_OUT);
+  gpio_put((uint)c_tx_pin, 1u);
+
+  /* RX: input with pull-up */
+  gpio_init((uint)c_rx_pin);
+  gpio_set_dir((uint)c_rx_pin, GPIO_IN);
+  gpio_pull_up((uint)c_rx_pin);
+
+  if (c_beep_pin >= 0) {
+    gpio_set_function((uint)c_beep_pin, GPIO_FUNC_PWM);
+    uint slice   = pwm_gpio_to_slice_num((uint)c_beep_pin);
+    uint channel = pwm_gpio_to_channel((uint)c_beep_pin);
+    c_beep_pwm_slice = slice;
+    c_beep_channel   = channel;
+
+    /* clkdiv = sys_clk / (freq_hz * 65536)  [16-bit wrap maximises duty resolution] */
+    uint32_t sys_hz = clock_get_hz(clk_sys);
+    float clkdiv = (float)sys_hz / ((float)freq_hz * 65536.0f);
+    if (clkdiv < 1.0f) clkdiv = 1.0f;
+    pwm_set_clkdiv(slice, clkdiv);
+    pwm_set_wrap(slice, 65535);
+
+    if (duty_pct < 0)   duty_pct = 0;
+    if (duty_pct > 100) duty_pct = 100;
+    c_beep_duty = (uint32_t)duty_pct * 65535u / 100u;
+
+    pwm_set_chan_level(slice, channel, 0u); /* start silent */
+    pwm_set_enabled(slice, true);
+    c_beep_on = false;
+
+    mp_printf(&mp_plat_print,
+              "[PORT] BEEP: GP%d PWM slice=%u ch=%u freq=%dHz duty=%d%%\n",
+              c_beep_pin, (unsigned)slice, (unsigned)channel,
+              freq_hz, duty_pct);
+  }
+  mp_printf(&mp_plat_print,
+            "[PORT] Direct C: TX=GP%d RX=GP%d BEEP=%s\n",
+            c_tx_pin, c_rx_pin,
+            (c_beep_pin >= 0) ? "enabled" : "disabled");
+  return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(mod_set_port_direct_obj, 3, 5,
+                                           mod_set_port_direct);
+
+/* hd61700.use_c_port(bool) — enable/disable C-side port_read/write handling */
+static mp_obj_t mod_use_c_port(mp_obj_t enable_obj) {
+  use_c_port = mp_obj_is_true(enable_obj);
+  return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(mod_use_c_port_obj, mod_use_c_port);
+
+/* hd61700.get_port_data() -> int — last port byte written by the emulated CPU */
+static mp_obj_t mod_get_port_data(void) {
+  return MP_OBJ_NEW_SMALL_INT(c_port_data);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(mod_get_port_data_obj, mod_get_port_data);
+
 /* hd61700.set_vfdd_data(val) */
 static mp_obj_t mod_set_vfdd_data(mp_obj_t val_obj) {
     vfdd_data_reg = (uint8_t)mp_obj_get_int(val_obj);
@@ -1675,6 +1977,8 @@ static const mp_rom_map_elem_t hd61700_module_globals_table[] = {
      MP_ROM_PTR(&mod_set_mem_callbacks_obj)},
     {MP_ROM_QSTR(MP_QSTR_set_lcd_callbacks),
      MP_ROM_PTR(&mod_set_lcd_callbacks_obj)},
+    {MP_ROM_QSTR(MP_QSTR_set_lcd_char_callback),
+     MP_ROM_PTR(&mod_set_lcd_char_callback_obj)},
     {MP_ROM_QSTR(MP_QSTR_set_kb_callbacks),
      MP_ROM_PTR(&mod_set_kb_callbacks_obj)},
     {MP_ROM_QSTR(MP_QSTR_set_port_callbacks),
@@ -1708,6 +2012,10 @@ static const mp_rom_map_elem_t hd61700_module_globals_table[] = {
     {MP_ROM_QSTR(MP_QSTR_load_ram), MP_ROM_PTR(&mod_load_ram_obj)},
     {MP_ROM_QSTR(MP_QSTR_use_c_memory), MP_ROM_PTR(&mod_use_c_memory_obj)},
     {MP_ROM_QSTR(MP_QSTR_use_c_lcd), MP_ROM_PTR(&mod_use_c_lcd_obj)},
+    /* C Port APIs */
+    {MP_ROM_QSTR(MP_QSTR_set_port_direct), MP_ROM_PTR(&mod_set_port_direct_obj)},
+    {MP_ROM_QSTR(MP_QSTR_use_c_port), MP_ROM_PTR(&mod_use_c_port_obj)},
+    {MP_ROM_QSTR(MP_QSTR_get_port_data), MP_ROM_PTR(&mod_get_port_data_obj)},
     {MP_ROM_QSTR(MP_QSTR_get_ram_view), MP_ROM_PTR(&mod_get_ram_view_obj)},
     {MP_ROM_QSTR(MP_QSTR_get_exp_ram_view),
      MP_ROM_PTR(&mod_get_exp_ram_view_obj)},
@@ -1742,6 +2050,12 @@ static const mp_rom_map_elem_t hd61700_module_globals_table[] = {
     {MP_ROM_QSTR(MP_QSTR_set_uart_tx_callback), MP_ROM_PTR(&mod_set_uart_tx_callback_obj)},
     {MP_ROM_QSTR(MP_QSTR_uart_rx_put),
      MP_ROM_PTR(&mod_uart_rx_put_obj)},
+    {MP_ROM_QSTR(MP_QSTR_uart_rx_any),
+     MP_ROM_PTR(&mod_uart_rx_any_obj)},
+    {MP_ROM_QSTR(MP_QSTR_uart_signal_rx),
+     MP_ROM_PTR(&mod_uart_signal_rx_obj)},
+    {MP_ROM_QSTR(MP_QSTR_uart_clear_rx_signal),
+     MP_ROM_PTR(&mod_uart_clear_rx_signal_obj)},
     {MP_ROM_QSTR(MP_QSTR_set_kb_pulse_interval_ms),
      MP_ROM_PTR(&mod_set_kb_pulse_interval_ms_obj)},
     {MP_ROM_QSTR(MP_QSTR_process_usb_key),

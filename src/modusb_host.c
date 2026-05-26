@@ -40,32 +40,6 @@ static mp_obj_t mod_usb_host_task(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(mod_usb_host_task_obj, mod_usb_host_task);
 
-// Python API: usb_host.get_keyboard_events() -> list of tuples [(scancode,
-// is_pressed), ...]
-static mp_obj_t mod_usb_host_get_keyboard_events(void) {
-  mp_obj_t list = mp_obj_new_list(0, NULL);
-
-  uint8_t scancode;
-  bool pressed;
-  while (usb_host_core_get_event(&scancode, &pressed)) {
-    mp_obj_t tuple[2] = {MP_OBJ_NEW_SMALL_INT(scancode),
-                         mp_obj_new_bool(pressed)};
-    mp_obj_list_append(list, mp_obj_new_tuple(2, tuple));
-  }
-
-  return list;
-}
-static MP_DEFINE_CONST_FUN_OBJ_0(mod_usb_host_get_keyboard_events_obj,
-                                 mod_usb_host_get_keyboard_events);
-
-// Python API: usb_host.set_c_kb_routing(enabled)
-static mp_obj_t mod_usb_host_set_c_kb_routing(mp_obj_t enabled_obj) {
-  usb_host_core_set_c_kb_routing(mp_obj_is_true(enabled_obj));
-  return mp_const_none;
-}
-static MP_DEFINE_CONST_FUN_OBJ_1(mod_usb_host_set_c_kb_routing_obj,
-                                  mod_usb_host_set_c_kb_routing);
-
 // Python API: usb_host.start_bg_timer(interval_ms=8)
 static mp_obj_t mod_usb_host_start_bg_timer(size_t n_args, const mp_obj_t *args) {
   int interval = (n_args > 0) ? mp_obj_get_int(args[0]) : 8;
@@ -89,10 +63,6 @@ static const mp_rom_map_elem_t usb_host_module_globals_table[] = {
     {MP_ROM_QSTR(MP_QSTR_init), MP_ROM_PTR(&mod_usb_host_init_obj)},
     {MP_ROM_QSTR(MP_QSTR_probe), MP_ROM_PTR(&mod_usb_host_probe_obj)},
     {MP_ROM_QSTR(MP_QSTR_task), MP_ROM_PTR(&mod_usb_host_task_obj)},
-    {MP_ROM_QSTR(MP_QSTR_get_keyboard_events),
-     MP_ROM_PTR(&mod_usb_host_get_keyboard_events_obj)},
-    {MP_ROM_QSTR(MP_QSTR_set_c_kb_routing),
-     MP_ROM_PTR(&mod_usb_host_set_c_kb_routing_obj)},
     {MP_ROM_QSTR(MP_QSTR_start_bg_timer),
      MP_ROM_PTR(&mod_usb_host_start_bg_timer_obj)},
     {MP_ROM_QSTR(MP_QSTR_stop_bg_timer),

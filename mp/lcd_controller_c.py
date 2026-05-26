@@ -43,6 +43,17 @@ class LCDControllerC:
         self._scale_num = 1
         self._scale_den = 1
 
+        # Character output interception (screen → serial echo)
+        self._op_command = False
+        self._cmd_buf_len = 0
+        self._cmd_expected = 0
+        self._lcd_cmd_buf = bytearray(4)
+        self._chip_mode = [0, 0]
+        self._active_chip_tracked = 0
+        self._char_out_cb = None
+        self._char_display_line = None
+        self._char_line_changed = False
+
         # Initialize C module core
         lcd_c.init()
         lcd_c.set_debug(self.debug)
@@ -192,8 +203,47 @@ class LCDControllerC:
         if hasattr(lcd_c, "set_colors"):
             lcd_c.set_colors(self._color_fg, self._color_bg_on)
 
-    def lcd_ctrl(self, data): lcd_c.ctrl(data)
-    def lcd_write(self, data): lcd_c.write(data)
+    def set_char_output_callback(self, cb):
+        """Register callback(code) for characters written to the LCD in DRAW_CHAR mode.
+        Called with code=None to signal a display-row change (emit newline).
+        Set to None to disable."""
+        self._char_out_cb = cb
+
+    def lcd_ctrl(self, data):
+        self._op_command = bool(data & 0x01)
+        self._cmd_buf_len = 0
+        self._cmd_expected = 0
+        lcd_c.ctrl(data)
+
+    def lcd_write(self, data):
+        if self._op_command:
+            if self._cmd_buf_len == 0:
+                cmd_id = data & 0x0F
+                self._cmd_expected = (3 if cmd_id in (0x01,0x02,0x03,0x06,0x07,0x0B,0x0C,0x0E) else 1)
+            if self._cmd_buf_len < 4:
+                self._lcd_cmd_buf[self._cmd_buf_len] = data
+            self._cmd_buf_len += 1
+            if self._cmd_buf_len >= self._cmd_expected:
+                fb = self._lcd_cmd_buf[0]
+                cmd_id = fb & 0x0F
+                chip = 1 if (fb & 0x10) else 0
+                self._active_chip_tracked = chip
+                self._chip_mode[chip] = cmd_id
+                if cmd_id == self.LCDC_CMD_DRAW_CHAR and self._char_out_cb is not None:
+                    row = self._lcd_cmd_buf[2] & 0x03
+                    if self._char_display_line is not None and row != self._char_display_line:
+                        self._char_line_changed = True
+                    self._char_display_line = row
+                self._cmd_buf_len = 0
+                self._cmd_expected = 0
+        elif (self._char_out_cb is not None
+              and self._chip_mode[self._active_chip_tracked] == self.LCDC_CMD_DRAW_CHAR):
+            if self._char_line_changed:
+                self._char_out_cb(None)
+                self._char_line_changed = False
+            self._char_out_cb(data)
+        lcd_c.write(data)
+
     def lcd_read(self): return lcd_c.read()
     def clear(self): lcd_c.clear()
     def get_pixel(self, x, y): return lcd_c.get_pixel(x, y)

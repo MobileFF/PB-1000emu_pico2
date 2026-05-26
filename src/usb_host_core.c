@@ -10,7 +10,6 @@
 
 /* External: C keyboard event processing from modhd61700.c */
 extern void c_kb_process_usb_key_extern(uint8_t scancode, bool pressed);
-static bool c_kb_routing_enabled = false;
 
 /* Background timer for tuh_task() */
 static struct repeating_timer usb_bg_timer;
@@ -77,33 +76,6 @@ static void *tu_realloc(void *ptr, size_t size) {
 
 static void tu_free(void *ptr) { (void)ptr; }
 
-// Keyboard event buffer
-#define KBD_BUF_SIZE 32
-static uint8_t kbd_buf[KBD_BUF_SIZE];
-static uint8_t kbd_head = 0;
-static uint8_t kbd_tail = 0;
-
-static void kbd_push_event(uint8_t scancode, bool pressed) {
-  /* Route directly to C keyboard matrix if enabled */
-  if (c_kb_routing_enabled) {
-    c_kb_process_usb_key_extern(scancode, pressed);
-    return;
-  }
-  uint8_t next_head = (kbd_head + 1) % KBD_BUF_SIZE;
-  if (next_head != kbd_tail) {
-    kbd_buf[kbd_head] = (pressed ? 0x80 : 0x00) | (scancode & 0x7F);
-    kbd_head = next_head;
-  }
-}
-
-bool usb_host_core_get_event(uint8_t *scancode, bool *pressed) {
-  if (kbd_head == kbd_tail) return false;
-  uint8_t event = kbd_buf[kbd_tail];
-  kbd_tail = (kbd_tail + 1) % KBD_BUF_SIZE;
-  *pressed = (event & 0x80) != 0;
-  *scancode = event & 0x7F;
-  return true;
-}
 
 // TinyUSB Event Hooks
 void tuh_event_hook_cb(uint8_t rhport, uint32_t eventid, bool in_isr) {
@@ -137,26 +109,26 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
     // Process Modifiers
     uint8_t changed_mod = kbd_report->modifier ^ prev_report.modifier;
     for (int i = 0; i < 8; i++) {
-      if (changed_mod & (1 << i)) kbd_push_event(0xE0 + i, (kbd_report->modifier >> i) & 1);
+      if (changed_mod & (1 << i)) c_kb_process_usb_key_extern(0xE0 + i, (kbd_report->modifier >> i) & 1);
     }
-    
+
     // Process Keypresses
     for (int i = 0; i < 6; i++) {
         uint8_t key = kbd_report->keycode[i];
         if (key) {
             bool is_new = true;
             for (int j = 0; j < 6; j++) if (key == prev_report.keycode[j]) { is_new = false; break; }
-            if (is_new) kbd_push_event(key, true);
+            if (is_new) c_kb_process_usb_key_extern(key, true);
         }
     }
-    
+
     // Process Releases
     for (int i = 0; i < 6; i++) {
         uint8_t key = prev_report.keycode[i];
         if (key) {
             bool released = true;
             for (int j = 0; j < 6; j++) if (key == kbd_report->keycode[j]) { released = false; break; }
-            if (released) kbd_push_event(key, false);
+            if (released) c_kb_process_usb_key_extern(key, false);
         }
     }
     prev_report = *kbd_report;
@@ -183,10 +155,6 @@ void usb_host_core_init(void) {
 
 void usb_host_core_task(void) {
   tuh_task();
-}
-
-void usb_host_core_set_c_kb_routing(bool enabled) {
-  c_kb_routing_enabled = enabled;
 }
 
 void usb_host_core_start_bg_timer(int interval_ms) {

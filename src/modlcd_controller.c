@@ -209,6 +209,22 @@ static mp_obj_t mod_lcd_get_color_vram(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(mod_lcd_get_color_vram_obj, mod_lcd_get_color_vram);
 
+/* lcd_c.vdp_write(reg, data) — reg is 0-4 (offset - 0x0C20) */
+static mp_obj_t mod_lcd_vdp_write(mp_obj_t reg_obj, mp_obj_t data_obj) {
+  uint32_t reg  = (uint32_t)mp_obj_get_int(reg_obj);
+  uint8_t  data = (uint8_t)mp_obj_get_int(data_obj);
+  lcd_vdp_write(&lcd_state, reg, data);
+  return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(mod_lcd_vdp_write_obj, mod_lcd_vdp_write);
+
+/* lcd_c.vdp_read(reg) -> int — reg is 0-4 (offset - 0x0C20) */
+static mp_obj_t mod_lcd_vdp_read(mp_obj_t reg_obj) {
+  uint32_t reg = (uint32_t)mp_obj_get_int(reg_obj);
+  return MP_OBJ_NEW_SMALL_INT(lcd_vdp_read(&lcd_state, reg));
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(mod_lcd_vdp_read_obj, mod_lcd_vdp_read);
+
 /* lcd_c.wait_for_idle() */
 static mp_obj_t mod_lcd_wait_for_idle(void) {
 #ifdef __arm__
@@ -250,6 +266,8 @@ static const mp_rom_map_elem_t lcd_c_module_globals_table[] = {
     {MP_ROM_QSTR(MP_QSTR_get_color_vram), MP_ROM_PTR(&mod_lcd_get_color_vram_obj)},
     {MP_ROM_QSTR(MP_QSTR_render), MP_ROM_PTR(&mod_lcd_render_obj)},
     {MP_ROM_QSTR(MP_QSTR_wait_for_idle), MP_ROM_PTR(&mod_lcd_wait_for_idle_obj)},
+    {MP_ROM_QSTR(MP_QSTR_vdp_write), MP_ROM_PTR(&mod_lcd_vdp_write_obj)},
+    {MP_ROM_QSTR(MP_QSTR_vdp_read),  MP_ROM_PTR(&mod_lcd_vdp_read_obj)},
     /* Constants */
     {MP_ROM_QSTR(MP_QSTR_WIDTH), MP_ROM_INT(LCD_WIDTH)},
     {MP_ROM_QSTR(MP_QSTR_HEIGHT), MP_ROM_INT(LCD_HEIGHT)},

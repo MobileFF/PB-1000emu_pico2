@@ -1,9 +1,15 @@
 import machine
 import os
 
+# OC: set CPU clock before UART so baud divisor uses the new frequency
+try:
+    machine.freq(250_000_000)
+except Exception:
+    pass
+
 # UART0を起動し、REPLをUARTに複製する設定
 # Baudrateを115200に設定（標準設定）
-uart = machine.UART(0, baudrate=115200, tx=machine.Pin(0), rx=machine.Pin(1), txbuf=8192)
+uart = machine.UART(0, baudrate=115200, tx=machine.Pin(0), rx=machine.Pin(1), txbuf=32)
 os.dupterm(uart)
 # # Boot script for PB-1000 Emulator
 # # This runs automatically on power-up

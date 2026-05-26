@@ -808,6 +808,19 @@ def print_file(disk: MD100Disk, entry: DirEntry, mode: str, escape: str, out) ->
 
 # ─── ASCII transfer helpers ───────────────────────────────────────────────────
 
+def _is_ascii_basic_text(data: bytes) -> bool:
+    """Return True if data is pure-ASCII text whose first non-empty line starts with a digit."""
+    try:
+        text = data.decode('ascii')
+    except UnicodeDecodeError:
+        return False  # Non-ASCII bytes → binary tokenized BASIC
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped[0].isdigit()
+    return True  # empty or whitespace-only: treat as ASCII
+
+
 def pc_to_disk_bytes(src_bytes: bytes, escape: str) -> bytes:
     """Convert PC text bytes to MD-100 format (LF→CR+LF, handle escapes)."""
     out  = bytearray()
@@ -992,16 +1005,22 @@ def _put_one(disk: MD100Disk, src_path: str, dest_pattern: Optional[str],
         ext = ext_3.rstrip(b' ').decode('latin-1').lower()
         type_byte = EXT_TYPE.get(ext, TYPE_S)
 
-    # Transfer mode
-    if mode == 'AUTO':
-        mode = 'BINARY' if type_byte in (TYPE_M, TYPE_R, TYPE_B) else 'ASCII'
-
     # Read source
     if src_path.lower().startswith('stdin'):
         raw = sys.stdin.buffer.read()
     else:
         with open(src_path, 'rb') as f:
             raw = f.read()
+
+    # TYPE_B on disk requires a 256-byte header with machine-specific RAM addresses;
+    # ASCII text content causes OM Error on LOAD (rom1.src DF9D-DFBA misparses it).
+    # Use TYPE_S so the ROM tokenises the text on the fly (rom1.src DFBC-DFEE).
+    if type_byte == TYPE_B and mode == 'AUTO' and _is_ascii_basic_text(raw):
+        type_byte = TYPE_S
+
+    # Transfer mode
+    if mode == 'AUTO':
+        mode = 'BINARY' if type_byte in (TYPE_M, TYPE_R, TYPE_B) else 'ASCII'
 
     if mode == 'ASCII':
         disk_bytes = pc_to_disk_bytes(raw, escape)

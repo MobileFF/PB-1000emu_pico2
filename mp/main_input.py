@@ -35,6 +35,7 @@ class KeyboardInputManager:
         self._key_queue = []
         self._active_key = None
         self._active_key_label = None
+        self._active_chord = []
         self._active_key_candidates = None
         self._active_key_candidate_idx = 0
         self._active_key_started = False
@@ -47,34 +48,43 @@ class KeyboardInputManager:
         self._on_int_active = False
         self._on_int_release_at_ms = 0
         self._input_blocked_log_at_ms = 0
+        self._uart_char_map = self._build_uart_char_map()
 
     def _resolve_key_candidates(self, key, label):
         if label in self._key_candidates:
             return self._key_candidates[label]
         return [key]
 
-    def _map_input_char(self, char):
-        if ("a" <= char <= "z") or ("A" <= char <= "Z") or ("0" <= char <= "9") or char in " .+-*/=":
-            return char, char
-        if char == "!":
-            return KEY_EXE, "EXE"
-        if char == "@":
-            return _keypos(5, 11), "MODE"
-        if char == "[":
-            return _keypos(6, 11), "LCKEY"
-        if char == "]":
-            return _keypos(4, 11), "CAL"
-        if char == "`":
-            return _keypos(7, 9), "&HFC"
-        if char == "{":
-            return _keypos(8, 9), "&HFD"
-        if char == "|":
-            return _keypos(9, 9), "&HFE"
-        if char == "^":
-            return _keypos(1, 1), "BRK"
-        if char == "}":
-            return _keypos(6, 6), "NEWALL"
-        return None, None
+    def _build_uart_char_map(self):
+        """Build {char: (primary_coord, label, chord_list)} from keymap.
+        Chord list contains keys that must be held simultaneously with the primary key."""
+        try:
+            import keymap as _km
+        except ImportError:
+            return {}
+        result = {}
+        # Base keys: single-char labels (upper and lower map to same physical key)
+        for sc, entry in _km.USB_MAP.items():
+            coord, label = entry[0], entry[1]
+            if len(label) == 1:
+                result[label.lower()] = (coord, label, [])
+                result[label.upper()] = (coord, label, [])
+        # Space (label is 'SPACE', not a single char)
+        if 0x2C in _km.USB_MAP:
+            result[' '] = (_km.USB_MAP[0x2C][0], 'SPACE', [])
+        # Backspace terminal codes → BS key
+        if 0x2A in _km.USB_MAP:
+            bs_coord = _km.USB_MAP[0x2A][0]
+            result['\x08'] = (bs_coord, 'BS', [])
+            result['\x7F'] = (bs_coord, 'BS', [])
+        # Advanced keys: chord sequences (e.g. SHIFT+D_QUOTE for '!')
+        for key_pair, entry in _km.ADV_MAP.items():
+            coords, label = entry[0], entry[1]
+            if len(label) == 1 and len(coords) >= 1:
+                primary = coords[-1]
+                chord = list(coords[:-1])
+                result[label] = (primary, label, chord)
+        return result
 
     def _pulse_on_int(self, system, now_ms):
         if self._on_int_active:
@@ -98,23 +108,23 @@ class KeyboardInputManager:
                 break
             if char == "\x03":
                 print("\n[UART] Break received")
-                char = "^"
+                self._key_queue.append(((1, 1), "BRK", []))
+                continue
             if char in ("\r", "\n"):
                 if char == "\n" and self._last_was_cr:
                     self._last_was_cr = False
                     continue
                 self._last_was_cr = (char == "\r")
                 if self._uart_enter_always_exe or self._typed_since_enter:
-                    self._key_queue.append((KEY_EXE, "EXE"))
+                    self._key_queue.append((KEY_EXE, "EXE", []))
                     self._typed_since_enter = False
                 continue
             self._last_was_cr = False
-            key, label = self._map_input_char(char)
-            if key is not None:
-                if getattr(system, "is_sleeping", False) and label != "BRK":
-                    continue
-                self._key_queue.append((key, label))
-                if key != KEY_EXE:
+            entry = self._uart_char_map.get(char)
+            if entry is not None:
+                key, label, chord = entry
+                self._key_queue.append((key, label, chord))
+                if label != "EXE":
                     self._typed_since_enter = True
 
     def _release_active_on_timeout_or_scan(self, system, now):
@@ -163,8 +173,11 @@ class KeyboardInputManager:
 
         if should_release:
             system.release_key(self._active_key)
+            for ck in self._active_chord:
+                system.release_key(ck)
             self._active_key = None
             self._active_key_label = None
+            self._active_chord = []
             self._active_key_candidates = None
             self._active_key_candidate_idx = 0
             self._active_key_started = False
@@ -177,46 +190,46 @@ class KeyboardInputManager:
         if time.ticks_diff(now, self._next_press_at_ms) < 0:
             return
         if getattr(system, "is_sleeping", False):
-            dropped = 0
-            kept = []
-            for item in self._key_queue:
-                if item[1] == "BRK":
-                    kept.append(item)
-                else:
-                    dropped += 1
-            if dropped:
-                print(f"[QUEUE] dropped {dropped} non-BRK keys during sleep")
-            self._key_queue[:] = kept
-            if not self._key_queue:
-                return
+            # CPU is sleeping: keep keys queued and wait.
+            # run_cpu_slice now services c_kb_service_input_lines() even
+            # during sleep, so KEY_INT will fire and clear CPU_SLP shortly.
+            return
 
         pending_label = self._key_queue[0][1]
-        allow_sleep_break = (pending_label == "BRK" and getattr(system, "is_sleeping", False))
-        if (not allow_sleep_break and hasattr(system, "is_key_input_enabled")
+        # BRK always bypasses is_key_input_enabled: it must interrupt the ROM
+        # even during RECE or other busy states (sleep is already handled above).
+        is_brk = pending_label in ("BRK", "BREAK")
+        if (not is_brk and hasattr(system, "is_key_input_enabled")
                 and not system.is_key_input_enabled()):
             if time.ticks_diff(now, self._input_blocked_log_at_ms) >= 0:
-                sleep_state = 1 if getattr(system, "is_sleeping", False) else 0
                 print(
                     f"[INPUT_BLOCKED] label={pending_label} "
-                    f"sleep={sleep_state} key_enabled=0 queue_len={len(self._key_queue)}"
+                    f"sleep=0 key_enabled=0 queue_len={len(self._key_queue)}"
                 )
                 self._input_blocked_log_at_ms = time.ticks_add(now, 500)
             return
 
-        key, label = self._key_queue.pop(0)
-        if label == "BRK" and getattr(system, "is_sleeping", False):
-            self._pulse_on_int(system, now)
-            return
+        key, label, chord = self._key_queue.pop(0)
+
+        if label in ("BRK", "BREAK"):
+            pio = getattr(system, 'pio_uart', None)
+            if pio is not None and hasattr(pio, 'flush_rx'):
+                pio.flush_rx()
+                print("[BRK] PIO UART RX flushed")
 
         candidates = self._resolve_key_candidates(key, label)
         key = candidates[0]
         print(f"Key Press: {label}")
+        # Press chord keys (e.g. SHIFT) before the primary key
+        for ck in chord:
+            system.press_key(ck)
         system.press_key(key)
         if hasattr(system, "set_status"):
             system.set_status(label)
 
         self._active_key = key
         self._active_key_label = label
+        self._active_chord = chord
         self._active_key_candidates = candidates
         self._active_key_candidate_idx = 0
         self._active_key_started = False
@@ -226,6 +239,10 @@ class KeyboardInputManager:
             self._active_keybuf_base = None
         self._release_at_ms = time.ticks_add(now, self._key_hold_ms)
         self._release_hard_at_ms = time.ticks_add(now, self._key_release_hard_timeout_ms)
+
+    def enqueue_key(self, key, label):
+        """Inject a key press from an external event (e.g. auto-BREAK on EOF)."""
+        self._key_queue.append((key, label, []))
 
     def poll(self, system):
         now = time.ticks_ms()
@@ -246,44 +263,57 @@ class TouchInputManager:
     def __init__(self):
         self._active_touch_key = None
 
+    def release(self, system):
+        if self._active_touch_key is not None:
+            system.release_key(self._active_touch_key)
+            self._active_touch_key = None
+
+    def poll_coords(self, system, coords):
+        if coords is None:
+            self.release(system)
+            return False
+
+        x, y = coords
+        x += getattr(system, "touch_x_offset", 0)
+        y += getattr(system, "touch_y_offset", 0)
+
+        scale = getattr(system.lcd, "scale", 1.0)
+        lw = int(192 * scale)
+        lh = int(32 * scale)
+        lx0 = system._disp_x
+        ly0 = system._disp_y
+
+        if lx0 <= x <= lx0 + lw and ly0 <= y <= ly0 + lh:
+            rx = (x - lx0) / lw
+            ry = (y - ly0) / lh
+
+            col = max(0, min(3, int(rx * 4)))
+            row = 3 - int(ry * 4)
+            row = max(0, min(3, row))
+
+            t_idx = row * 4 + col + 1
+            t_key = f"TK{t_idx}"
+
+            if self._active_touch_key != t_key:
+                if self._active_touch_key is not None:
+                    system.release_key(self._active_touch_key)
+                system.press_key(t_key)
+                self._active_touch_key = t_key
+            return True
+
+        self.release(system)
+        return False
+
     def poll(self, system):
         if not hasattr(system, "touch") or system.touch is None:
             return
 
         if system.touch.is_pressed():
             coords = system.touch.get_touch()
-            if coords is not None:
-                x, y = coords
-                x += getattr(system, "touch_x_offset", 0)
-                y += getattr(system, "touch_y_offset", 0)
+            if self.poll_coords(system, coords):
+                return
 
-                scale = getattr(system.lcd, "scale", 1.0)
-                lw = int(192 * scale)
-                lh = int(32 * scale)
-                lx0 = system._disp_x
-                ly0 = system._disp_y
-
-                if lx0 <= x <= lx0 + lw and ly0 <= y <= ly0 + lh:
-                    rx = (x - lx0) / lw
-                    ry = (y - ly0) / lh
-
-                    col = max(0, min(3, int(rx * 4)))
-                    row = 3 - int(ry * 4)
-                    row = max(0, min(3, row))
-
-                    t_idx = row * 4 + col + 1
-                    t_key = f"TK{t_idx}"
-
-                    if self._active_touch_key != t_key:
-                        if self._active_touch_key is not None:
-                            system.release_key(self._active_touch_key)
-                        system.press_key(t_key)
-                        self._active_touch_key = t_key
-                    return
-
-        if self._active_touch_key is not None:
-            system.release_key(self._active_touch_key)
-            self._active_touch_key = None
+        self.release(system)
 
 
 def _parse_joystick_key(value):
@@ -351,14 +381,20 @@ class JoystickInputManager:
         if not enable_fire2 and "fire2" in buttons:
             buttons.remove("fire2")
 
-        self._pins = {
-            btn: Pin(pin_map[btn], Pin.IN, Pin.PULL_UP)
-            for btn in buttons
-        }
-        self._raw_state = {btn: 1 for btn in buttons}
-        self._confirmed_state = {btn: False for btn in buttons}
-        self._debounce_deadline = {btn: 0 for btn in buttons}
+        self._pins = {}
+        self._raw_state = {}
+        self._confirmed_state = {}
+        self._debounce_deadline = {}
         self._next_poll_at = 0
+
+        for btn in buttons:
+            try:
+                self._pins[btn] = Pin(pin_map[btn], Pin.IN, Pin.PULL_UP)
+                self._raw_state[btn] = 1
+                self._confirmed_state[btn] = False
+                self._debounce_deadline[btn] = 0
+            except Exception as e:
+                print(f"Joystick: {btn} skip: {e}")
 
     def poll(self, system):
         now = time.ticks_ms()

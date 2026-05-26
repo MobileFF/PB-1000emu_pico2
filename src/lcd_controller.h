@@ -104,6 +104,9 @@ typedef struct {
   uint8_t current_fg_rgb332;
   uint8_t current_bg_rgb332;
 
+  /* VDP (Color extension) address pointer — 14-bit, auto-increments on reg2 access */
+  uint16_t vdp_addr;
+
   /* Debug flag */
   bool debug;
 
@@ -133,6 +136,10 @@ void lcd_set_draw_bitimage_reverse(lcd_state_t *lcd, bool enabled);
 void lcd_load_charset(lcd_state_t *lcd, const uint8_t *data, int len);
 void lcd_set_bg_colors(lcd_state_t *lcd, uint16_t on_bg, uint16_t off_bg);
 void lcd_set_colors(lcd_state_t *lcd, uint16_t fg, uint16_t bg);
+
+/* VDP (Color extension) register access — reg is (offset - 0x0C20), 0-4 */
+void    lcd_vdp_write(lcd_state_t *lcd, uint32_t reg, uint8_t data);
+uint8_t lcd_vdp_read(lcd_state_t *lcd, uint32_t reg);
 
 
 /* SPI display rendering (direct hardware access) */

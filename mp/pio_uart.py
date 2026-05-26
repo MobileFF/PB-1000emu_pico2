@@ -54,6 +54,7 @@ class PioUart:
         self._sm_rx_id = sm_rx
         self._tx_buffer = []
         self._rx_buffer = []
+        self._rx_total = 0
 
         # TX state machine
         self._sm_tx = rp2.StateMachine(
@@ -97,12 +98,16 @@ class PioUart:
             self._rx_buffer.append(val & 0xFF)
             count += 1
         if count > 0:
-            # Optional: Debug log to console (can be noisy, so keep it short)
-            # print(f"RX: {self._rx_buffer[-count:]}")
+            prev_total = self._rx_total
+            self._rx_total += count
+            # Log first byte received (confirms GP13 is getting signal at correct baud rate)
+            if prev_total == 0:
+                print(f"[PIO_RX] First data @ {self._baudrate}bps: {count}B buf={self._rx_buffer[:4]}")
+            elif (self._rx_total >> 8) != (prev_total >> 8):
+                print(f"[PIO_RX] {self._rx_total}B total")
             if 26 in self._rx_buffer[-count:]:
                 print("[EOF Received]")
                 return "[EOF Received]"
-            #pass
 
     def read(self, nbytes=1):
         """Read up to nbytes from software buffer.
@@ -154,6 +159,7 @@ class PioUart:
         """Clear software TX and RX buffers."""
         self._tx_buffer = []
         self._rx_buffer = []
+        self._rx_total = 0
         # Note: Clearing hardware FIFOs is tricky but possible by deactivating/activating
         self._sm_tx.active(0)
         self._sm_rx.active(0)
@@ -162,6 +168,17 @@ class PioUart:
             self._sm_rx.get()
         self._sm_tx.active(1)
         self._sm_rx.active(1)
+
+    def flush_rx(self):
+        """Discard all pending RX data without stopping state machines.
+
+        Called on BREAK to prevent stale RS-232C bytes from keeping the ROM
+        in its serial-drain loop after a file-load operation ends.
+        """
+        self._rx_buffer = []
+        self._rx_total = 0
+        while self._sm_rx.rx_fifo() > 0:
+            self._sm_rx.get()
 
     def deinit(self):
         """Stop PIO state machines."""

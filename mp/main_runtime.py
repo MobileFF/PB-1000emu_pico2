@@ -1,71 +1,90 @@
-def service_pio_uart_bridge(system, cpu_core):
-    if hasattr(system, "service_pio_uart"):
-        system.service_pio_uart()
+import time
 
-    if not system.pio_uart or cpu_core is None:
+
+def service_pio_uart_bridge(system, cpu_core):
+    # Resolve hasattr checks once on first call; cache as tuple on system object.
+    if not hasattr(system, '_ubr_cache'):
+        system.uart_xon = True
+        system._ubr_cache = (
+            getattr(system, 'service_pio_uart', None),
+            getattr(cpu_core, 'uart_tx_get', None),
+            getattr(cpu_core, 'uart_signal_rx', None),
+            getattr(cpu_core, 'uart_clear_rx_signal', None),
+        )
+    _svc, _tx_get, _signal_rx, _clear_rx = system._ubr_cache
+
+    if _svc:
+        _svc()
+
+    pio = system.pio_uart
+    if not pio or cpu_core is None:
         return
 
-    if not hasattr(system, 'uart_xon'):
-        system.uart_xon = True
-
-    if hasattr(cpu_core, 'uart_tx_get'):
+    if _tx_get:
+        _pio_write = pio.write
         for _ in range(32):
-            tx_data = cpu_core.uart_tx_get()
+            tx_data = _tx_get()
             if tx_data is None:
                 break
             if tx_data == 0x13:
                 system.uart_xon = False
             elif tx_data == 0x11:
                 system.uart_xon = True
-            system.pio_uart.write(tx_data)
+            _pio_write(tx_data)
 
-    system.pio_uart.service_tx()
-    system.pio_uart.service_rx()
+    pio.service_tx()
+    pio.service_rx()
 
-    if hasattr(cpu_core, 'uart_rx_put') and system.uart_xon:
-        for _ in range(8):
-            if not system.pio_uart.any():
-                break
-            data = system.pio_uart.read(1)
-            if not data:
-                break
-            cpu_core.uart_rx_put(data[0])
-
+    # Bytes remain in the Python PIO buffer (_rx_buffer) for the MMIO
+    # callback at 0x0C02 (IO read path) to serve. Keep INT1 level-triggered:
+    # assert while data is available, deassert when buffer is empty.
+    # Deasserting on every empty tick prevents stale INT1 between transfers
+    # (e.g. after flush_rx() on BREAK without going through the MMIO read path).
+    if _signal_rx:
+        if system.uart_xon and pio.any():
+            _signal_rx()
+        elif _clear_rx and not pio.any():
+            _clear_rx()
 
 
 def step_with_input_service(system, steps, *, chunk=64):
+    _svc = getattr(system, 'service_pio_uart', None)
+    _step = system.step
     ran = 0
     while ran < steps:
-        if hasattr(system, "service_pio_uart"):
-            system.service_pio_uart()
-
+        if _svc:
+            _svc()
         n = chunk
         remain = steps - ran
         if n > remain:
             n = remain
-            executed = system.step(n)
+            executed = _step(n)
             if executed is None:
                 executed = n
             ran += executed
         else:
-            system.step(n)
+            _step(n)
             ran += n
     return ran
 
 
 def run_cpu_slice(system, *, active_steps, sleep_ms, step_chunk):
     if system.is_sleeping:
-        import time
+        # Even during sleep, call step_with_input_service so that
+        # c_kb_service_input_lines() fires KEY_INT pulses and can clear
+        # CPU_SLP (hd61700_set_input clears it when KEY_INT is asserted
+        # with FLAG_SW set).  hd61700_execute gracefully burns cycles
+        # when CPU_SLP is set, so this is safe.
+        step_with_input_service(system, step_chunk, chunk=step_chunk)
         time.sleep_ms(sleep_ms)
         return 0
     return step_with_input_service(system, active_steps, chunk=step_chunk)
 
 
 def update_frame_if_due(system, now, frame_time, *, frame_interval_ms):
-    import time
     if time.ticks_diff(now, frame_time) >= frame_interval_ms:
         # Avoid rendering during active SPI transfers (SD Card)
-        if getattr(system, "_fdd_active", False):
+        if system._fdd_active:
             return frame_time
         system.update_display(x_offset=16, y_offset=40)
         return now

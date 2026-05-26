@@ -65,19 +65,17 @@ def main():
 
     print("Entering Touch Polling Loop. Press Ctrl+C to stop.")
     print("Please touch the screen!...")
-    
+    print("[Heartbeat printed every ~2s. IRQ=0 means touch detected by hardware.]")
+
     try:
+        count = 0
         while True:
-            # We poll frequently to catch touches
             if touch.is_pressed():
-                print("touch.is_pressed()")
                 coords = touch.get_touch()
                 if coords:
                     x, y = coords
                     raw_x, raw_y = touch.read_raw()
-                    
-                    # Convert to logical PB-1000 Key
-                    # Y axis is inverted relative to the framebuffer coordinate space.
+
                     t_key = "None (Out of bounds)"
                     x += TOUCH_X_OFFSET
                     y += TOUCH_Y_OFFSET
@@ -86,22 +84,25 @@ def main():
                         row = (y - 40) // 16
                         col = max(0, min(3, col))
                         row = max(0, min(3, row))
-                        row = 3 - row  # invert Y axis mapping (top 0 <-> bottom 3)
+                        row = 3 - row
                         t_idx = row * 4 + col + 1
                         t_key = f"T{t_idx}"
 
                     in_bounds = (16 <= x <= 304 and 40 <= y <= 104)
-                    print(f"TOUCH DETECTED -> RAW:({raw_x:4d}, {raw_y:4d}) | MAPPED:X={x:3d}, Y={y:3d} | IN_BOUNDS={in_bounds} | PB-1000 KEY: {t_key}")
-                    
-                    # Anti-spam delay while touched
+                    print(f"TOUCH -> RAW:({raw_x:4d},{raw_y:4d}) MAP:({x:3d},{y:3d}) IN={in_bounds} KEY={t_key}")
                     time.sleep_ms(100)
                 else:
                     x_raw, y_raw = touch.read_raw()
-                    print(f"coords is None | RAW:({x_raw:4d}, {y_raw:4d}) | IRQ={touch.irq.value()}")
+                    print(f"IRQ low but coords=None | RAW:({x_raw:4d},{y_raw:4d})")
             else:
-                # Small delay to prevent tight loop
+                count += 1
+                if count >= 100:  # ~2s heartbeat
+                    irq_val = touch.irq.value() if touch.irq else '?'
+                    x_raw, y_raw = touch.read_raw()
+                    print(f"[alive] IRQ={irq_val} RAW=({x_raw:4d},{y_raw:4d})")
+                    count = 0
                 time.sleep_ms(20)
-                
+
     except KeyboardInterrupt:
         print("\nTest stopped by user.")
 

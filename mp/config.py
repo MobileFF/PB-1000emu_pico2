@@ -1,7 +1,7 @@
 """
 PB-1000 Emulator configuration loader.
 Loads and merges pb1000.ini files in priority order:
-  built-in defaults < /roms/pb1000.ini < /sd/pb1000.ini < <profile>/pb1000.ini
+  built-in defaults < /pb1000.ini < /sd/pb1000.ini < <profile>/pb1000.ini
 """
 import os
 
@@ -19,10 +19,11 @@ _DEFAULTS = {
     },
     "emulator": {
         "frame_interval_ms": "33",
-        "active_step_count": "4000",
+        "active_step_count": "12000",
         "sleep_poll_ms": "10",
         "step_timer_tick_steps": "40000",
-        "loop_idle_ms": "1",
+        "loop_idle_ms": "0",
+        "step_chunk": "2048",
     },
     "disk": {
         "enabled": "false",
@@ -51,6 +52,9 @@ _DEFAULTS = {
         "gpio_pin": "14",
         "freq_hz":  "1000",
         "duty":     "50",
+    },
+    "pio_uart": {
+        "baudrate": "9600",
     },
 }
 

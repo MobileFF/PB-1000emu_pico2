@@ -36,7 +36,7 @@ def main():
     # absorb the large f.read() allocation (~25KB per ROM file).
     gc.collect()
     _rom_reserve = None
-    for _sz in (40960, 36864, 33792):
+    for _sz in (40960, 36864, 33792, 28672, 24576, 20480, 16384):
         try:
             _rom_reserve = bytearray(_sz)
             break
@@ -139,26 +139,40 @@ def main():
     print("[MEM] before load_state: free=%d alloc=%d" %
           (gc.mem_free(), gc.mem_alloc()))
     system.load_state()  # Restore RAM + registers from profile dir (or default path)
-    initialize_usb_host_and_pio(system, enable_usb_kbd=enable_usb_kbd)
+    pio_uart_baudrate = get_int(cfg, "pio_uart", "baudrate")
+    initialize_usb_host_and_pio(system, enable_usb_kbd=enable_usb_kbd,
+                                 pio_uart_baudrate=pio_uart_baudrate)
     cpu_core = configure_c_keyboard(system, enable_usb_kbd=enable_usb_kbd)
     configure_usb_keyboard_routing()
-
     system.power_on()
     print(f"System initialized. PC={system.pc:#06x}")
     print("Interactive Mode: USB keyboard input enabled.")
 
-    # Step 10: Main loop constants from config
+    # Step 10: FuncKeyBar (LCKEY..CALC image + touch)
+    fkbar = None
+    try:
+        from funckey_bar import FuncKeyBar
+        _fkbar_y = system._disp_y + int(32 * system.lcd.scale) + 24
+        fkbar = FuncKeyBar(display, _fkbar_y)
+        fkbar.draw()
+        print(f"FuncKeyBar drawn at y={_fkbar_y}.")
+    except Exception as _e:
+        print(f"FuncKeyBar init failed: {_e}")
+
+    # Step 11: Main loop constants from config
     frame_interval_ms     = get_int(cfg, "emulator", "frame_interval_ms")
     active_step_count     = get_int(cfg, "emulator", "active_step_count")
     sleep_poll_ms         = get_int(cfg, "emulator", "sleep_poll_ms")
     step_timer_tick_steps = get_int(cfg, "emulator", "step_timer_tick_steps")
     loop_idle_ms          = get_int(cfg, "emulator", "loop_idle_ms")
+    step_chunk            = get_int(cfg, "emulator", "step_chunk")
 
     tick_step_accum = 0
     frame_time = time.ticks_ms()
     startup_guard_until = time.ticks_add(frame_time, 1500)
     startup_recovery_done = False
     gui_active_until = 0
+    _touch = getattr(system, 'touch', None)
 
     try:
         while True:
@@ -172,27 +186,48 @@ def main():
                 system.reset_emulator()
                 system.power_on(force_reset=True)
 
-            if not system.is_sleeping:
-                tick_step_accum += run_cpu_slice(
-                    system,
-                    active_steps=active_step_count,
-                    sleep_ms=sleep_poll_ms,
-                    step_chunk=64,
-                )
+            tick_step_accum += run_cpu_slice(
+                system,
+                active_steps=active_step_count,
+                sleep_ms=sleep_poll_ms,
+                step_chunk=step_chunk,
+            )
 
             now = time.ticks_ms()
             sc = hd61700.get_last_key()
             if sc == 0xE3 or sc == 0xE7:  # LGUI or RGUI
                 gui_active_until = time.ticks_add(now, 500)
-            elif sc == 0x29:  # ESC
+            elif sc == 0x29:  # ESC / BREAK
                 if time.ticks_diff(gui_active_until, now) > 0:
                     raise KeyboardInterrupt
+                elif system.pio_uart is not None:
+                    system.pio_uart.flush_rx()
             elif sc == 0x3F:  # F6 → disk swap
                 if time.ticks_diff(gui_active_until, now) > 0:
                     gui_active_until = 0
-                    handle_disk_swap(system, display)
+                    handle_disk_swap(system, display, fkbar)
+            elif sc == 0x53:  # NumLock → RESET
+                system.reset_emulator()
+            if getattr(system, '_pio_uart_eof_pending', False):
+                system._pio_uart_eof_pending = False
+                keyboard_input.enqueue_key((1, 1), "BRK")
+                print("[AUTO-BRK] Queuing auto-BREAK after EOF")
             keyboard_input.poll(system)
-            touch_input.poll(system)
+            if _touch is not None and _touch.is_pressed():
+                touch_coords = _touch.get_touch()
+                handled_touch = False
+                if fkbar is not None:
+                    handled_touch = fkbar.poll_coords(system, touch_coords)
+                if handled_touch:
+                    touch_input.release(system)
+                else:
+                    if fkbar is not None:
+                        fkbar.release(system)
+                    touch_input.poll_coords(system, touch_coords)
+            else:
+                touch_input.release(system)
+                if fkbar is not None:
+                    fkbar.release(system)
             if joystick_input is not None:
                 joystick_input.poll(system)
 

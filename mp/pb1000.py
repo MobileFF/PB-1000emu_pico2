@@ -1,6 +1,7 @@
 # PB1000 System
 #
 #
+import array
 import hd61700 as cpu_core
 import gc
 import os
@@ -57,7 +58,7 @@ def init_sdcard(spi):
         from sdcard import SDCard
         sd_cs = machine.Pin(SD_CS_PIN, machine.Pin.OUT, value=1)
         # Use verified 400kHz for stable initialization, restore to 40MHz for LCD
-        sd = SDCard(spi, sd_cs, baudrate=400000, restore_baudrate=40000000)
+        sd = SDCard(spi, sd_cs, baudrate=400000, restore_baudrate=40_000_000)
         vfs = os.VfsFat(sd)
         os.mount(vfs, "/sd")
         print("SD Card mounted at /sd")
@@ -93,7 +94,7 @@ def init_display():
     touch = None
     try:
         from xpt2046 import XPT2046
-        touch = XPT2046(spi, T_CS_PIN, T_IRQ_PIN)
+        touch = XPT2046(spi, T_CS_PIN, T_IRQ_PIN, x_min=325, x_max=3850)
     except Exception as e:
         print("Touch panel init failed:", e)
 
@@ -241,6 +242,8 @@ class PB1000System:
         self.debug_cfg = self._normalize_debug_config(debug)
         self.debug = self.debug_cfg["sys"]
         self._ram_is_c_managed = False
+        # Detect C-port availability early so _beep_init() can skip machine.PWM
+        self._c_port_active = hasattr(cpu_core, 'set_port_direct')
         self.sd_mounted = False
         if isinstance(display, tuple) and len(display) >= 4:
             self.sd_mounted = display[2]
@@ -301,6 +304,8 @@ class PB1000System:
         self.lcd = LCDController(display, debug=self.debug_cfg["lcd"])
         self._save_requested = False
         self.lcd.on_scale_change = self._on_lcd_scale_change
+        if hasattr(self.lcd, 'set_char_output_callback'):
+            self.lcd.set_char_output_callback(self._on_lcd_char_output)
         
         self._disp_x = 16
         self._disp_y = 40
@@ -308,6 +313,7 @@ class PB1000System:
         self.touch_y_offset = -104  # adjust if touch mapping seems biased downward
         self.port_data = 0
         self.console_uart = None  # Set externally from main.py
+        self._lcd_had_output = False
         self.status_msg = ""
         self.status_expiry_ms = 0
         self._status_rendered_msg = None
@@ -323,14 +329,14 @@ class PB1000System:
         # and bit4=0 (FM Error flag) to avoid spurious FDD errors.
         self._io_rd_regs = bytearray((0x00, 0x00, 0x00, 0x00, 0x55, 0x00, 0x00, 0x00))
         self._port_last_write = 0x1C
+        self._port_read_count = 0
         self._virtual_fdd_ack = False
         self._virtual_fdd_interface_powered = False
-        self._pc_trace = []
-        self._pc_trace_size = 128
+        self._pc_trace = array.array('H', [0] * 512)
+        self._pc_trace_idx = 0
         self._last_logged_crash_pc = -1
         self._fdd_active = False # SPI Bus Lock flag
         self._gpo_parity = 0   # Tracks gpo call parity for D92E P1/P0 protocol
-        self._vdp_init()
         self._beep_init()
         self._ext_init()
 
@@ -379,6 +385,23 @@ class PB1000System:
         # Use C LCD logic
         if hasattr(cpu_core, "use_c_lcd"):
             cpu_core.use_c_lcd(True)
+        if hasattr(cpu_core, "set_lcd_char_callback"):
+            self._cb_refs["lcd_char"] = self._on_lcd_char_output  # GC anchor
+            cpu_core.set_lcd_char_callback(self._cb_refs["lcd_char"])
+
+        # Use C-side port_read/port_write (RP2350 GPIO/PWM direct)
+        if self._c_port_active:
+            _beep_cfg = (self._config or {}).get("beep", {})
+            _beep_enabled = _beep_cfg.get("enable", "true").lower() in ("1", "true", "yes", "on")
+            _beep_pin = int(_beep_cfg.get("gpio_pin", "14")) if _beep_enabled else -1
+            _freq_hz  = int(_beep_cfg.get("freq_hz",  "1000"))
+            _duty_pct = int(_beep_cfg.get("duty",     "50"))
+            try:
+                cpu_core.set_port_direct(6, 13, _beep_pin, _freq_hz, _duty_pct)
+                cpu_core.use_c_port(True)
+            except Exception as _e:
+                print(f"PORT: C-direct init failed: {_e}")
+                self._c_port_active = False
 
         if restore_registers:
             self.load_state()
@@ -410,8 +433,6 @@ class PB1000System:
     def _mem_read_impl(self, segment, offset):
         if offset < 0x8000:
             if offset < 0x2000:
-                if 0x0C20 <= offset <= 0x0C24:
-                    return self._vdp_read(offset)
                 if (
                     self.has_virtual_fdd()
                     and 0x0C00 <= offset <= 0x0C07
@@ -457,8 +478,6 @@ class PB1000System:
                 cpu_core.write_mem(offset & 0xFFFF, data & 0xFF, segment)
             else:
                 self.ram[ram_index] = data
-        elif 0x0C20 <= offset <= 0x0C24:
-            self._vdp_write(offset, data)
         elif (
             self.has_virtual_fdd()
             and 0x0C00 <= offset <= 0x0C07
@@ -503,38 +522,40 @@ class PB1000System:
         return self._display_probe_hit
 
     def _port_read(self):
-        # Physical IO reads
+        if getattr(self, '_c_port_active', False):
+            # Called by C only when FDD interface is powered (PD_PWR bit=0).
+            # Return STR-based ACK for the MD-100 transfer protocol.
+            return 0x01 if (self.port_data & PD_STR) == 0 else 0x00
+
+        # Original path (fallback when C port layer is not active)
         rx_bit = self._rx_pin.value()
-        
-        if not hasattr(self, '_port_read_count'):
-            self._port_read_count = 0
         self._port_read_count += 1
 
         if self.has_virtual_fdd() and self._virtual_fdd_interface_powered:
-            # During MD-100 access, the ROM reads the same port twice and waits
-            # until both reads match, then checks bit 0 as the transfer-direction
-            # acknowledge signal. Return a stable port snapshot instead of
-            # alternating pseudo P1/P0 values.
             res = 0x01 if (self.port_data & PD_STR) == 0 else 0x00
             return res
 
-        # PB-1000 ROM boot sequence waits for ON key (bit 0) PRESSED (0) then RELEASED (1).
         on_key_state = 0 if self._port_read_count < 100 else 1
         res = on_key_state
         res |= (rx_bit << 3)
         return res
 
     def _port_write(self, data):
+        if getattr(self, '_c_port_active', False):
+            # Called by C only when FDD interface was/is powered.
+            # TX GPIO and BEEP are already handled by the C layer.
+            # Sync port_data from C-side tracking, then run FDD state machine.
+            self.port_data = cpu_core.get_port_data() if hasattr(cpu_core, 'get_port_data') else data
+            self._handle_virtual_fdd_port_write(data)
+            return
+
+        # Original path (fallback when C port layer is not active)
         self.port_data = data
         self._handle_virtual_fdd_port_write(data)
 
-        # Bit 2 is TXD for RS-232C bit-banging OR PD_STR for FDD
-        # Only write to physical pin if FDD interface is NOT powered
         if not (self.has_virtual_fdd() and self._virtual_fdd_interface_powered):
             self._tx_pin.value((data >> 2) & 1)
 
-        # BEEP 状態判定: bit6,7 が 0xC0 → ROM からの明示的終了通知
-        #                bit6,7 が 0x40 または 0x80 → 発音中
         beep_bits = data & PD_BEEP_MASK
         if beep_bits == PD_BEEP_MASK:
             self._beep_set(False)
@@ -551,14 +572,22 @@ class PB1000System:
             return val0
             
         elif index == 1:
-            # Status Register: Return ready flags
+            # Status Register: Return ready flags.
+            # FDD mode requires BOTH _virtual_fdd_interface_powered AND _virtual_fdd_ack.
+            # _virtual_fdd_ack is only True after a genuine FDD STR strobe fires.
+            # RS-232C RECEIVE writes port D (setting _virtual_fdd_interface_powered) but
+            # never issues a STR strobe, so _virtual_fdd_ack stays False and UART RX
+            # remains visible throughout the entire RS-232C transfer.
             status = 0xC0
-            if self.has_virtual_fdd() and self._virtual_fdd_interface_powered:
+            _in_fdd_mode = (self.has_virtual_fdd()
+                            and self._virtual_fdd_interface_powered
+                            and self._virtual_fdd_ack)
+            if _in_fdd_mode:
                 # SPI Bus Arbitration: Ensure LCD DMA is finished
                 if hasattr(self.lcd, "wait_for_idle"):
                     self.lcd.wait_for_idle()
                     time.sleep_us(50) # Allow physical signals to settle
-                
+
                 # FDD Mode: Signal "Data Ready" (Bit 0) AND "Interface Ready" (Bit 1)
                 # Ensure rendering is inhibited during polling
                 self._fdd_active = True
@@ -571,19 +600,41 @@ class PB1000System:
                     # Keep bit 0 clear to avoid ROM D8D0 -> LB Error.
                     status |= 0x02
                 finally:
-                    # Note: We keep it active if many polls are expected, but here we 
+                    # Note: We keep it active if many polls are expected, but here we
                     # toggle it per-poll to be safe.
                     self._fdd_active = False
-            elif self.pio_uart and self.pio_uart.any():
-                status |= 0x01 # RX Ready (RS-232C mode)
+                if self.pio_uart and self.pio_uart.any() and not getattr(self, '_uart_vfdd_warn', False):
+                    self._uart_vfdd_warn = True
+                    print(f"[UART_WARN] FDD ack+power active while UART RX pending ({self.pio_uart.any()}B)")
             else:
-                status |= 0x02 # TX Ready
+                # Bytes stay in the Python PIO buffer (_rx_buffer); the MMIO
+                # callback for 0x0C02 (IO read path) serves them directly.
+                # service_pio_uart_bridge() only signals INT1 via uart_signal_rx()
+                # without moving bytes to the C UART FIFO.
+                if self.pio_uart and self.pio_uart.any():
+                    status |= 0x01 # RX Ready (RS-232C mode)
+                else:
+                    status |= 0x02 # TX Ready
             return status
             
         elif index == 2:
             if self.pio_uart:
                 data = self.pio_uart.read(1)
                 self._io_rd_regs[2] = data[0] if data else 0
+                if data and not getattr(self, '_uart_rx_logged', False):
+                    self._uart_rx_logged = True
+                    print(f"[UART_RX] ROM read first byte: {data[0]:#04x}")
+                # Deassert INT1 when Python buffer is now empty so the CPU
+                # does not re-enter the ISR before the next byte arrives.
+                if not self.pio_uart.any() and hasattr(cpu_core, 'uart_clear_rx_signal'):
+                    cpu_core.uart_clear_rx_signal()
+                # ROM consumed the EOF byte — request auto-BREAK via main loop.
+                # _pio_uart_eof_pending is checked each main loop tick; the
+                # KeyboardInputManager queues BRK and waits for is_key_input_enabled
+                # before pressing, so it fires only after the ROM finishes processing.
+                if data and data[0] == 0x1A and not getattr(self, '_pio_uart_eof_pending', False):
+                    self._pio_uart_eof_pending = True
+                    print("[UART_EOF] EOF byte read by ROM; auto-BREAK scheduled")
             else:
                 self._io_rd_regs[2] = 0
             return self._io_rd_regs[2]
@@ -620,91 +671,36 @@ class PB1000System:
             self._handle_virtual_fdd_port_write(data)
             
         elif index == 3:
-            # 0x0C03 = TX Data Register (UART) OR FDD read-data port (when FDD powered).
-            # pio_uart shares pins with the FDD interface; suppress serial output while
-            # the FDD interface is powered to avoid sending FDD protocol bytes as UART TX.
-            if not (self.has_virtual_fdd() and self._virtual_fdd_interface_powered):
+            # 0x0C03 = TX Data Register (UART) OR FDD read-data port.
+            # Suppress PIO UART TX only during active FDD transfer (powered AND ack).
+            # RS-232C operations set _virtual_fdd_interface_powered without _virtual_fdd_ack,
+            # so TX is allowed through for RS-232C even when the interface power bit is low.
+            _in_fdd_mode = (self.has_virtual_fdd()
+                            and self._virtual_fdd_interface_powered
+                            and self._virtual_fdd_ack)
+            if not _in_fdd_mode:
                 if self.pio_uart:
                     self.pio_uart.write(data)
-                char = chr(data & 0x7F)
-                if self.console_uart:
-                    self.console_uart.write(char)
-                else:
-                    print(char, end="")
+            # console_uart (UART1, GP4/GP5) is on independent pins and must
+            # always receive BASIC PRINT output regardless of FDD power state.
+            char = chr(data & 0x7F)
+            if self.console_uart:
+                self.console_uart.write(char)
+            else:
+                print(char, end="")
 
     def _fdd_read_bridge_fn(self, segment, offset):
-        if 0x0C20 <= offset <= 0x0C24:
-            return self._vdp_read(offset)
         return self._read_io_register(offset)
 
     def _fdd_write_bridge_fn(self, segment, offset, data):
-        if 0x0C20 <= offset <= 0x0C24:
-            self._vdp_write(offset, data)
-        else:
-            self._write_io_register(offset, data)
-
-    def _vdp_init(self):
-        self._vdp_addr = 0
-        self._vdp_fg   = 0x00   # 黒（デフォルト前景色）
-        self._vdp_bg   = 0xB4   # オリーブグリーン（LCD_COLOR_OFF=0xB5E6 のRGB332値）
-        if hasattr(lcd_c, 'get_color_vram'):
-            self._color_vram = lcd_c.get_color_vram()
-        else:
-            self._color_vram = None
-
-    @staticmethod
-    def _rgb332_to_565(c):
-        r = (c >> 5) & 0x07
-        g = (c >> 2) & 0x07
-        b =  c       & 0x03
-        return ((r * 31 // 7) << 11) | ((g * 63 // 7) << 5) | (b * 31 // 3)
-
-    def _vdp_apply_colors(self):
-        fg565 = self._rgb332_to_565(self._vdp_fg)
-        bg565 = self._rgb332_to_565(self._vdp_bg)
-        if hasattr(lcd_c, 'set_colors'):
-            lcd_c.set_colors(fg565, bg565)
-        elif hasattr(self.lcd, 'set_colors'):
-            self.lcd.set_colors(fg565, bg565)
-
-    def _vdp_write(self, offset, data):
-        reg = offset - 0x0C20
-        if reg == 0:
-            self._vdp_addr = (self._vdp_addr & 0x3F00) | (data & 0xFF)
-        elif reg == 1:
-            self._vdp_addr = (self._vdp_addr & 0x00FF) | ((data & 0x3F) << 8)
-        elif reg == 2:
-            if self._color_vram is not None and self._vdp_addr < 12288:
-                self._color_vram[self._vdp_addr] = data
-                if hasattr(lcd_c, 'mark_dirty'):
-                    lcd_c.mark_dirty()
-            self._vdp_addr = (self._vdp_addr + 1) & 0x3FFF
-        elif reg == 3:
-            self._vdp_fg = data & 0xFF
-            print(f"[VDP] FG={data:02X} RGB565={self._rgb332_to_565(data):04X}")
-            self._vdp_apply_colors()
-        elif reg == 4:
-            self._vdp_bg = data & 0xFF
-            print(f"[VDP] BG={data:02X} RGB565={self._rgb332_to_565(data):04X}")
-            self._vdp_apply_colors()
-
-    def _vdp_read(self, offset):
-        reg = offset - 0x0C20
-        if reg == 0:   return self._vdp_addr & 0xFF
-        if reg == 1:   return (self._vdp_addr >> 8) & 0x3F
-        if reg == 2:
-            val = 0xFF
-            if self._color_vram is not None and self._vdp_addr < 12288:
-                val = self._color_vram[self._vdp_addr]
-            self._vdp_addr = (self._vdp_addr + 1) & 0x3FFF
-            return val
-        if reg == 3:   return self._vdp_fg
-        if reg == 4:   return self._vdp_bg
-        return 0xFF
+        self._write_io_register(offset, data)
 
     def _beep_init(self):
         self._beep_on  = False
         self._beep_pwm = None
+        if getattr(self, '_c_port_active', False):
+            print("BEEP: handled by C port layer")
+            return
         cfg = (self._config or {}).get("beep", {})
         enabled = cfg.get("enable", "true").lower() in ("1", "true", "yes", "on")
         if not enabled:
@@ -1319,17 +1315,15 @@ class PB1000System:
                     for _ in range(cycles):
                         res += cpu_core.execute(1, effective_stop)
                         current_pc = cpu_core.get_pc()
-                        self._pc_trace.append(current_pc)
-                        if len(self._pc_trace) > 512:
-                            self._pc_trace.pop(0)
+                        self._pc_trace[self._pc_trace_idx] = current_pc
+                        self._pc_trace_idx = (self._pc_trace_idx + 1) % 512
                         if current_pc == effective_stop or current_pc == 0xD8D0:
                             break
                 else:
                     res = cpu_core.execute(cycles, effective_stop)
                     current_pc = cpu_core.get_pc()
-                    self._pc_trace.append(current_pc)
-                    if len(self._pc_trace) > self._pc_trace_size:
-                        self._pc_trace.pop(0)
+                    self._pc_trace[self._pc_trace_idx] = current_pc
+                    self._pc_trace_idx = (self._pc_trace_idx + 1) % 512
                 
                 # Catch the exact moment the CPU enters error handlers
                 if current_pc in (0xD8D0, 0xABE0):
@@ -1342,9 +1336,10 @@ class PB1000System:
                     self._log_vfdd(f"  IO_RD[4]={self._io_rd_regs[4]:02X} PD={self.port_data:02X}")
                     
                     self._log_vfdd("  PC Trace(last 512):")
-                    trace_list = self._pc_trace[-512:]
-                    for i in range(0, len(trace_list), 16):
-                        chunk = trace_list[i:i+16]
+                    _buf = self._pc_trace
+                    _start = self._pc_trace_idx
+                    for i in range(0, 512, 16):
+                        chunk = [_buf[(_start + i + j) % 512] for j in range(min(16, 512 - i))]
                         trace_str = " ".join([f"{p:04X}" for p in chunk])
                         self._log_vfdd(f"    {trace_str}")
                 elif 0xD8D0 < current_pc <= 0xD8E1:
@@ -1395,6 +1390,9 @@ class PB1000System:
         if self.pio_uart and hasattr(self.pio_uart, "clear_buffers"):
             self.pio_uart.clear_buffers()
             print("PIO UART buffers cleared.")
+        self._uart_rx_logged = False
+        self._uart_vfdd_warn = False
+        self._pio_uart_eof_pending = False
             
         self.set_status("SYSTEM RESET", 1500)
         # Re-initialize basic state if needed but usually reset() is enough
@@ -1415,11 +1413,22 @@ class PB1000System:
              if result:
                  self.set_status(result,10000)
 
+    # ------------------------------------------------------------------ #
+    #  VRAM text extraction (serial console output)                        #
+    # ------------------------------------------------------------------ #
+
+    def _build_char_lookup(self):
+        return {}
+
+    def _scan_vram_for_text(self):
+        pass
+
     def update_display(self, x_offset=None, y_offset=None):
         if x_offset is not None: self._disp_x = x_offset
         if y_offset is not None: self._disp_y = y_offset
         self.lcd.render_to_display(self._disp_x, self._disp_y)
         self._render_status_bar()
+        self._scan_vram_for_text()
 
     def set_status(self, msg, duration_ms=2000):
         self.status_msg = msg
@@ -1486,6 +1495,18 @@ class PB1000System:
                     if col_bits & (1 << j):
                         display.fill_rect(curr_x + i, y + j, 1, 1, color)
             curr_x += 6
+
+    def _on_lcd_char_output(self, code):
+        uart = getattr(self, 'console_uart', None)
+        if not uart:
+            return
+        if code is None:
+            if self._lcd_had_output:
+                uart.write(b'\r\n')
+                self._lcd_had_output = False
+        elif 0x20 <= code <= 0x7E:
+            uart.write(bytes([code]))
+            self._lcd_had_output = True
 
     def _on_lcd_scale_change(self, scale):
         """Callback from LCDController when scale is changed."""

@@ -250,6 +250,8 @@ void lcd_init(lcd_state_t *lcd) {
   /* color_vram: all pixels start as OFF → fill with initial bg color */
   memset(lcd->color_vram, lcd->current_bg_rgb332, LCD_COLOR_VRAM_SIZE);
 
+  lcd->vdp_addr = 0;
+
   /* Clear VRAM */
   lcd_clear(lcd);
 }
@@ -396,6 +398,57 @@ void lcd_set_colors(lcd_state_t *lcd, uint16_t fg, uint16_t bg) {
                                       ((bg >>  3) & 0x03));
   /* No mark_all_dirty: only pages dirtied by subsequent LCD writes
      are re-rendered with the new colors. */
+}
+
+/* ======== VDP (Color Extension) Registers ======== */
+
+void lcd_vdp_write(lcd_state_t *lcd, uint32_t reg, uint8_t data) {
+  switch (reg) {
+  case 0:
+    lcd->vdp_addr = (uint16_t)((lcd->vdp_addr & 0x3F00u) | (data & 0xFFu));
+    break;
+  case 1:
+    lcd->vdp_addr = (uint16_t)((lcd->vdp_addr & 0x00FFu) | ((data & 0x3Fu) << 8));
+    break;
+  case 2:
+    if (lcd->vdp_addr < LCD_COLOR_VRAM_SIZE) {
+      lcd->color_vram[lcd->vdp_addr] = data;
+      int page = (int)(lcd->vdp_addr / LCD_WIDTH) / 8;
+      if (page < LCD_PAGES) {
+        lcd->dirty = true;
+        lcd->dirty_pages[page] = true;
+      }
+    }
+    lcd->vdp_addr = (uint16_t)((lcd->vdp_addr + 1u) & 0x3FFFu);
+    break;
+  case 3:
+    lcd->current_fg_rgb332 = data;
+    lcd->color_on = lcd->rgb332_to_565_table[data];
+    break;
+  case 4:
+    lcd->current_bg_rgb332 = data;
+    lcd->color_off = lcd->rgb332_to_565_table[data];
+    break;
+  default:
+    break;
+  }
+}
+
+uint8_t lcd_vdp_read(lcd_state_t *lcd, uint32_t reg) {
+  switch (reg) {
+  case 0: return (uint8_t)(lcd->vdp_addr & 0xFFu);
+  case 1: return (uint8_t)((lcd->vdp_addr >> 8) & 0x3Fu);
+  case 2: {
+    uint8_t val = 0xFF;
+    if (lcd->vdp_addr < LCD_COLOR_VRAM_SIZE)
+      val = lcd->color_vram[lcd->vdp_addr];
+    lcd->vdp_addr = (uint16_t)((lcd->vdp_addr + 1u) & 0x3FFFu);
+    return val;
+  }
+  case 3: return lcd->current_fg_rgb332;
+  case 4: return lcd->current_bg_rgb332;
+  default: return 0xFF;
+  }
 }
 
 /* ======== SPI Display Rendering ======== */

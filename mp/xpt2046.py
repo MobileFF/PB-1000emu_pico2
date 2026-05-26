@@ -52,11 +52,16 @@ class XPT2046:
         return (recv[1] << 5 | recv[2] >> 3)
 
     def read_raw(self):
-        """Read raw X, Y values from the touch controller."""
-        # 0xD0 = Read X, 12-bit, diff mode
-        # 0x90 = Read Y, 12-bit, diff mode
-        y_raw = self._transfer(0x90)
-        x_raw = self._transfer(0xD0)
+        """Read raw X, Y values in a single SPI transaction (avoids double baudrate-switch glitch)."""
+        self.spi.init(baudrate=self.baudrate)
+        self.cs.value(0)
+        send = bytearray([0x90, 0x00, 0x00, 0xD0, 0x00, 0x00])
+        recv = bytearray(6)
+        self.spi.write_readinto(send, recv)
+        self.cs.value(1)
+        self.spi.init(baudrate=self.lcd_baudrate)
+        y_raw = (recv[1] << 5 | recv[2] >> 3)
+        x_raw = (recv[4] << 5 | recv[5] >> 3)
         return x_raw, y_raw
 
     def get_touch(self):

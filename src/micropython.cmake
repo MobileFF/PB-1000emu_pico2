@@ -60,6 +60,7 @@ add_library(usb_host_core_lib STATIC
 # PRIVATE link/include: these do NOT propagate to the main firmware
 target_link_libraries(usb_host_core_lib PRIVATE
     pico_stdlib
+    pico_rand
 )
 
 target_include_directories(usb_host_core_lib PRIVATE
