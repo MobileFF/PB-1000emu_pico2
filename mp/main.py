@@ -206,6 +206,12 @@ def main():
                 if time.ticks_diff(gui_active_until, now) > 0:
                     gui_active_until = 0
                     handle_disk_swap(system, display, fkbar)
+            elif sc == 0x40:  # F7 → emulator menu
+                if time.ticks_diff(gui_active_until, now) > 0:
+                    gui_active_until = 0
+                    from emulator_menu import show_emulator_menu
+                    result = show_emulator_menu(system, display, fkbar, joystick_input, cfg)
+                    joystick_input = result['joystick_input']
             elif sc == 0x53:  # NumLock → RESET
                 system.reset_emulator()
             if getattr(system, '_pio_uart_eof_pending', False):

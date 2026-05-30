@@ -251,9 +251,33 @@ void lcd_init(lcd_state_t *lcd) {
   memset(lcd->color_vram, lcd->current_bg_rgb332, LCD_COLOR_VRAM_SIZE);
 
   lcd->vdp_addr = 0;
+  lcd->vdp_enabled = true;
 
   /* Clear VRAM */
   lcd_clear(lcd);
+}
+
+/* ── VDP enable/disable ───────────────────────────────────────────────────── */
+
+void lcd_set_vdp_enable(lcd_state_t *lcd, bool enabled) {
+  lcd->vdp_enabled = enabled;
+  lcd->dirty = true;
+  for (int i = 0; i < LCD_PAGES; i++) lcd->dirty_pages[i] = true;
+}
+
+bool lcd_get_vdp_enable(const lcd_state_t *lcd) {
+  return lcd->vdp_enabled;
+}
+
+/* Inline helper used by both render paths */
+static inline uint16_t _pixel_color(const lcd_state_t *lcd, int col, int sy) {
+  if (lcd->vdp_enabled) {
+    return lcd->rgb332_to_565_table[lcd->color_vram[sy * LCD_WIDTH + col]];
+  }
+  int page = sy >> 3;
+  int bit  = sy & 7;
+  bool on  = (lcd->vram[page * LCD_WIDTH + col] >> bit) & 1;
+  return on ? lcd->color_on : lcd->color_off;
 }
 
 void lcd_clear(lcd_state_t *lcd) {
@@ -646,7 +670,7 @@ void lcd_render_to_display(lcd_state_t *lcd) {
       for (int dx = 0; dx < out_w; dx++) {
         uint16_t sx = (uint16_t)(sx_fp >> 16);
         if (sx >= LCD_WIDTH) sx = LCD_WIDTH - 1;
-        uint16_t c = lcd->rgb332_to_565_table[lcd->color_vram[(int)sy * LCD_WIDTH + sx]];
+        uint16_t c = _pixel_color(lcd, (int)sx, (int)sy);
         dma_buffer[buf_idx++] = (uint8_t)(c >> 8);
         dma_buffer[buf_idx++] = (uint8_t)(c & 0xFF);
         sx_fp += step_fp;
@@ -655,7 +679,7 @@ void lcd_render_to_display(lcd_state_t *lcd) {
   } else {
     for (int sy = first_page * 8; sy <= (last_page * 8 + 7); sy++) {
       for (int col = 0; col < LCD_WIDTH; col++) {
-        uint16_t c = lcd->rgb332_to_565_table[lcd->color_vram[sy * LCD_WIDTH + col]];
+        uint16_t c = _pixel_color(lcd, col, sy);
         uint8_t h = (uint8_t)(c >> 8);
         uint8_t l = (uint8_t)(c & 0xFF);
         for (int v = 0; v < s; v++) {

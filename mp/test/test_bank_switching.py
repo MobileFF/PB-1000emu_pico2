@@ -143,9 +143,6 @@ def test_pb1000_bank_callback_fix():
 def test_memory_instructions():
     print("\nTesting HD61700 Memory Instructions (LDB, STB, LDW, STW)...")
     tester = BankTest()
-    # ensure callbacks still used even if previous tests enabled C memory
-    if hasattr(hd61700, "use_c_memory"):
-        hd61700.use_c_memory(False)
     hd61700.set_mem_callbacks(tester.mem_read, tester.mem_write)
     hd61700.reset()
     

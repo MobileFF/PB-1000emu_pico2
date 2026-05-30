@@ -107,6 +107,10 @@ typedef struct {
   /* VDP (Color extension) address pointer — 14-bit, auto-increments on reg2 access */
   uint16_t vdp_addr;
 
+  /* When true, rendering uses per-pixel color_vram (VDP mode).
+     When false, rendering uses global color_on / color_off from the mono VRAM bits. */
+  bool vdp_enabled;
+
   /* Debug flag */
   bool debug;
 
@@ -140,6 +144,10 @@ void lcd_set_colors(lcd_state_t *lcd, uint16_t fg, uint16_t bg);
 /* VDP (Color extension) register access — reg is (offset - 0x0C20), 0-4 */
 void    lcd_vdp_write(lcd_state_t *lcd, uint32_t reg, uint8_t data);
 uint8_t lcd_vdp_read(lcd_state_t *lcd, uint32_t reg);
+
+/* VDP enable/disable toggle */
+void lcd_set_vdp_enable(lcd_state_t *lcd, bool enabled);
+bool lcd_get_vdp_enable(const lcd_state_t *lcd);
 
 
 /* SPI display rendering (direct hardware access) */

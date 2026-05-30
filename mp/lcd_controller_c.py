@@ -203,6 +203,17 @@ class LCDControllerC:
         if hasattr(lcd_c, "set_colors"):
             lcd_c.set_colors(self._color_fg, self._color_bg_on)
 
+    def set_vdp_enable(self, enabled):
+        """Enable (True) or disable (False) per-pixel color VRAM rendering."""
+        if hasattr(lcd_c, "set_vdp_enable"):
+            lcd_c.set_vdp_enable(bool(enabled))
+
+    @property
+    def vdp_enabled(self):
+        if hasattr(lcd_c, "get_vdp_enable"):
+            return bool(lcd_c.get_vdp_enable())
+        return True
+
     def set_char_output_callback(self, cb):
         """Register callback(code) for characters written to the LCD in DRAW_CHAR mode.
         Called with code=None to signal a display-row change (emit newline).
@@ -254,8 +265,9 @@ class LCDControllerC:
     @property
     def dirty(self): return lcd_c.is_dirty()
     @dirty.setter
-    def dirty(self, v): 
-        if not v: lcd_c.clear_dirty()
+    def dirty(self, v):
+        if v: lcd_c.mark_dirty()
+        else: lcd_c.clear_dirty()
     @property
     def display_on(self): return lcd_c.is_display_on()
 

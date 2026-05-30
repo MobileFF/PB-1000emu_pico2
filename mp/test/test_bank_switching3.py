@@ -7,12 +7,7 @@ import sys
 def test_memory_instructions():
     print("\nTesting HD61700 Memory Banking Instructions ...")
     # ensure callbacks still used even if previous tests enabled C memory
-    if hasattr(hd61700, "use_c_memory"):
-        hd61700.use_c_memory(True)
-        print("use c memory")
-    else:
-        hd61700.use_c_memory(False)
-        print("use Python memory")
+    print("use c memory")
     
     print("has exp_ram")
     hd61700.set_has_exp_ram(True)

@@ -9,7 +9,7 @@ except Exception:
 
 # UART0を起動し、REPLをUARTに複製する設定
 # Baudrateを115200に設定（標準設定）
-uart = machine.UART(0, baudrate=115200, tx=machine.Pin(0), rx=machine.Pin(1), txbuf=32)
+uart = machine.UART(0, baudrate=115200, tx=machine.Pin(0), rx=machine.Pin(1), txbuf=8192)
 os.dupterm(uart)
 # # Boot script for PB-1000 Emulator
 # # This runs automatically on power-up

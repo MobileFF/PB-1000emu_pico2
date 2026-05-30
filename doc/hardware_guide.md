@@ -54,10 +54,34 @@
 
 | デバイス | Pico ピン | 機能 | 備考 |
 | :--- | :--- | :--- | :--- |
-| コンソール (UART1) | GP4 (TX), GP5 (RX) | デバッグ / REPL | 任意 |
-| PIO UART | GP6 (TX), GP13 (RX) | 仮想 RS-232C | 任意 |
+| コンソール (UART1) | GP4 (TX), GP5 (RX) | デバッグ / REPL | 任意。`pb1000.ini` の `uart_tx_pin` / `uart_rx_pin` で変更可 |
+| PIO UART | GP6 (TX), GP13 (RX) | 仮想 RS-232C | 任意。デフォルト 9600 bps（`pb1000.ini` の `[pio_uart] baudrate` で変更可） |
 
-### 5. USB キーボード
+### 5. ビープ (PWM)
+
+| 機能 | Pico ピン | 備考 |
+| :--- | :--- | :--- |
+| ビープ音出力 | **GP14** | PWM 出力。`pb1000.ini` の `[beep] gpio_pin` で変更可 |
+
+ピンを 100 Ω 程度の抵抗を介して圧電ブザーまたは小型スピーカーに接続します。
+
+### 6. ジョイスティック（任意）
+
+直結方式（PULL_UP 入力、アクティブ LOW）で接続します。
+
+| ボタン | デフォルト Pico ピン | `pb1000.ini` キー |
+| :--- | :--- | :--- |
+| UP | GP18 | — |
+| DOWN | GP19 | — |
+| LEFT | GP20 | — |
+| RIGHT | GP21 | — |
+| FIRE1 | GP26 | `key_fire1` |
+| FIRE2 | GP27 | `key_fire2` |
+
+ピンアサインはすべて `main_input.py` の `JoystickInputManager.DEFAULT_PIN_MAP` で定義されており、コード変更で変えられます。
+74HC148 プライオリティエンコーダを使った 3-bit 接続回路の詳細は `references/joystick_3bit_encoding_circuit.md` を参照してください。
+
+### 7. USB キーボード
 
 - USB キーボードを **USB OTG アダプタ** を介して Pico の Micro-USB ポートに接続します。
 

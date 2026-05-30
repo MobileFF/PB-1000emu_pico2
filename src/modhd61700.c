@@ -28,6 +28,15 @@ static uint8_t ram_buf[0x2000];     // 8KB RAM (0x6000-0x7FFF)
 static uint8_t bank1_buf[0x8000]; // 32KB RAM Bank 1 (0x8000-0xFFFF)
 static uint8_t bank2_buf[0x8000]; // 32KB RAM Bank 2 (0x8000-0xFFFF)
 static uint8_t bank3_buf[0x8000]; // 32KB RAM Bank 3 (0x8000-0xFFFF)
+static uint8_t ext_work_buf[0x100]; // 256B Extension API work area (0x5F00-0x5FFF)
+
+/* LCD write log / read queue for unit-test intercept */
+#define LCD_INTERCEPT_SIZE 16
+static uint8_t lcd_write_log[LCD_INTERCEPT_SIZE];
+static uint8_t lcd_write_log_cnt = 0;
+static uint8_t lcd_read_queue[LCD_INTERCEPT_SIZE];
+static uint8_t lcd_read_q_head = 0; /* producer */
+static uint8_t lcd_read_q_tail = 0; /* consumer */
 /* has_bank[0]=ROM1 always present; [1..3] set when load_ram(slot,data) called */
 static bool has_bank[4] = {true, false, false, false};
 static bool has_bank_forced = false; /* true = Python override via set_has_exp_ram */
@@ -36,10 +45,6 @@ static bool has_bank_forced = false; /* true = Python override via set_has_exp_r
 static uint8_t sstop_sbot_last[4];
 static bool sstop_sbot_last_valid[4];
 
-/* Direct C mode flags */
-static bool use_c_mem = false;
-static bool use_c_lcd = false;
-static bool use_c_kb = false;
 
 /* LCD char output callback */
 static mp_obj_t py_lcd_char_cb    = MP_OBJ_NULL;
@@ -56,6 +61,11 @@ static uint8_t  _cdet_mode  = 0;  /* mode at sequence start (for rb8 direction) 
 /* Per-position shadow: last char code emitted at [page][global_col 0-31].
    0x00 = never written (no printable char has code 0x00). */
 static uint8_t  _cdet_shadow[4][32];
+/* Per-page text context flag: set when the first non-space char is detected on
+   a page.  Used to gate space emission so that blank LCD areas (all-zero pixels
+   match the space glyph) do not contaminate the shadow and suppress real spaces
+   in subsequent text output. */
+static bool     _cdet_row_has_text[4];
 
 /* ====== C Keyboard Matrix ====== */
 #define KB_ROWS 13
@@ -111,6 +121,7 @@ static mp_obj_t py_io_write_callback = MP_OBJ_NULL;
 #define CALL_HOOK_MAX 16
 static uint16_t call_hook_addrs[CALL_HOOK_MAX];
 static mp_obj_t  call_hook_fns[CALL_HOOK_MAX];  /* static = scanned by conservative GC */
+static bool      call_hook_enabled[CALL_HOOK_MAX];
 static int       call_hook_count = 0;
 static bool c_call_hook_dispatcher(void *ctx, uint16_t addr); /* forward decl */
 
@@ -127,11 +138,10 @@ static uint8_t vfdd_data_reg = 0x55; // Default to MD-100 ID (Read)
 static uint8_t vfdd_write_reg = 0x00; // Captured write data
 
 /* C-side port direct control state (RP2350 GPIO / PWM) */
-static bool     use_c_port        = false;
 static uint8_t  c_port_data       = 0;      /* last value written to port by CPU */
 static uint32_t c_port_read_count = 0;      /* boot-sequence ON key counter */
-static int      c_tx_pin          = 6;      /* RS-232C TXD (GP6) */
-static int      c_rx_pin          = 13;     /* RS-232C RXD (GP13) */
+static int      c_tx_pin          = -1;     /* RS-232C TXD (-1 = not configured) */
+static int      c_rx_pin          = -1;     /* RS-232C RXD (-1 = not configured) */
 static int      c_beep_pin        = -1;     /* PWM BEEP pin (-1 = disabled) */
 static uint     c_beep_pwm_slice  = 0;
 static uint     c_beep_channel    = 0;
@@ -493,7 +503,6 @@ void c_kb_process_usb_key_extern(uint8_t scancode, bool pressed) {
 
 /* Service KEY_INT pulses - called from hd61700_execute wrapper */
 static void c_kb_service_input_lines(void) {
-  if (!use_c_kb) return;
   /* Deferred combo release: release SFT+target together after hold period expires */
   if (c_kb_deferred_combo_release_ms != 0 &&
       (int32_t)(mp_hal_ticks_ms() - c_kb_deferred_combo_release_ms) >= 0) {
@@ -571,11 +580,6 @@ static bool is_key_buffer_trace_addr(uint32_t offset) {
 /* Python callback objects */
 static mp_obj_t py_mem_read_cb = MP_OBJ_NULL;
 static mp_obj_t py_mem_write_cb = MP_OBJ_NULL;
-static mp_obj_t py_lcd_read_cb = MP_OBJ_NULL;
-static mp_obj_t py_lcd_write_cb = MP_OBJ_NULL;
-static mp_obj_t py_lcd_ctrl_cb = MP_OBJ_NULL;
-static mp_obj_t py_kb_read_cb = MP_OBJ_NULL;
-static mp_obj_t py_kb_write_cb = MP_OBJ_NULL;
 static mp_obj_t py_port_read_cb = MP_OBJ_NULL;
 static mp_obj_t py_port_write_cb = MP_OBJ_NULL;
 
@@ -719,66 +723,14 @@ static void anchor_callbacks(mp_obj_t obj) {
   mp_obj_list_append(py_callback_anchor_list, obj);
 }
 
-static uint8_t c_mem_read(void *ctx, uint8_t segment, uint32_t offset) {
-  (void)ctx;
-  if (py_mem_read_cb == MP_OBJ_NULL)
-    return 0;
-  mp_obj_t args[2] = {MP_OBJ_NEW_SMALL_INT(segment),
-                      MP_OBJ_NEW_SMALL_INT(offset)};
-  mp_obj_t result = mp_call_function_n_kw(py_mem_read_cb, 2, 0, args);
-  return (uint8_t)mp_obj_get_int(result);
-}
-
-static void c_mem_write(void *ctx, uint8_t segment, uint32_t offset,
-                        uint8_t data) {
-  (void)ctx;
-  if (py_mem_write_cb == MP_OBJ_NULL)
-    return;
-  mp_obj_t args[3] = {MP_OBJ_NEW_SMALL_INT(segment),
-                      MP_OBJ_NEW_SMALL_INT(offset), MP_OBJ_NEW_SMALL_INT(data)};
-  mp_call_function_n_kw(py_mem_write_cb, 3, 0, args);
-}
-
-static uint8_t c_lcd_read(void *ctx) {
-  (void)ctx;
-  if (py_lcd_read_cb == MP_OBJ_NULL)
-    return 0xff;
-  mp_obj_t result = mp_call_function_0(py_lcd_read_cb);
-  return (uint8_t)mp_obj_get_int(result);
-}
-
-static void c_lcd_write(void *ctx, uint8_t data) {
-  (void)ctx;
-  if (py_lcd_write_cb == MP_OBJ_NULL)
-    return;
-  mp_obj_t args[1] = {MP_OBJ_NEW_SMALL_INT(data)};
-  mp_call_function_n_kw(py_lcd_write_cb, 1, 0, args);
-}
-
-static void c_lcd_ctrl(void *ctx, uint8_t data) {
-  (void)ctx;
-  if (py_lcd_ctrl_cb == MP_OBJ_NULL)
-    return;
-  mp_obj_t args[1] = {MP_OBJ_NEW_SMALL_INT(data)};
-  mp_call_function_n_kw(py_lcd_ctrl_cb, 1, 0, args);
-}
-
 static uint16_t c_kb_read(void *ctx) {
   (void)ctx;
-  if (use_c_kb) return c_kb_compute_ky();
-  if (py_kb_read_cb == MP_OBJ_NULL)
-    return 0;
-  mp_obj_t result = mp_call_function_0(py_kb_read_cb);
-  return (uint16_t)mp_obj_get_int(result);
+  return c_kb_compute_ky();
 }
 
 static void c_kb_write(void *ctx, uint8_t data) {
   (void)ctx;
-  if (use_c_kb) { c_kb_ia_select = data; return; }
-  if (py_kb_write_cb == MP_OBJ_NULL)
-    return;
-  mp_obj_t args[1] = {MP_OBJ_NEW_SMALL_INT(data)};
-  mp_call_function_n_kw(py_kb_write_cb, 1, 0, args);
+  c_kb_ia_select = data;
 }
 
 /* Apply BEEP on/off state to PWM hardware without redundant register writes. */
@@ -791,60 +743,47 @@ static void c_beep_apply(bool on) {
 
 static uint8_t c_port_read(void *ctx) {
   (void)ctx;
-  if (use_c_port) {
-    /* PD_PWR = bit4, active LOW: FDD interface is powered when bit4=0 */
-    bool fdd_powered = (c_port_data & 0x10u) == 0;
-    if (fdd_powered && py_port_read_cb != MP_OBJ_NULL) {
-      /* Delegate to Python for FDD transfer-direction ACK */
-      mp_obj_t result = mp_call_function_0(py_port_read_cb);
-      return (uint8_t)mp_obj_get_int(result);
-    }
-    /* Normal mode: read RX GPIO + boot-sequence ON key simulation */
-    uint8_t rx_bit = gpio_get((uint)c_rx_pin) ? 1u : 0u;
-    c_port_read_count++;
-    uint8_t on_key = (c_port_read_count < 100u) ? 0u : 1u;
-    return on_key | (uint8_t)(rx_bit << 3);
+  /* PD_PWR = bit4, active LOW: FDD interface is powered when bit4=0 */
+  bool fdd_powered = (c_port_data & 0x10u) == 0;
+  if (fdd_powered && py_port_read_cb != MP_OBJ_NULL) {
+    /* Delegate to Python for FDD transfer-direction ACK */
+    mp_obj_t result = mp_call_function_0(py_port_read_cb);
+    return (uint8_t)mp_obj_get_int(result);
   }
-  if (py_port_read_cb == MP_OBJ_NULL)
-    return 0;
-  mp_obj_t result = mp_call_function_0(py_port_read_cb);
-  return (uint8_t)mp_obj_get_int(result);
+  /* Normal mode: read RX GPIO + boot-sequence ON key simulation */
+  uint8_t rx_bit = (c_rx_pin >= 0) ? (gpio_get((uint)c_rx_pin) ? 1u : 0u) : 0u;
+  c_port_read_count++;
+  uint8_t on_key = (c_port_read_count < 100u) ? 0u : 1u;
+  return on_key | (uint8_t)(rx_bit << 3);
 }
 
 static void c_port_write(void *ctx, uint8_t data) {
   (void)ctx;
-  if (use_c_port) {
-    uint8_t prev    = c_port_data;
-    c_port_data     = data;
-    bool was_fdd    = (prev & 0x10u) == 0;  /* PD_PWR was low (active) */
-    bool is_fdd     = (data & 0x10u) == 0;  /* PD_PWR is  low (active) */
+  uint8_t prev = c_port_data;
+  c_port_data  = data;
+  bool was_fdd = (prev & 0x10u) == 0;  /* PD_PWR was low (active) */
+  bool is_fdd  = (data & 0x10u) == 0;  /* PD_PWR is  low (active) */
 
-    /* TX GPIO for RS-232C bit-banging — suppress when FDD interface is powered */
-    if (!is_fdd) {
-      gpio_put((uint)c_tx_pin, (data >> 2) & 1u);
-    }
-
-    /* BEEP: bit6=0x40 or bit7=0x80 → sound; both set (0xC0) → silence */
-    if (c_beep_pin >= 0) {
-      uint8_t beep_bits = data & 0xC0u;
-      if (beep_bits == 0xC0u) {
-        c_beep_apply(false);
-      } else if (beep_bits == 0x40u || beep_bits == 0x80u) {
-        c_beep_apply(true);
-      }
-    }
-
-    /* FDD state machine: delegate to Python when interface was or is powered */
-    if ((was_fdd || is_fdd) && py_port_write_cb != MP_OBJ_NULL) {
-      mp_obj_t args[1] = {MP_OBJ_NEW_SMALL_INT(data)};
-      mp_call_function_n_kw(py_port_write_cb, 1, 0, args);
-    }
-    return;
+  /* TX GPIO for RS-232C bit-banging — suppress when FDD interface is powered */
+  if (!is_fdd && c_tx_pin >= 0) {
+    gpio_put((uint)c_tx_pin, (data >> 2) & 1u);
   }
-  if (py_port_write_cb == MP_OBJ_NULL)
-    return;
-  mp_obj_t args[1] = {MP_OBJ_NEW_SMALL_INT(data)};
-  mp_call_function_n_kw(py_port_write_cb, 1, 0, args);
+
+  /* BEEP: bit6=0x40 or bit7=0x80 → sound; both set (0xC0) → silence */
+  if (c_beep_pin >= 0) {
+    uint8_t beep_bits = data & 0xC0u;
+    if (beep_bits == 0xC0u) {
+      c_beep_apply(false);
+    } else if (beep_bits == 0x40u || beep_bits == 0x80u) {
+      c_beep_apply(true);
+    }
+  }
+
+  /* FDD state machine: delegate to Python when interface was or is powered */
+  if ((was_fdd || is_fdd) && py_port_write_cb != MP_OBJ_NULL) {
+    mp_obj_t args[1] = {MP_OBJ_NEW_SMALL_INT(data)};
+    mp_call_function_n_kw(py_port_write_cb, 1, 0, args);
+  }
 }
 
 static void c_log_write(void *ctx, const char *msg) {
@@ -917,9 +856,9 @@ static uint8_t c_mem_direct_read(void *ctx, uint8_t segment, uint32_t offset) {
       return bank_bufs[bank - 1][off];
     return 0xFF;
   }
-  /* Extension work area 0x5F00-0x5FFF: delegate to Python callback */
+  /* Extension work area 0x5F00-0x5FFF */
   if (logical_addr >= 0x5F00 && logical_addr < 0x6000) {
-    return c_mem_read(ctx, segment, offset);
+    return ext_work_buf[logical_addr - 0x5F00];
   }
   return 0xFF;
 }
@@ -975,9 +914,9 @@ static void c_mem_direct_write(void *ctx, uint8_t segment, uint32_t offset,
     }
     return;
   }
-  /* Extension work area 0x5F00-0x5FFF: delegate to Python callback */
+  /* Extension work area 0x5F00-0x5FFF */
   if (offset >= 0x5F00 && offset < 0x6000) {
-    c_mem_write(ctx, segment, offset, data);
+    ext_work_buf[offset - 0x5F00] = data;
     return;
   }
   /* Banks 1-3: RAM Write (0x8000-0xFFFF) */
@@ -1049,8 +988,9 @@ static void c_lcd_direct_write(void *ctx, uint8_t data) {
         /* Pixel write path: DRAW_BITIMAGE and all other modes */
         uint8_t x    = (uint8_t)(lcd->chip_state[chip].x & 0xFF);
         uint8_t page = (uint8_t)(lcd->chip_state[chip].y & 0x03);
-        /* Page change → signal row end */
+        /* Page change → signal row end, reset text context for old page */
         if (_cdet_lpage >= 0 && page != (uint8_t)_cdet_lpage) {
+          _cdet_row_has_text[(uint8_t)_cdet_lpage] = false;
           mp_call_function_1(py_lcd_char_cb, mp_const_none);
           _cdet_col = 0;
         }
@@ -1072,14 +1012,39 @@ static void c_lcd_direct_write(void *ctx, uint8_t data) {
             int code = cdet_match_charset(lcd);
             _cdet_col = 0;
             if (code >= 0) {
-              /* Shadow dedup: skip if same char was last emitted here */
               uint8_t gcol = (uint8_t)((_cdet_chip ? 16u : 0u) + (_cdet_x0 / 6u));
-              if (gcol < 32 && _cdet_shadow[_cdet_page][gcol] == (uint8_t)code) {
-                /* same content refresh – suppress */
+              if (code == 0x20) {
+                /* Space: the space glyph (all-zero pixels) is indistinguishable
+                   from a blank LCD area.  Only emit in text context (at least one
+                   non-space char was already detected on this page), and only
+                   when the shadow shows the position was not already space.
+                   This prevents blank screen areas from contaminating the shadow
+                   and then suppressing real spaces in subsequent text output. */
+                if (_cdet_row_has_text[_cdet_page]
+                    && (gcol >= 32 || _cdet_shadow[_cdet_page][gcol] != 0x20)) {
+                  if (gcol < 32) _cdet_shadow[_cdet_page][gcol] = 0x20;
+                  mp_call_function_1(py_lcd_char_cb, MP_OBJ_NEW_SMALL_INT(code));
+                }
               } else {
-                if (gcol < 32) _cdet_shadow[_cdet_page][gcol] = (uint8_t)code;
-                mp_call_function_1(py_lcd_char_cb,
-                                   MP_OBJ_NEW_SMALL_INT(code));
+                /* Non-space: update text context flag.
+                   On the first non-space of a row, reset any shadow positions
+                   that were set to 0x20 by a prior screen-clear pass, so that
+                   subsequent spaces in this text run are not incorrectly
+                   suppressed by the dedup. */
+                if (!_cdet_row_has_text[_cdet_page]) {
+                  for (int sc = 0; sc < 32; sc++) {
+                    if (_cdet_shadow[_cdet_page][sc] == 0x20)
+                      _cdet_shadow[_cdet_page][sc] = 0x00;
+                  }
+                  _cdet_row_has_text[_cdet_page] = true;
+                }
+                /* Shadow dedup: skip if same char was last emitted here */
+                if (gcol < 32 && _cdet_shadow[_cdet_page][gcol] == (uint8_t)code) {
+                  /* same content refresh – suppress */
+                } else {
+                  if (gcol < 32) _cdet_shadow[_cdet_page][gcol] = (uint8_t)code;
+                  mp_call_function_1(py_lcd_char_cb, MP_OBJ_NEW_SMALL_INT(code));
+                }
               }
             }
           }
@@ -1090,10 +1055,19 @@ static void c_lcd_direct_write(void *ctx, uint8_t data) {
     }
   }
   lcd_write(lcd, data);
+  /* Test intercept: log the raw byte */
+  if (lcd_write_log_cnt < LCD_INTERCEPT_SIZE)
+    lcd_write_log[lcd_write_log_cnt++] = data;
 }
 
 static uint8_t c_lcd_direct_read(void *ctx) {
   (void)ctx;
+  /* Test intercept: pop from read queue when non-empty */
+  if (lcd_read_q_head != lcd_read_q_tail) {
+    uint8_t val = lcd_read_queue[lcd_read_q_tail];
+    lcd_read_q_tail = (lcd_read_q_tail + 1) & (LCD_INTERCEPT_SIZE - 1);
+    return val;
+  }
   return lcd_read(lcd_c_get_state());
 }
 
@@ -1115,7 +1089,7 @@ static mp_obj_t mod_reset(size_t n_args, const mp_obj_t *args) {
   c_port_read_count = 0;
   c_port_data = 0;
   c_beep_on = false;
-  if (use_c_port && c_beep_pin >= 0) {
+  if (c_beep_pin >= 0) {
     pwm_set_chan_level(c_beep_pwm_slice, c_beep_channel, 0); /* silence on reset */
   }
   hd61700_set_key_debug(&cpu_state, cpu_debug_enabled && cpu_key_debug_enabled);
@@ -1128,13 +1102,13 @@ static mp_obj_t mod_reset(size_t n_args, const mp_obj_t *args) {
     detect_all_banks();
   }
   /* Register C callbacks */
-  cpu_state.mem_read = use_c_mem ? c_mem_direct_read : c_mem_read;
-  cpu_state.mem_write = use_c_mem ? c_mem_direct_write : c_mem_write;
+  cpu_state.mem_read = c_mem_direct_read;
+  cpu_state.mem_write = c_mem_direct_write;
   cpu_state.io_read = c_io_read_wrapper;
   cpu_state.io_write = c_io_write_wrapper;
-  cpu_state.lcd_read = use_c_lcd ? c_lcd_direct_read : c_lcd_read;
-  cpu_state.lcd_write = use_c_lcd ? c_lcd_direct_write : c_lcd_write;
-  cpu_state.lcd_ctrl = use_c_lcd ? c_lcd_direct_ctrl : c_lcd_ctrl;
+  cpu_state.lcd_read = c_lcd_direct_read;
+  cpu_state.lcd_write = c_lcd_direct_write;
+  cpu_state.lcd_ctrl = c_lcd_direct_ctrl;
   cpu_state.kb_read = c_kb_read;
   cpu_state.kb_write = c_kb_write;
   cpu_state.port_read = c_port_read;
@@ -1148,7 +1122,7 @@ static mp_obj_t mod_reset(size_t n_args, const mp_obj_t *args) {
   }
 
   /* Connect direct memory pointers for high-performance path */
-  if (use_c_mem) {
+  {
     static uint8_t * const bank_bufs[3] = {bank1_buf, bank2_buf, bank3_buf};
     cpu_state.rom0_ptr    = rom0_buf;
     cpu_state.ram_ptr     = ram_buf;
@@ -1157,13 +1131,6 @@ static mp_obj_t mod_reset(size_t n_args, const mp_obj_t *args) {
     for (int i = 1; i <= 3; i++) {
       cpu_state.bank_ptr[i]    = has_bank[i] ? bank_bufs[i - 1] : NULL;
       cpu_state.bank_is_ram[i] = true;
-    }
-  } else {
-    cpu_state.rom0_ptr = NULL;
-    cpu_state.ram_ptr  = NULL;
-    for (int i = 0; i < 4; i++) {
-      cpu_state.bank_ptr[i]    = NULL;
-      cpu_state.bank_is_ram[i] = (i > 0);
     }
   }
   return mp_const_none;
@@ -1231,23 +1198,9 @@ static mp_obj_t mod_set_mem_callbacks(mp_obj_t read_fn, mp_obj_t write_fn) {
 static MP_DEFINE_CONST_FUN_OBJ_2(mod_set_mem_callbacks_obj,
                                  mod_set_mem_callbacks);
 
-/* hd61700.set_lcd_callbacks(read_fn, write_fn, ctrl_fn) */
-static mp_obj_t mod_set_lcd_callbacks(mp_obj_t read_fn, mp_obj_t write_fn,
-                                      mp_obj_t ctrl_fn) {
-  py_lcd_read_cb = read_fn;
-  py_lcd_write_cb = write_fn;
-  py_lcd_ctrl_cb = ctrl_fn;
-  anchor_callbacks(read_fn);
-  anchor_callbacks(write_fn);
-  anchor_callbacks(ctrl_fn);
-  return mp_const_none;
-}
-static MP_DEFINE_CONST_FUN_OBJ_3(mod_set_lcd_callbacks_obj,
-                                 mod_set_lcd_callbacks);
-
 /* hd61700.set_lcd_char_callback(fn)
    Register a Python callable called for each character written to the LCD in
-   DRAW_CHAR mode when use_c_lcd is active.  Called as fn(code) where code is
+   DRAW_CHAR mode.  Called as fn(code) where code is
    an integer byte value, or fn(None) to signal a row change (newline).
    Pass None to unregister. */
 static mp_obj_t mod_set_lcd_char_callback(mp_obj_t cb_obj) {
@@ -1258,6 +1211,7 @@ static mp_obj_t mod_set_lcd_char_callback(mp_obj_t cb_obj) {
     anchor_callbacks(cb_obj);
     c_lcd_char_last_y = -1;
     memset(_cdet_shadow, 0, sizeof(_cdet_shadow));
+    memset(_cdet_row_has_text, 0, sizeof(_cdet_row_has_text));
     _cdet_col  = 0;
     _cdet_lpage = -1;
   }
@@ -1265,17 +1219,6 @@ static mp_obj_t mod_set_lcd_char_callback(mp_obj_t cb_obj) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(mod_set_lcd_char_callback_obj,
                                   mod_set_lcd_char_callback);
-
-/* hd61700.set_kb_callbacks(read_fn, write_fn) */
-static mp_obj_t mod_set_kb_callbacks(mp_obj_t read_fn, mp_obj_t write_fn) {
-  py_kb_read_cb = read_fn;
-  py_kb_write_cb = write_fn;
-  anchor_callbacks(read_fn);
-  anchor_callbacks(write_fn);
-  return mp_const_none;
-}
-static MP_DEFINE_CONST_FUN_OBJ_2(mod_set_kb_callbacks_obj,
-                                 mod_set_kb_callbacks);
 
 /* hd61700.set_port_callbacks(read_fn, write_fn) */
 static mp_obj_t mod_set_port_callbacks(mp_obj_t read_fn, mp_obj_t write_fn) {
@@ -1483,31 +1426,11 @@ static mp_obj_t mod_load_ram(mp_obj_t slot_obj, mp_obj_t data_obj) {
     has_bank[slot] = true;
     /* Update bank_ptr immediately so subsequent reads without reset() also work */
     static uint8_t * const bank_bufs[3] = {bank1_buf, bank2_buf, bank3_buf};
-    if (use_c_mem)
-      cpu_state.bank_ptr[slot] = bank_bufs[slot - 1];
+    cpu_state.bank_ptr[slot] = bank_bufs[slot - 1];
   }
   return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_2(mod_load_ram_obj, mod_load_ram);
-
-/* hd61700.use_c_memory(bool) */
-static mp_obj_t mod_use_c_memory(mp_obj_t enable_obj) {
-  use_c_mem = mp_obj_is_true(enable_obj);
-  cpu_state.mem_read = use_c_mem ? c_mem_direct_read : c_mem_read;
-  cpu_state.mem_write = use_c_mem ? c_mem_direct_write : c_mem_write;
-  return mp_const_none;
-}
-static MP_DEFINE_CONST_FUN_OBJ_1(mod_use_c_memory_obj, mod_use_c_memory);
-
-/* hd61700.use_c_lcd(bool) */
-static mp_obj_t mod_use_c_lcd(mp_obj_t enable_obj) {
-  use_c_lcd = mp_obj_is_true(enable_obj);
-  cpu_state.lcd_read = use_c_lcd ? c_lcd_direct_read : c_lcd_read;
-  cpu_state.lcd_write = use_c_lcd ? c_lcd_direct_write : c_lcd_write;
-  cpu_state.lcd_ctrl = use_c_lcd ? c_lcd_direct_ctrl : c_lcd_ctrl;
-  return mp_const_none;
-}
-static MP_DEFINE_CONST_FUN_OBJ_1(mod_use_c_lcd_obj, mod_use_c_lcd);
 
 /* hd61700.get_ram_view() */
 static mp_obj_t mod_get_ram_view(void) {
@@ -1534,6 +1457,44 @@ static mp_obj_t mod_get_bank_view(mp_obj_t bank_obj) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(mod_get_bank_view_obj, mod_get_bank_view);
 
+/* hd61700.get_ext_work_view() — returns memoryview of ext_work_buf (0x5F00-0x5FFF) */
+static mp_obj_t mod_get_ext_work_view(void) {
+  return mp_obj_new_memoryview('B', sizeof(ext_work_buf), ext_work_buf);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(mod_get_ext_work_view_obj, mod_get_ext_work_view);
+
+/* hd61700.lcd_get_write_log() — returns bytearray of bytes written to LCD since last clear */
+static mp_obj_t mod_lcd_get_write_log(void) {
+  return mp_obj_new_bytes(lcd_write_log, lcd_write_log_cnt);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(mod_lcd_get_write_log_obj, mod_lcd_get_write_log);
+
+/* hd61700.lcd_clear_write_log() */
+static mp_obj_t mod_lcd_clear_write_log(void) {
+  lcd_write_log_cnt = 0;
+  return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(mod_lcd_clear_write_log_obj, mod_lcd_clear_write_log);
+
+/* hd61700.lcd_push_read(byte) — push a byte to the read queue (consumed by LDL etc.) */
+static mp_obj_t mod_lcd_push_read(mp_obj_t byte_obj) {
+  uint8_t next = (lcd_read_q_head + 1) & (LCD_INTERCEPT_SIZE - 1);
+  if (next != lcd_read_q_tail) {
+    lcd_read_queue[lcd_read_q_head] = (uint8_t)mp_obj_get_int(byte_obj);
+    lcd_read_q_head = next;
+  }
+  return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(mod_lcd_push_read_obj, mod_lcd_push_read);
+
+/* hd61700.lcd_clear_read_queue() */
+static mp_obj_t mod_lcd_clear_read_queue(void) {
+  lcd_read_q_head = 0;
+  lcd_read_q_tail = 0;
+  return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(mod_lcd_clear_read_queue_obj, mod_lcd_clear_read_queue);
+
 /* hd61700.set_has_exp_ram(bool)  — sets Bank 1 presence flag (backward compat) */
 static mp_obj_t mod_set_has_exp_ram(mp_obj_t enable_obj) {
   has_bank[1]    = mp_obj_is_true(enable_obj);
@@ -1549,7 +1510,7 @@ static MP_DEFINE_CONST_FUN_OBJ_1(mod_set_has_exp_ram_obj, mod_set_has_exp_ram);
 static bool c_call_hook_dispatcher(void *ctx, uint16_t addr) {
   (void)ctx;
   for (int i = 0; i < call_hook_count; i++) {
-    if (call_hook_addrs[i] == addr) {
+    if (call_hook_addrs[i] == addr && call_hook_enabled[i]) {
       mp_call_function_0(call_hook_fns[i]);
       return true;
     }
@@ -1571,8 +1532,9 @@ static mp_obj_t mod_set_call_hook(mp_obj_t addr_obj, mp_obj_t fn_obj) {
   }
   /* New entry */
   if (call_hook_count < CALL_HOOK_MAX) {
-    call_hook_addrs[call_hook_count] = addr;
-    call_hook_fns[call_hook_count]   = fn_obj;
+    call_hook_addrs[call_hook_count]   = addr;
+    call_hook_fns[call_hook_count]     = fn_obj;
+    call_hook_enabled[call_hook_count] = true;
     call_hook_count++;
   }
   cpu_state.call_hook = c_call_hook_dispatcher;
@@ -1588,8 +1550,9 @@ static mp_obj_t mod_clear_call_hook(mp_obj_t addr_obj) {
     if (call_hook_addrs[i] == addr) {
       /* Fill hole with last entry */
       call_hook_count--;
-      call_hook_addrs[i] = call_hook_addrs[call_hook_count];
-      call_hook_fns[i]   = call_hook_fns[call_hook_count];
+      call_hook_addrs[i]   = call_hook_addrs[call_hook_count];
+      call_hook_fns[i]     = call_hook_fns[call_hook_count];
+      call_hook_enabled[i] = call_hook_enabled[call_hook_count];
       call_hook_fns[call_hook_count] = MP_OBJ_NULL; /* release GC ref */
       break;
     }
@@ -1601,17 +1564,28 @@ static mp_obj_t mod_clear_call_hook(mp_obj_t addr_obj) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(mod_clear_call_hook_obj, mod_clear_call_hook);
 
+/* hd61700.set_call_hook_enabled(address, enabled)
+ * Enable or disable the hook for the given address without unregistering it.
+ * The callable is preserved; pass enabled=False to suppress firing. */
+static mp_obj_t mod_set_call_hook_enabled(mp_obj_t addr_obj, mp_obj_t enabled_obj) {
+  uint16_t addr = (uint16_t)mp_obj_get_int(addr_obj);
+  bool enabled = mp_obj_is_true(enabled_obj);
+  for (int i = 0; i < call_hook_count; i++) {
+    if (call_hook_addrs[i] == addr) {
+      call_hook_enabled[i] = enabled;
+      return mp_const_none;
+    }
+  }
+  return mp_const_none;  /* address not registered — silently ignore */
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(mod_set_call_hook_enabled_obj, mod_set_call_hook_enabled);
+
 /* hd61700.read_mem(addr, [segment]) */
 static mp_obj_t mod_read_mem(size_t n_args, const mp_obj_t *args) {
   uint32_t addr = (uint32_t)mp_obj_get_int(args[0]);
   uint8_t segment = (n_args > 1) ? (uint8_t)mp_obj_get_int(args[1]) : 0;
   uint8_t bank = normalize_bank(segment);
-  uint8_t data;
-  if (use_c_mem) {
-    data = c_mem_direct_read(NULL, bank, addr);
-  } else {
-    data = c_mem_read(NULL, bank, addr);
-  }
+  uint8_t data = c_mem_direct_read(NULL, bank, addr);
   return MP_OBJ_NEW_SMALL_INT(data);
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(mod_read_mem_obj, 1, 2,
@@ -1623,11 +1597,7 @@ static mp_obj_t mod_write_mem(size_t n_args, const mp_obj_t *args) {
   uint8_t data = (uint8_t)mp_obj_get_int(args[1]);
   uint8_t segment = (n_args > 2) ? (uint8_t)mp_obj_get_int(args[2]) : 0;
   uint8_t bank = normalize_bank(segment);
-  if (use_c_mem) {
-    c_mem_direct_write(NULL, bank, addr, data);
-  } else {
-    c_mem_write(NULL, bank, addr, data);
-  }
+  c_mem_direct_write(NULL, bank, addr, data);
   return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(mod_write_mem_obj, 2, 3,
@@ -1649,18 +1619,6 @@ static mp_obj_t mod_init_anchor(void) {
   return py_callback_anchor_list;
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(mod_init_anchor_obj, mod_init_anchor);
-
-/* hd61700.use_c_keyboard(enabled) */
-static mp_obj_t mod_use_c_keyboard(mp_obj_t enabled_obj) {
-  use_c_kb = mp_obj_is_true(enabled_obj);
-  /* Clear C matrix state on mode change */
-  memset(c_kb_matrix, 0, sizeof(c_kb_matrix));
-  c_kb_active_usb_count = 0;
-  c_kb_key_line_state = false;
-  c_kb_pulse_release_pending = false;
-  return mp_const_none;
-}
-static MP_DEFINE_CONST_FUN_OBJ_1(mod_use_c_keyboard_obj, mod_use_c_keyboard);
 
 /* hd61700.set_f11_callback(fn) */
 static mp_obj_t mod_set_f11_callback(mp_obj_t fn_obj) {
@@ -1880,24 +1838,31 @@ static MP_DEFINE_CONST_FUN_OBJ_2(mod_set_io_callbacks_obj, mod_set_io_callbacks)
 
 /* hd61700.set_port_direct(tx_pin, rx_pin, beep_pin [, freq_hz [, duty_pct]])
  * Configure RP2350 GPIO and PWM for C-side port_read/write.
- * beep_pin = -1 disables BEEP.  Initialises GPIO output/input and, when
- * beep_pin >= 0, sets up the corresponding PWM slice. */
+ * beep_pin = -1 disables BEEP.  Only re-initialises TX/RX GPIO when the pin
+ * numbers actually change — prevents clobbering PIO ownership after the first
+ * call (e.g. when called again from the menu just to toggle the beep pin). */
 static mp_obj_t mod_set_port_direct(size_t n_args, const mp_obj_t *args) {
-  c_tx_pin   = mp_obj_get_int(args[0]);
-  c_rx_pin   = mp_obj_get_int(args[1]);
-  c_beep_pin = mp_obj_get_int(args[2]);
+  int new_tx   = mp_obj_get_int(args[0]);
+  int new_rx   = mp_obj_get_int(args[1]);
+  c_beep_pin   = mp_obj_get_int(args[2]);
   int freq_hz  = (n_args > 3) ? mp_obj_get_int(args[3]) : 1000;
   int duty_pct = (n_args > 4) ? mp_obj_get_int(args[4]) : 50;
 
-  /* TX: output, idle HIGH */
-  gpio_init((uint)c_tx_pin);
-  gpio_set_dir((uint)c_tx_pin, GPIO_OUT);
-  gpio_put((uint)c_tx_pin, 1u);
+  /* TX: output, idle HIGH — only (re)init when pin changes */
+  if (new_tx >= 0 && new_tx != c_tx_pin) {
+    c_tx_pin = new_tx;
+    gpio_init((uint)c_tx_pin);
+    gpio_set_dir((uint)c_tx_pin, GPIO_OUT);
+    gpio_put((uint)c_tx_pin, 1u);
+  }
 
-  /* RX: input with pull-up */
-  gpio_init((uint)c_rx_pin);
-  gpio_set_dir((uint)c_rx_pin, GPIO_IN);
-  gpio_pull_up((uint)c_rx_pin);
+  /* RX: input with pull-up — only (re)init when pin changes */
+  if (new_rx >= 0 && new_rx != c_rx_pin) {
+    c_rx_pin = new_rx;
+    gpio_init((uint)c_rx_pin);
+    gpio_set_dir((uint)c_rx_pin, GPIO_IN);
+    gpio_pull_up((uint)c_rx_pin);
+  }
 
   if (c_beep_pin >= 0) {
     gpio_set_function((uint)c_beep_pin, GPIO_FUNC_PWM);
@@ -1928,19 +1893,12 @@ static mp_obj_t mod_set_port_direct(size_t n_args, const mp_obj_t *args) {
   }
   mp_printf(&mp_plat_print,
             "[PORT] Direct C: TX=GP%d RX=GP%d BEEP=%s\n",
-            c_tx_pin, c_rx_pin,
+            new_tx, new_rx,
             (c_beep_pin >= 0) ? "enabled" : "disabled");
   return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(mod_set_port_direct_obj, 3, 5,
                                            mod_set_port_direct);
-
-/* hd61700.use_c_port(bool) — enable/disable C-side port_read/write handling */
-static mp_obj_t mod_use_c_port(mp_obj_t enable_obj) {
-  use_c_port = mp_obj_is_true(enable_obj);
-  return mp_const_none;
-}
-static MP_DEFINE_CONST_FUN_OBJ_1(mod_use_c_port_obj, mod_use_c_port);
 
 /* hd61700.get_port_data() -> int — last port byte written by the emulated CPU */
 static mp_obj_t mod_get_port_data(void) {
@@ -1975,12 +1933,8 @@ static const mp_rom_map_elem_t hd61700_module_globals_table[] = {
     {MP_ROM_QSTR(MP_QSTR_set_lcd_debug), MP_ROM_PTR(&mod_set_lcd_debug_obj)},
     {MP_ROM_QSTR(MP_QSTR_set_mem_callbacks),
      MP_ROM_PTR(&mod_set_mem_callbacks_obj)},
-    {MP_ROM_QSTR(MP_QSTR_set_lcd_callbacks),
-     MP_ROM_PTR(&mod_set_lcd_callbacks_obj)},
     {MP_ROM_QSTR(MP_QSTR_set_lcd_char_callback),
      MP_ROM_PTR(&mod_set_lcd_char_callback_obj)},
-    {MP_ROM_QSTR(MP_QSTR_set_kb_callbacks),
-     MP_ROM_PTR(&mod_set_kb_callbacks_obj)},
     {MP_ROM_QSTR(MP_QSTR_set_port_callbacks),
      MP_ROM_PTR(&mod_set_port_callbacks_obj)},
     {MP_ROM_QSTR(MP_QSTR_set_vfdd_data),
@@ -2010,23 +1964,33 @@ static const mp_rom_map_elem_t hd61700_module_globals_table[] = {
     /* Optimization APIs */
     {MP_ROM_QSTR(MP_QSTR_load_rom), MP_ROM_PTR(&mod_load_rom_obj)},
     {MP_ROM_QSTR(MP_QSTR_load_ram), MP_ROM_PTR(&mod_load_ram_obj)},
-    {MP_ROM_QSTR(MP_QSTR_use_c_memory), MP_ROM_PTR(&mod_use_c_memory_obj)},
-    {MP_ROM_QSTR(MP_QSTR_use_c_lcd), MP_ROM_PTR(&mod_use_c_lcd_obj)},
+    /* LCD test intercept APIs */
+    {MP_ROM_QSTR(MP_QSTR_lcd_get_write_log),
+     MP_ROM_PTR(&mod_lcd_get_write_log_obj)},
+    {MP_ROM_QSTR(MP_QSTR_lcd_clear_write_log),
+     MP_ROM_PTR(&mod_lcd_clear_write_log_obj)},
+    {MP_ROM_QSTR(MP_QSTR_lcd_push_read),
+     MP_ROM_PTR(&mod_lcd_push_read_obj)},
+    {MP_ROM_QSTR(MP_QSTR_lcd_clear_read_queue),
+     MP_ROM_PTR(&mod_lcd_clear_read_queue_obj)},
     /* C Port APIs */
     {MP_ROM_QSTR(MP_QSTR_set_port_direct), MP_ROM_PTR(&mod_set_port_direct_obj)},
-    {MP_ROM_QSTR(MP_QSTR_use_c_port), MP_ROM_PTR(&mod_use_c_port_obj)},
     {MP_ROM_QSTR(MP_QSTR_get_port_data), MP_ROM_PTR(&mod_get_port_data_obj)},
     {MP_ROM_QSTR(MP_QSTR_get_ram_view), MP_ROM_PTR(&mod_get_ram_view_obj)},
     {MP_ROM_QSTR(MP_QSTR_get_exp_ram_view),
      MP_ROM_PTR(&mod_get_exp_ram_view_obj)},
     {MP_ROM_QSTR(MP_QSTR_get_bank_view),
      MP_ROM_PTR(&mod_get_bank_view_obj)},
+    {MP_ROM_QSTR(MP_QSTR_get_ext_work_view),
+     MP_ROM_PTR(&mod_get_ext_work_view_obj)},
     {MP_ROM_QSTR(MP_QSTR_set_has_exp_ram),
      MP_ROM_PTR(&mod_set_has_exp_ram_obj)},
     {MP_ROM_QSTR(MP_QSTR_set_call_hook),
      MP_ROM_PTR(&mod_set_call_hook_obj)},
     {MP_ROM_QSTR(MP_QSTR_clear_call_hook),
      MP_ROM_PTR(&mod_clear_call_hook_obj)},
+    {MP_ROM_QSTR(MP_QSTR_set_call_hook_enabled),
+     MP_ROM_PTR(&mod_set_call_hook_enabled_obj)},
     {MP_ROM_QSTR(MP_QSTR_read_mem), MP_ROM_PTR(&mod_read_mem_obj)},
     {MP_ROM_QSTR(MP_QSTR_write_mem), MP_ROM_PTR(&mod_write_mem_obj)},
     {MP_ROM_QSTR(MP_QSTR__anchor_callbacks),
@@ -2040,8 +2004,6 @@ static const mp_rom_map_elem_t hd61700_module_globals_table[] = {
     {MP_ROM_QSTR(MP_QSTR_SW), MP_ROM_INT(HD61700_SW)},
     {MP_ROM_QSTR(MP_QSTR__init_anchor), MP_ROM_PTR(&mod_init_anchor_obj)},
     /* C Keyboard APIs */
-    {MP_ROM_QSTR(MP_QSTR_use_c_keyboard),
-     MP_ROM_PTR(&mod_use_c_keyboard_obj)},
     {MP_ROM_QSTR(MP_QSTR_set_f11_callback),
      MP_ROM_PTR(&mod_set_f11_callback_obj)},
     {MP_ROM_QSTR(MP_QSTR_set_f9_callback),

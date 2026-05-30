@@ -20,12 +20,6 @@ def init_usb_keyboard_early(*, enable_usb_kbd):
         print(f"USB Host early init failed: {e}")
         return
     try:
-        import hd61700 as _cpu
-        if hasattr(_cpu, 'use_c_keyboard'):
-            _cpu.use_c_keyboard(True)
-    except Exception as e:
-        print(f"C keyboard early enable failed: {e}")
-    try:
         import usb_host
         if hasattr(usb_host, 'start_bg_timer'):
             usb_host.start_bg_timer(8)
@@ -61,7 +55,7 @@ def create_system(display_ret, profile_dir=None, config=None, *, console_uart=No
     print("PB1000System initialized.")
     system.touch = touch
     if console_uart is not None:
-        system.console_uart = console_uart
+        system._console_uart_hw = console_uart  # store hw ref; console starts OFF by default
     system.lcd.set_display_scale(1.5)
     return system
 
@@ -103,7 +97,7 @@ def initialize_system(*, console_uart=None):
     print("PB1000System initialized.")
     system.touch = touch
     if console_uart is not None:
-        system.console_uart = console_uart
+        system._console_uart_hw = console_uart  # store hw ref; console starts OFF by default
     system.lcd.set_display_scale(1.5)
     return system
 
@@ -144,30 +138,36 @@ def initialize_usb_host_and_pio(system, *, enable_usb_kbd, pio_uart_baudrate=960
 
 
 def configure_c_keyboard(system, *, enable_usb_kbd):
+    import gc
     if not enable_usb_kbd:
         return None
+    gc.collect()
     try:
         import hd61700 as cpu_core
-        if hasattr(cpu_core, 'use_c_keyboard'):
-            cpu_core.use_c_keyboard(True)
-            print("C keyboard mode enabled.")
         if hasattr(cpu_core, 'set_f11_callback'):
             def _on_f11(_):
                 print("F11 pressed (Callback)")
                 system._save_requested = True
-            # Keep a reference to the handler on the system object to prevent GC
             system._f11_handler = _on_f11
             cpu_core.set_f11_callback(system._f11_handler)
         import keymap
         if hasattr(cpu_core, 'keyboard_config_adv'):
-            cpu_core.keyboard_config_adv(keymap.get_adv_map_list())
+            adv = keymap.get_adv_map_list()
+            cpu_core.keyboard_config_adv(adv)
+            del adv
+            gc.collect()
             print("C advanced keyboard map synchronized.")
         if hasattr(cpu_core, 'keyboard_config_base'):
-            cpu_core.keyboard_config_base(keymap.get_base_map_list())
+            base = keymap.get_base_map_list()
+            cpu_core.keyboard_config_base(base)
+            del base
+            gc.collect()
             print("C base keyboard map synchronized.")
         return cpu_core
     except Exception as e:
-        print(f"C keyboard mode init failed: {e}")
+        import sys
+        print(f"C keyboard mode init failed: {type(e).__name__}: {e}")
+        sys.print_exception(e)
         return None
 
 
@@ -176,8 +176,7 @@ def configure_usb_keyboard_routing():
     try:
         import usb_host
         if hasattr(usb_host, 'start_bg_timer'):
-            print("Starting USB background timer...")
             usb_host.start_bg_timer(8)
-            print("USB background timer started (8ms).")
+            print("USB background timer active (8ms).")
     except Exception as e:
         print(f"C keyboard routing setup failed: {e}")

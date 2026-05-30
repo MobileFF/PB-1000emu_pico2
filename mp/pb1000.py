@@ -204,8 +204,6 @@ class PB1000System:
     EXP_RAM_SIZE     = 0x8000   # 32KB Expanded RAM
     EXT_WORK_BASE    = 0x5F00   # Extension API work area (256 B)
     EXT_WORK_SIZE    = 0x100
-    PROG_TRACE_START = 0xB5D6
-    PROG_TRACE_END = 0xB7E6
     _KEY_TRACE_ADDRS = {
         0x68D2: "KYSTA",
         0x68D3: "CHATA",
@@ -232,16 +230,12 @@ class PB1000System:
 
     def __init__(self, display=None, debug=False, restore_registers=True,
                  profile_dir=None, config=None):
-        direct_mem_override = None
         direct_lcd_override = None
         if isinstance(debug, dict):
-            if "c_memory" in debug:
-                direct_mem_override = bool(debug.get("c_memory"))
             if "c_lcd" in debug:
                 direct_lcd_override = bool(debug.get("c_lcd"))
         self.debug_cfg = self._normalize_debug_config(debug)
         self.debug = self.debug_cfg["sys"]
-        self._ram_is_c_managed = False
         # Detect C-port availability early so _beep_init() can skip machine.PWM
         self._c_port_active = hasattr(cpu_core, 'set_port_direct')
         self.sd_mounted = False
@@ -268,7 +262,6 @@ class PB1000System:
         if hasattr(cpu_core, "get_ram_view"):
             raw_view = cpu_core.get_ram_view()
             self.ram = RAMView(cpu_core, memoryview(raw_view), self.RAM_SIZE, self.RAM_START)
-            self._ram_is_c_managed = True
             # Bank 1 (exp_ram): backward-compat view
             if self.has_bank[1] and hasattr(cpu_core, "get_exp_ram_view"):
                 exp_raw_view = cpu_core.get_exp_ram_view()
@@ -312,7 +305,8 @@ class PB1000System:
         self.touch_x_offset = 0
         self.touch_y_offset = -104  # adjust if touch mapping seems biased downward
         self.port_data = 0
-        self.console_uart = None  # Set externally from main.py
+        self._console_uart = None      # active uart (None = serial console OFF)
+        self._console_uart_hw = None   # uart hardware ref; set by main_boot, used by menu
         self._lcd_had_output = False
         self.status_msg = ""
         self.status_expiry_ms = 0
@@ -329,7 +323,6 @@ class PB1000System:
         # and bit4=0 (FM Error flag) to avoid spurious FDD errors.
         self._io_rd_regs = bytearray((0x00, 0x00, 0x00, 0x00, 0x55, 0x00, 0x00, 0x00))
         self._port_last_write = 0x1C
-        self._port_read_count = 0
         self._virtual_fdd_ack = False
         self._virtual_fdd_interface_powered = False
         self._pc_trace = array.array('H', [0] * 512)
@@ -339,10 +332,6 @@ class PB1000System:
         self._gpo_parity = 0   # Tracks gpo call parity for D92E P1/P0 protocol
         self._beep_init()
         self._ext_init()
-
-        # Raw UART Pins for bit-level passthrough
-        self._tx_pin = machine.Pin(6, machine.Pin.OUT, value=1)
-        self._rx_pin = machine.Pin(13, machine.Pin.IN, machine.Pin.PULL_UP)
 
         # PIO UART for RS-232C (Reserved for high-level Python access)
         # We now use this for MMIO 0x0C00-0x0C03 as well.
@@ -374,20 +363,7 @@ class PB1000System:
         if hasattr(cpu_core, "set_io_callbacks"):
             cpu_core.set_io_callbacks(self._cb_refs["io_read"], self._cb_refs["io_write"])
         
-        if hasattr(cpu_core, "use_c_memory"):
-            # Keep direct C memory enabled by default even in sys debug mode.
-            # Python-managed memory is now opt-in via debug={"c_memory": False}.
-            direct_mem = True if direct_mem_override is None else bool(direct_mem_override)
-            cpu_core.use_c_memory(direct_mem)
-            # RAMView may still exist in Python-callback mode, but delegating writes
-            # back through cpu_core.write_mem() would recurse into _mem_write().
-            self._ram_is_c_managed = bool(direct_mem)
-        # Use C LCD logic
-        if hasattr(cpu_core, "use_c_lcd"):
-            cpu_core.use_c_lcd(True)
-        if hasattr(cpu_core, "set_lcd_char_callback"):
-            self._cb_refs["lcd_char"] = self._on_lcd_char_output  # GC anchor
-            cpu_core.set_lcd_char_callback(self._cb_refs["lcd_char"])
+        # lcd_char callback is registered on demand via the console_uart property setter
 
         # Use C-side port_read/port_write (RP2350 GPIO/PWM direct)
         if self._c_port_active:
@@ -398,7 +374,6 @@ class PB1000System:
             _duty_pct = int(_beep_cfg.get("duty",     "50"))
             try:
                 cpu_core.set_port_direct(6, 13, _beep_pin, _freq_hz, _duty_pct)
-                cpu_core.use_c_port(True)
             except Exception as _e:
                 print(f"PORT: C-direct init failed: {_e}")
                 self._c_port_active = False
@@ -411,7 +386,7 @@ class PB1000System:
             gc.collect()
             with open(path, 'rb') as f:
                 data = f.read()
-                must_keep_copy = bool(keep_copy or not self._ram_is_c_managed or self.has_virtual_fdd())
+                must_keep_copy = bool(keep_copy or self.has_virtual_fdd())
                 if slot == 0:
                     self.rom0 = data if must_keep_copy else None
                     if hasattr(cpu_core, "load_rom"):
@@ -431,84 +406,12 @@ class PB1000System:
         return self._mem_read_impl(segment, offset)
 
     def _mem_read_impl(self, segment, offset):
-        if offset < 0x8000:
-            if offset < 0x2000:
-                if (
-                    self.has_virtual_fdd()
-                    and 0x0C00 <= offset <= 0x0C07
-                ):
-                    return self._read_io_register(offset)
-                if self.rom0 is not None:
-                    if offset < len(self.rom0):
-                        return self.rom0[offset]
-                elif self._ram_is_c_managed and hasattr(cpu_core, "read_mem"):
-                    return cpu_core.read_mem(offset, segment)
-                return 0xFF
-            elif offset >= self.RAM_START:
-                return self.ram[(offset - self.RAM_START) % len(self.ram)]
-            elif self.EXT_WORK_BASE <= offset < self.EXT_WORK_BASE + self.EXT_WORK_SIZE:
-                return self._ext_work[offset - self.EXT_WORK_BASE]
-            else:
-                return 0xFF
-
-        bank = (segment >> 4) & 0x03
-        if offset >= 0x8000:
-            if bank == 0:
-                rom_off = offset - 0x8000
-                if self.rom1 is not None:
-                    if rom_off < len(self.rom1):
-                        return self.rom1[rom_off]
-                elif self._ram_is_c_managed and hasattr(cpu_core, "read_mem"):
-                    return cpu_core.read_mem(offset, segment)
-            elif 1 <= bank <= 3 and self.has_bank[bank]:
-                off = offset - 0x8000
-                buf = self._bank_ram[bank]
-                if off < len(buf):
-                    return buf[off]
+        if hasattr(cpu_core, "read_mem"):
+            return cpu_core.read_mem(offset, segment)
         return 0xFF
 
     def _mem_write(self, segment, offset, data):
-        if self.RAM_START <= offset < self.SYS_ROM_START:
-            ram_index = (offset - self.RAM_START) % len(self.ram)
-            if self.PROG_TRACE_START <= offset <= self.PROG_TRACE_END:
-                pc = cpu_core.get_pc() if hasattr(cpu_core, "get_pc") else 0
-                ua = cpu_core.get_reg8(3) if hasattr(cpu_core, "get_reg8") else 0
-                print(f"[HD61700] PROG-WR PC={pc:04X} UA={ua:02X} BANK={segment & 0x03} RAM[{offset & 0xFFFF:04X}] <= {data & 0xFF:02X}")
-            if self._ram_is_c_managed and hasattr(cpu_core, "write_mem"):
-                cpu_core.write_mem(offset & 0xFFFF, data & 0xFF, segment)
-            else:
-                self.ram[ram_index] = data
-        elif (
-            self.has_virtual_fdd()
-            and 0x0C00 <= offset <= 0x0C07
-        ):
-            self._write_io_register(offset, data)
-        elif offset == 0x0C03:
-            # TX Data Register: Output character to pio_uart and console
-            if self.pio_uart:
-                self.pio_uart.write(data)
-            
-            char = chr(data & 0x7F)
-            if self.console_uart:
-                self.console_uart.write(char)
-            else:
-                print(char, end='')
-        elif self.EXT_WORK_BASE <= offset < self.EXT_WORK_BASE + self.EXT_WORK_SIZE:
-            self._ext_work[offset - self.EXT_WORK_BASE] = data & 0xFF
-        elif offset >= 0x8000:
-            bank = (segment >> 4) & 0x03
-            if 1 <= bank <= 3 and self.has_bank[bank]:
-                off = offset - 0x8000
-                buf = self._bank_ram[bank]
-                if off < len(buf):
-                    if self.PROG_TRACE_START <= offset <= self.PROG_TRACE_END:
-                        pc = cpu_core.get_pc() if hasattr(cpu_core, "get_pc") else 0
-                        ua = cpu_core.get_reg8(3) if hasattr(cpu_core, "get_reg8") else 0
-                        print(f"[HD61700] PROG-WR PC={pc:04X} UA={ua:02X} BANK={bank} RAM[{offset & 0xFFFF:04X}] <= {data & 0xFF:02X}")
-                    if self._ram_is_c_managed and hasattr(cpu_core, "write_mem"):
-                        cpu_core.write_mem(offset & 0xFFFF, data & 0xFF, segment)
-                    else:
-                        buf[off] = data
+        pass
 
     def _is_lcd_vram_addr(self, offset):
         return (0x6100 <= offset <= 0x61FF) or (0x6201 <= offset <= 0x6850)
@@ -522,45 +425,15 @@ class PB1000System:
         return self._display_probe_hit
 
     def _port_read(self):
-        if getattr(self, '_c_port_active', False):
-            # Called by C only when FDD interface is powered (PD_PWR bit=0).
-            # Return STR-based ACK for the MD-100 transfer protocol.
-            return 0x01 if (self.port_data & PD_STR) == 0 else 0x00
-
-        # Original path (fallback when C port layer is not active)
-        rx_bit = self._rx_pin.value()
-        self._port_read_count += 1
-
-        if self.has_virtual_fdd() and self._virtual_fdd_interface_powered:
-            res = 0x01 if (self.port_data & PD_STR) == 0 else 0x00
-            return res
-
-        on_key_state = 0 if self._port_read_count < 100 else 1
-        res = on_key_state
-        res |= (rx_bit << 3)
-        return res
+        # Called by C only when FDD interface is powered (PD_PWR bit=0).
+        # Return STR-based ACK for the MD-100 transfer protocol.
+        return 0x01 if (self.port_data & PD_STR) == 0 else 0x00
 
     def _port_write(self, data):
-        if getattr(self, '_c_port_active', False):
-            # Called by C only when FDD interface was/is powered.
-            # TX GPIO and BEEP are already handled by the C layer.
-            # Sync port_data from C-side tracking, then run FDD state machine.
-            self.port_data = cpu_core.get_port_data() if hasattr(cpu_core, 'get_port_data') else data
-            self._handle_virtual_fdd_port_write(data)
-            return
-
-        # Original path (fallback when C port layer is not active)
+        # Called by C only when FDD interface was/is powered.
+        # TX GPIO and BEEP are handled by the C layer.
         self.port_data = data
         self._handle_virtual_fdd_port_write(data)
-
-        if not (self.has_virtual_fdd() and self._virtual_fdd_interface_powered):
-            self._tx_pin.value((data >> 2) & 1)
-
-        beep_bits = data & PD_BEEP_MASK
-        if beep_bits == PD_BEEP_MASK:
-            self._beep_set(False)
-        elif beep_bits == 0x40 or beep_bits == 0x80:
-            self._beep_set(True)
 
     def _read_io_register(self, offset):
         index = offset & 0x07
@@ -739,7 +612,10 @@ class PB1000System:
     EXT_ERR_GENERAL = 0xFF
 
     def _ext_init(self):
-        self._ext_work = bytearray(self.EXT_WORK_SIZE)
+        if hasattr(cpu_core, "get_ext_work_view"):
+            self._ext_work = cpu_core.get_ext_work_view()
+        else:
+            self._ext_work = bytearray(self.EXT_WORK_SIZE)
         print(f"EXT: work area {self.EXT_WORK_BASE:#06x}-"
               f"{self.EXT_WORK_BASE + self.EXT_WORK_SIZE - 1:#06x}")
         self._ext_load_modules()
@@ -773,7 +649,7 @@ class PB1000System:
             break  # 最初に見つかったディレクトリのみ使用
 
     def _log_vfdd(self, msg):
-        print(f"[VFDD] {msg}") # Enabled for current debugging phase
+        pass
 
     def _handle_virtual_fdd_port_write(self, data):
         if not self.has_virtual_fdd():
@@ -1051,9 +927,6 @@ class PB1000System:
             except Exception:
                 pass
         self.virtual_fdd_controller.attach_dos(None)
-        if hasattr(cpu_core, "use_c_memory"):
-            cpu_core.use_c_memory(True)
-            self._ram_is_c_managed = True
         self.virtual_fdd = None
         self.virtual_fdd_config = {"enabled": False}
 
@@ -1213,6 +1086,16 @@ class PB1000System:
             self._call_hook_refs.pop(address, None)
         if hasattr(cpu_core, "clear_call_hook"):
             cpu_core.clear_call_hook(address)
+
+    def enable_call_hook(self, address):
+        """Enable a previously registered hook. No-op if not registered."""
+        if hasattr(cpu_core, "set_call_hook_enabled"):
+            cpu_core.set_call_hook_enabled(address, True)
+
+    def disable_call_hook(self, address):
+        """Disable a registered hook without unregistering it."""
+        if hasattr(cpu_core, "set_call_hook_enabled"):
+            cpu_core.set_call_hook_enabled(address, False)
 
     def load_state(self, path=None):
         import json
@@ -1423,12 +1306,38 @@ class PB1000System:
     def _scan_vram_for_text(self):
         pass
 
+    @property
+    def console_uart(self):
+        return self._console_uart
+
+    @console_uart.setter
+    def console_uart(self, uart):
+        self._console_uart = uart
+        if not hasattr(self, "_cb_refs"):
+            return
+        if not hasattr(cpu_core, "set_lcd_char_callback"):
+            return
+        if uart is not None:
+            if "lcd_char" not in self._cb_refs:
+                self._cb_refs["lcd_char"] = self._on_lcd_char_output
+            cpu_core.set_lcd_char_callback(self._cb_refs["lcd_char"])
+        else:
+            cpu_core.set_lcd_char_callback(None)
+
     def update_display(self, x_offset=None, y_offset=None):
         if x_offset is not None: self._disp_x = x_offset
         if y_offset is not None: self._disp_y = y_offset
         self.lcd.render_to_display(self._disp_x, self._disp_y)
         self._render_status_bar()
         self._scan_vram_for_text()
+
+    def force_full_redraw(self):
+        """Redraw bezel + LCD after overlaying the screen (e.g. after menu closes)."""
+        if hasattr(self.lcd, 'display') and self.lcd.display is not None:
+            draw_bezel(self.lcd.display, self.lcd.scale, self._disp_x, self._disp_y)
+        self.lcd.mark_dirty()
+        self._status_rendered_msg = None  # force status bar refresh
+        self.update_display()
 
     def set_status(self, msg, duration_ms=2000):
         self.status_msg = msg

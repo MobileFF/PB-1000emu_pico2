@@ -223,8 +223,6 @@ def test_bios_outac_direct_call_e2e():
     # Reset after loading to ensure clean boot from ROM.
     cpu_core.reset()
     cpu_core.set_mem_callbacks(system._cb_mem_read, system._cb_mem_write)
-    cpu_core.set_lcd_callbacks(system._cb_lcd_read, system._cb_lcd_write, system._cb_lcd_ctrl)
-    cpu_core.set_kb_callbacks(system._cb_kb_read, system._cb_kb_write)
     cpu_core.set_port_callbacks(system._cb_port_read, system._cb_port_write)
     # Restore register image used by emulator boot.
     system._restore_registers_from_dump()

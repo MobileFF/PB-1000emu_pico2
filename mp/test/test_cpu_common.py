@@ -5,6 +5,7 @@ import hd61700
 import gc
 
 TB = 0x7000          # Test Base address
+LCD_INTERCEPT_SIZE = 16  # matches C-side LCD_INTERCEPT_SIZE
 _A = []              # Anchor list for GC protection
 
 # Singleton T instance - reused across all test files
@@ -13,15 +14,6 @@ _shared_t = None
 class T:
     def __init__(self):
         _A.append(hd61700._init_anchor())
-        # Use C-side memory (no Python RAM buffers needed)
-        hd61700.use_c_memory(True)
-        # LCD dummy
-        self.lcd_buf = []
-        self._lr = self._lcd_read
-        self._lw = self._lcd_write
-        self._lc = self._lcd_ctrl
-        _A.extend([self._lr, self._lw, self._lc])
-        hd61700.set_lcd_callbacks(self._lr, self._lw, self._lc)
         # Port dummy
         self.port_out = 0
         self._pr = self._port_read
@@ -32,26 +24,30 @@ class T:
 
     def rst(self):
         hd61700.reset(False)
-        hd61700.use_c_memory(True)
+        hd61700.lcd_clear_write_log()
+        hd61700.lcd_clear_read_queue()
+        # Pre-fill read queue with 0xEE so LDL with no setup returns 0xEE
+        for _ in range(LCD_INTERCEPT_SIZE):
+            hd61700.lcd_push_read(0xEE)
         hd61700.set_debug(False)
         hd61700.set_key_debug(False)
         hd61700.set_lcd_debug(False)
         for i in range(32): hd61700.set_reg(i, 0)
         for i in range(3): hd61700.set_sreg(i, i)
         for i in range(8): hd61700.set_reg16(i, 0)
-        self.lcd_buf = []
         self.port_out = 0
 
-    def _lcd_read(self):
-        if self.lcd_buf:
-            return self.lcd_buf.pop(0)
-        return 0xEE
+    @property
+    def lcd_buf(self):
+        """Read: returns list of bytes written to LCD since last rst()."""
+        return list(hd61700.lcd_get_write_log())
 
-    def _lcd_write(self, d):
-        self.lcd_buf.append(d & 0xFF)
-
-    def _lcd_ctrl(self, d):
-        self.port_out = d
+    @lcd_buf.setter
+    def lcd_buf(self, val):
+        """Write: replaces the read queue with the given list (for LDL setup)."""
+        hd61700.lcd_clear_read_queue()
+        for b in val:
+            hd61700.lcd_push_read(b)
 
     def _port_read(self):
         return self.port_out & 0xFF

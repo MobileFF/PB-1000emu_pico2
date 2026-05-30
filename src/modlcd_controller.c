@@ -225,6 +225,19 @@ static mp_obj_t mod_lcd_vdp_read(mp_obj_t reg_obj) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(mod_lcd_vdp_read_obj, mod_lcd_vdp_read);
 
+/* lcd_c.set_vdp_enable(bool) — enable/disable per-pixel color VRAM rendering */
+static mp_obj_t mod_lcd_set_vdp_enable(mp_obj_t enabled_obj) {
+  lcd_set_vdp_enable(&lcd_state, mp_obj_is_true(enabled_obj));
+  return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(mod_lcd_set_vdp_enable_obj, mod_lcd_set_vdp_enable);
+
+/* lcd_c.get_vdp_enable() -> bool */
+static mp_obj_t mod_lcd_get_vdp_enable(void) {
+  return mp_obj_new_bool(lcd_get_vdp_enable(&lcd_state));
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(mod_lcd_get_vdp_enable_obj, mod_lcd_get_vdp_enable);
+
 /* lcd_c.wait_for_idle() */
 static mp_obj_t mod_lcd_wait_for_idle(void) {
 #ifdef __arm__
@@ -264,6 +277,8 @@ static const mp_rom_map_elem_t lcd_c_module_globals_table[] = {
     {MP_ROM_QSTR(MP_QSTR_setup_display),
      MP_ROM_PTR(&mod_lcd_setup_display_obj)},
     {MP_ROM_QSTR(MP_QSTR_get_color_vram), MP_ROM_PTR(&mod_lcd_get_color_vram_obj)},
+    {MP_ROM_QSTR(MP_QSTR_set_vdp_enable), MP_ROM_PTR(&mod_lcd_set_vdp_enable_obj)},
+    {MP_ROM_QSTR(MP_QSTR_get_vdp_enable), MP_ROM_PTR(&mod_lcd_get_vdp_enable_obj)},
     {MP_ROM_QSTR(MP_QSTR_render), MP_ROM_PTR(&mod_lcd_render_obj)},
     {MP_ROM_QSTR(MP_QSTR_wait_for_idle), MP_ROM_PTR(&mod_lcd_wait_for_idle_obj)},
     {MP_ROM_QSTR(MP_QSTR_vdp_write), MP_ROM_PTR(&mod_lcd_vdp_write_obj)},
