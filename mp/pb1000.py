@@ -1185,28 +1185,18 @@ class PB1000System:
         # Prefer the current C API 'execute'.
         if hasattr(cpu_core, "execute"):
             try:
-                # When FDD transfer is active, use stop_pc to catch error entries
+                # When FDD interface is powered, set stop_pc to catch error entries.
+                # Always use bulk execution to avoid per-step Python overhead.
                 effective_stop = stop_pc
-                fdd_active = (self.has_virtual_fdd()
-                              and self._virtual_fdd_interface_powered
-                              and self.virtual_fdd_controller._index != 0)
-                if fdd_active and stop_pc == -1:
+                if (self.has_virtual_fdd()
+                        and self._virtual_fdd_interface_powered
+                        and stop_pc == -1):
                     effective_stop = 0xABE0  # NF Error handler entry
 
-                if fdd_active:
-                    res = 0
-                    for _ in range(cycles):
-                        res += cpu_core.execute(1, effective_stop)
-                        current_pc = cpu_core.get_pc()
-                        self._pc_trace[self._pc_trace_idx] = current_pc
-                        self._pc_trace_idx = (self._pc_trace_idx + 1) % 512
-                        if current_pc == effective_stop or current_pc == 0xD8D0:
-                            break
-                else:
-                    res = cpu_core.execute(cycles, effective_stop)
-                    current_pc = cpu_core.get_pc()
-                    self._pc_trace[self._pc_trace_idx] = current_pc
-                    self._pc_trace_idx = (self._pc_trace_idx + 1) % 512
+                res = cpu_core.execute(cycles, effective_stop)
+                current_pc = cpu_core.get_pc()
+                self._pc_trace[self._pc_trace_idx] = current_pc
+                self._pc_trace_idx = (self._pc_trace_idx + 1) % 512
                 
                 # Catch the exact moment the CPU enters error handlers
                 if current_pc in (0xD8D0, 0xABE0):
