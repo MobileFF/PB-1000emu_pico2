@@ -196,6 +196,11 @@ def tests_14_17(t, check):
     check("17 PST IA<-R0", [0x17,0x00], s, [cr8(4,0x0D)])
     def s(): hd61700.set_reg(0,0x40)
     check("17 PST IE<-R0", [0x17,0x20], s, [cr8(5,0x40)])
+    # TM: idx=7 (arg[6:5]=11 -> arg&0x60=0x60). Bug: was reading reg8bit[7]=0 instead of TM.
+    def s(): hd61700.set_reg(0,0x2A)
+    check("17 PST TM<-R0", [0x17,0x60], s, [cr8(6,0x2A)])
+    def s(): hd61700.set_reg(3,0x3B)
+    check("17 PST TM<-R3", [0x17,0x63], s, [cr8(6,0x3B)])
 
 
 def tests_18_1b(t, check):
@@ -279,12 +284,21 @@ def tests_1c_1f(t, check):
     check("1F GST IA->R0", [0x1F,0x00], s, [cr(0,0x0D)])
     def s(): hd61700.set_reg8(5,0x40)
     check("1F GST IE->R0", [0x1F,0x20], s, [cr(0,0x40)])
+    # TM: idx=7 (arg[6:5]=11 -> arg=0x60 for $0, 0x63 for $3).
+    # ROM uses this encoding (A19C: 0x1F 0x60). Bug: was reading reg8bit[7]=0 instead of TM.
+    def s(): hd61700.set_reg8(6,0x2A)
+    check("1F GST TM->R0", [0x1F,0x60], s, [cr(0,0x2A)])
+    def s(): hd61700.set_reg8(6,0x3B)
+    check("1F GST TM->R3", [0x1F,0x63], s, [cr(3,0x3B)])
 
     # --- 0x5E/0x5F no-jump-extension GST ---
     def s(): hd61700.set_reg8(1,0xBB)
     check("5E GST PD->R0 no-jump", [0x5E,0xA0], s, [cr(0,0xBB), cp(0x7002)])
     def s(): hd61700.set_reg8(4,0x0D)
     check("5F GST IA->R0 no-jump", [0x5F,0x80], s, [cr(0,0x0D), cp(0x7002)])
+    # TM no-jump: arg=0xE0 (bit7=no-jump, bits[6:5]=11=TM)
+    def s(): hd61700.set_reg8(6,0x2A)
+    check("5F GST TM->R0 no-jump", [0x5F,0xE0,0x00], s, [cr(0,0x2A), cp(0x7002)])
 
 
 def run_tests():

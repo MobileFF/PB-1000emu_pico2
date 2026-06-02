@@ -32,7 +32,7 @@ def get_profile_dir(name):
     return PROFILE_ROOT + "/" + name
 
 
-def select_profile_ui(display, profiles, default, timeout_ms=5000):
+def select_profile_ui(display, profiles, default, timeout_ms=30000):
     """
     Show profile selection UI on LCD.
     Up/Down keys navigate, Enter confirms. Auto-selects default after timeout.

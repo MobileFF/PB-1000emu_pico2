@@ -22,6 +22,7 @@ _DEFAULTS = {
         "active_step_count": "12000",
         "sleep_poll_ms": "10",
         "step_timer_tick_steps": "40000",
+        "timer_tick_ms": "1000",
         "loop_idle_ms": "0",
         "step_chunk": "2048",
     },
@@ -33,7 +34,7 @@ _DEFAULTS = {
     },
     "profile": {
         "default_profile": "default",
-        "ui_timeout_ms": "5000",
+        "ui_timeout_ms": "30000",
     },
     "joystick": {
         "enable": "false",

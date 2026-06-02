@@ -239,8 +239,10 @@ class PB1000System:
         # Detect C-port availability early so _beep_init() can skip machine.PWM
         self._c_port_active = hasattr(cpu_core, 'set_port_direct')
         self.sd_mounted = False
+        self.spi = None
         if isinstance(display, tuple) and len(display) >= 4:
             self.sd_mounted = display[2]
+            self.spi = display[3]
             # display[0] is the display object itself
             display = display[0]
 
@@ -873,6 +875,14 @@ class PB1000System:
         try:
             os.stat(path)
         except OSError:
+            parent = path.rsplit("/", 1)[0] if "/" in path else ""
+            if parent:
+                try:
+                    os.stat(parent)
+                except OSError:
+                    print(f"[VFDD] Directory not found: {parent}. Disabling virtual FDD.")
+                    self.disable_virtual_fdd()
+                    return False
             ImageStorageBackend.create(path, 256)
             new_disk = True
             print(f"[VFDD] Created new disk image: {path}")
@@ -1185,18 +1195,28 @@ class PB1000System:
         # Prefer the current C API 'execute'.
         if hasattr(cpu_core, "execute"):
             try:
-                # When FDD interface is powered, set stop_pc to catch error entries.
-                # Always use bulk execution to avoid per-step Python overhead.
+                # When FDD transfer is active, use stop_pc to catch error entries
                 effective_stop = stop_pc
-                if (self.has_virtual_fdd()
-                        and self._virtual_fdd_interface_powered
-                        and stop_pc == -1):
+                fdd_active = (self.has_virtual_fdd()
+                              and self._virtual_fdd_interface_powered
+                              and self.virtual_fdd_controller._index != 0)
+                if fdd_active and stop_pc == -1:
                     effective_stop = 0xABE0  # NF Error handler entry
 
-                res = cpu_core.execute(cycles, effective_stop)
-                current_pc = cpu_core.get_pc()
-                self._pc_trace[self._pc_trace_idx] = current_pc
-                self._pc_trace_idx = (self._pc_trace_idx + 1) % 512
+                if fdd_active:
+                    res = 0
+                    for _ in range(cycles):
+                        res += cpu_core.execute(1, effective_stop)
+                        current_pc = cpu_core.get_pc()
+                        self._pc_trace[self._pc_trace_idx] = current_pc
+                        self._pc_trace_idx = (self._pc_trace_idx + 1) % 512
+                        if current_pc == effective_stop or current_pc == 0xD8D0:
+                            break
+                else:
+                    res = cpu_core.execute(cycles, effective_stop)
+                    current_pc = cpu_core.get_pc()
+                    self._pc_trace[self._pc_trace_idx] = current_pc
+                    self._pc_trace_idx = (self._pc_trace_idx + 1) % 512
                 
                 # Catch the exact moment the CPU enters error handlers
                 if current_pc in (0xD8D0, 0xABE0):

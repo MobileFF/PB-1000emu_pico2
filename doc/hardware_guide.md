@@ -69,19 +69,67 @@
 
 直結方式（PULL_UP 入力、アクティブ LOW）で接続します。
 
-| ボタン | デフォルト Pico ピン | `pb1000.ini` キー |
-| :--- | :--- | :--- |
-| UP | GP18 | — |
-| DOWN | GP19 | — |
-| LEFT | GP20 | — |
-| RIGHT | GP21 | — |
-| FIRE1 | GP26 | `key_fire1` |
-| FIRE2 | GP27 | `key_fire2` |
+| ボタン | デフォルト Pico ピン | `pb1000.ini` キー | デフォルトの PB-1000 キー |
+| :--- | :--- | :--- | :--- |
+| UP | GP18 | `key_up` | カーソル上 |
+| DOWN | GP19 | `key_down` | カーソル下 |
+| LEFT | GP20 | `key_left` | カーソル左 |
+| RIGHT | GP21 | `key_right` | カーソル右 |
+| FIRE1 | GP26 | `key_fire1` | EXE |
+| FIRE2 | GP27 | `key_fire2` | SHIFT |
 
-ピンアサインはすべて `main_input.py` の `JoystickInputManager.DEFAULT_PIN_MAP` で定義されており、コード変更で変えられます。
+`pb1000.ini` の `[joystick]` セクションで各ボタンに割り当てる PB-1000 キーを変更できます。空文字の場合はデフォルトマップが使われます。  
+ピンアサイン自体は `main_input.py` の `JoystickInputManager.DEFAULT_PIN_MAP` で定義されており、コード変更で変えられます。  
 74HC148 プライオリティエンコーダを使った 3-bit 接続回路の詳細は `references/joystick_3bit_encoding_circuit.md` を参照してください。
 
-### 7. USB キーボード
+**ジョイスティック有効時の GPIO 空き状況**
+
+ジョイスティック（GP18–21, GP26–27）をすべて使用した場合、外部デバイス用に自由に使える GPIO は **GP28** のみです（ADC2 として使用可能）。その他のピンは下表の機能を無効化した場合に解放できます。
+
+| GPIO | 用途 | 解放条件 |
+| :--- | :--- | :--- |
+| GP2, GP3 | I2C1（dht20 ext モジュール） | `ext/dht20.py` を削除 |
+| GP4, GP5 | UART1（コンソール KBD） | `pb1000.ini`: `enable_uart_kbd=false` |
+| GP6, GP13 | PIO UART（RS-232C） | RS-232C 不使用時 |
+| GP14 | BEEP PWM | `pb1000.ini`: `[beep] enable=false` |
+| **GP28** | **空き（ADC2）** | **常時使用可能** |
+
+### 7. 外部 SPI デバイス（GP28 CS 利用）
+
+SPI1 バスはすでに LCD・SD・タッチパネルが CS ピンで共有しており、同じ方式で追加デバイスを接続できます。ジョイスティックを含む標準構成では **GP28 が唯一の空き GPIO** であるため、追加デバイスの CS ピンとして使用することを推奨します。
+
+| 信号 | Pico ピン | 備考 |
+| :--- | :--- | :--- |
+| SCK | GP10 | SPI1 共有 |
+| MOSI | GP11 | SPI1 共有 |
+| MISO | GP12 | SPI1 共有 |
+| CS（追加デバイス） | **GP28** | 専用 CS |
+
+**利用方法**: `ext/` ディレクトリに拡張モジュールを置き、`register(system)` 内で `system.spi` を参照します。テンプレートは `mp/ext/spi_sample.py` を参照してください。
+
+```python
+# ext/my_device.py の例
+import machine
+
+MY_CS_PIN = 28
+LCD_BAUD  = 40_000_000
+
+def register(system):
+    cs = machine.Pin(MY_CS_PIN, machine.Pin.OUT, value=1)
+    system.register_call_hook(0x5E30, lambda: _callback(system, cs))
+
+def _callback(system, cs):
+    spi = system.spi
+    spi.init(baudrate=1_000_000)   # デバイスのボーレートに変更
+    cs.value(0)
+    # ... 送受信処理 ...
+    cs.value(1)
+    spi.init(baudrate=LCD_BAUD)    # LCD 用に戻す
+```
+
+> **注意**: コールバック終了前に必ず `spi.init(baudrate=40_000_000)` で LCD 用ボーレートに戻してください。戻し忘れると LCD 描画が乱れます。
+
+### 8. USB キーボード
 
 - USB キーボードを **USB OTG アダプタ** を介して Pico の Micro-USB ポートに接続します。
 

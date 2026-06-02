@@ -4,32 +4,45 @@ import time
 from sdcard import SDCard
 
 # SPI1 Pins (Same as pb1000.py)
-SCK_PIN = 10
+SCK_PIN  = 10
 MOSI_PIN = 11
 MISO_PIN = 12
-SD_CS_PIN = 15  # New pin for SD CS
+SD_CS_PIN = 15
+LCD_CS_PIN = 9
+T_CS_PIN   = 16
+
+# SPI runs at 40 MHz (shared with LCD/touch); SDCard drops to 400 kHz during
+# transfers and restores to 40 MHz afterwards via restore_baudrate.
+SPI_BAUDRATE     = 40_000_000
+SD_INIT_BAUDRATE = 400_000
 
 def test_sd():
     print("--- SD Card Unit Test Start ---")
-    
+
     # 1. SPI/CS Initialization
     try:
-        # Initial SPI speed for SD card should be low (e.g., 400kHz)
-        spi = machine.SPI(1, baudrate=400000, sck=machine.Pin(SCK_PIN), mosi=machine.Pin(MOSI_PIN), miso=machine.Pin(MISO_PIN))
-        
-        # Ensure all CS pins on the module are HIGH (disabled) except SD
-        lcd_cs = machine.Pin(9, machine.Pin.OUT, value=1)
-        touch_cs = machine.Pin(16, machine.Pin.OUT, value=1)
+        spi = machine.SPI(
+            1,
+            baudrate=SPI_BAUDRATE,
+            sck=machine.Pin(SCK_PIN),
+            mosi=machine.Pin(MOSI_PIN),
+            miso=machine.Pin(MISO_PIN),
+        )
+        # All CS lines HIGH before touching the bus
+        machine.Pin(LCD_CS_PIN, machine.Pin.OUT, value=1)
+        machine.Pin(T_CS_PIN,   machine.Pin.OUT, value=1)
+        machine.Pin(SD_CS_PIN,  machine.Pin.OUT, value=1)
         sd_cs = machine.Pin(SD_CS_PIN, machine.Pin.OUT, value=1)
-        
-        print(f"SPI1 and CS pins initialized. (LCD_CS=9, T_CS=16, SD_CS={SD_CS_PIN})")
+        print(f"SPI1 and CS pins initialized. (LCD_CS={LCD_CS_PIN}, T_CS={T_CS_PIN}, SD_CS={SD_CS_PIN})")
     except Exception as e:
         print(f"ERROR: SPI initialization failed: {e}")
         return
 
     # 2. SD Card Object
+    # restore_baudrate returns the SPI bus to 40 MHz after each SD operation so
+    # that the LCD/touch drivers (which share the same SPI) are unaffected.
     try:
-        sd = SDCard(spi, sd_cs, baudrate=400000)
+        sd = SDCard(spi, sd_cs, baudrate=SD_INIT_BAUDRATE, restore_baudrate=SPI_BAUDRATE)
         sectors = sd.sectors if hasattr(sd, "sectors") else sd.ioctl(4, 0)
         print(f"SD Card object created. Sectors: {sectors}")
     except Exception as e:
@@ -37,7 +50,7 @@ def test_sd():
         print("Check your wiring (CS, SCK, MOSI, MISO) and ensure the card is inserted.")
         return
 
-    # 3. Low-level block read test (Directly call readblocks before mounting)
+    # 3. Low-level block read test
     try:
         print("Testing direct block read (Sector 0)...")
         buf = bytearray(512)
@@ -46,8 +59,7 @@ def test_sd():
         print("First 16 bytes:", " ".join(f"{b:02X}" for b in buf[:16]))
     except Exception as e:
         print(f"ERROR: Direct block read failed: {e}")
-        # Continue to mount attempt anyway for completeness
-    
+
     # 4. Mount
     vfs_path = "/sd"
     try:
@@ -58,7 +70,7 @@ def test_sd():
         print(f"ERROR: Mounting failed: {e}")
         return
 
-    # 5. Directory Creation (renumbered)
+    # 5. Directory Creation
     test_dir = vfs_path + "/test_dir"
     try:
         print(f"Creating directory: {test_dir}")
@@ -68,18 +80,18 @@ def test_sd():
     except Exception as e:
         print(f"ERROR: Directory creation failed: {e}")
 
-    # 5. File Write/Read
+    # 6. File Write/Read
     test_file = test_dir + "/hello.txt"
     test_content = "Hello PB-1000 Emulator SD Storage! " + str(time.ticks_ms())
     try:
         print(f"Writing to: {test_file}")
         with open(test_file, "w") as f:
             f.write(test_content)
-        
+
         print(f"Reading back from: {test_file}")
         with open(test_file, "r") as f:
             read_content = f.read()
-        
+
         print(f"Content: {read_content}")
         if read_content == test_content:
             print("SUCCESS: File R/W match!")
@@ -88,12 +100,23 @@ def test_sd():
     except Exception as e:
         print(f"ERROR: File R/W failed: {e}")
 
-    # 6. List Files
+    # 7. List Files
     try:
         print(f"Files in {vfs_path}:")
         print(os.listdir(vfs_path))
     except Exception as e:
         print(f"ERROR: listdir failed: {e}")
+
+    # 8. Virtual FDD directory check
+    # configure_virtual_fdd() disables the FDD when the parent directory of the
+    # configured disk image is absent (instead of crashing with ENOENT).
+    vfdd_dir = vfs_path + "/disks"
+    try:
+        os.stat(vfdd_dir)
+        print(f"Virtual FDD directory found: {vfdd_dir} — FDD will be enabled.")
+    except OSError:
+        print(f"Virtual FDD directory not found: {vfdd_dir} — FDD will be disabled (expected behaviour).")
+        print(f"  To enable virtual FDD, create {vfdd_dir}/ and place disk1.img inside.")
 
     print("--- SD Card Unit Test End ---")
     print("If all above was SUCCESS, the hardware/driver is working correctly.")

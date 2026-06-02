@@ -96,3 +96,30 @@ def service_timer_ticks(system, tick_step_accum, *, timer_tick_steps):
         system.tick_timer()
         tick_step_accum -= timer_tick_steps
     return tick_step_accum
+
+
+def service_timer_realtime(system, last_tick_ms, *, ms_per_tick):
+    """Fire timer ticks based on real elapsed time, independent of CPU sleep state.
+
+    The HD61700 hardware timer runs continuously regardless of whether the CPU
+    is sleeping (SLP state). This function replicates that behavior by using
+    wall-clock time rather than CPU step counts, so TIME$ advances correctly
+    even while the BASIC prompt is waiting for input.
+    """
+    import hd61700 as _hd
+    now = time.ticks_ms()
+    elapsed = time.ticks_diff(now, last_tick_ms)
+    if elapsed < ms_per_tick:
+        return last_tick_ms
+    ticks = elapsed // ms_per_tick
+    # Cap burst to avoid cascading interrupts after a long pause
+    if ticks > 60:
+        ticks = 60
+    tm_before = _hd.get_reg8(6)
+    reg0_before = _hd.get_reg(0)
+    for _ in range(ticks):
+        system.tick_timer()
+    tm_after = _hd.get_reg8(6)
+    reg0_after = _hd.get_reg(0)
+    #print(f"[TIMER] TM {tm_before}->{tm_after}  reg[0] {reg0_before}->{reg0_after}  elapsed={elapsed}ms")
+    return time.ticks_add(last_tick_ms, ticks * ms_per_tick)

@@ -97,6 +97,9 @@ def tests_50_57(t, check):
     # --- 0x57 PST IA,IM8 ---
     check("57 PST IA,0D", [0x57,0x00,0x0D], None, [cr8(4,0x0D)])
     check("57 PST IE,40", [0x57,0x20,0x40], None, [cr8(5,0x40)])
+    # TM: idx=7 (arg[6:5]=11 -> arg=0x60). Bug: was silently ignoring write to TM.
+    check("57 PST TM,2A", [0x57,0x60,0x2A], None, [cr8(6,0x2A)])
+    check("57 PST TM,3B", [0x57,0x60,0x3B], None, [cr8(6,0x3B)])
 
 
 def tests_58_5f(t, check):

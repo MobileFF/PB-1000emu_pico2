@@ -339,6 +339,8 @@ static uint8_t read_gst_value(hd61700_state_t *cpu, uint8_t idx) {
     return REG_IB;
   case 5:
     return REG_IE;
+  case 7:
+    return REG_TM;  // TM: instruction encoding uses idx=7 (arg[6:5]=11 for op=0x1F)
   default:
     return READ_REG8(idx);
   }
@@ -834,6 +836,9 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
                   "PST IE executed: PC=0x%04X OP=0x%02X ARG=0x%02X IE=0x%02X",
                   instr_pc, op, arg, REG_IE);
           break;
+        case 7:
+          REG_TM = src;  // TM: instruction encoding uses idx=7 (arg[6:5]=11 for op=0x17)
+          break;
         default:
           WRITE_REG8(idx, src);
           break;
@@ -1273,7 +1278,9 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
           REG_IE = src;
           break;
         case 6:
+          break;
         case 7:
+          REG_TM = src;  // TM: instruction encoding uses idx=7 (arg[6:5]=11 for op=0x57)
           break;
         default:
           WRITE_REG8(idx, src);

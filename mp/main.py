@@ -24,6 +24,7 @@ from main_runtime import (
     run_cpu_slice,
     service_pio_uart_bridge,
     service_timer_ticks,
+    service_timer_realtime,
     update_frame_if_due,
 )
 from main_actions import handle_key_status_and_capture, handle_save_state_request, handle_disk_swap
@@ -164,11 +165,13 @@ def main():
     active_step_count     = get_int(cfg, "emulator", "active_step_count")
     sleep_poll_ms         = get_int(cfg, "emulator", "sleep_poll_ms")
     step_timer_tick_steps = get_int(cfg, "emulator", "step_timer_tick_steps")
+    timer_tick_ms         = get_int(cfg, "emulator", "timer_tick_ms")
     loop_idle_ms          = get_int(cfg, "emulator", "loop_idle_ms")
     step_chunk            = get_int(cfg, "emulator", "step_chunk")
 
     tick_step_accum = 0
     frame_time = time.ticks_ms()
+    last_timer_tick_ms = frame_time
     startup_guard_until = time.ticks_add(frame_time, 1500)
     startup_recovery_done = False
     gui_active_until = 0
@@ -247,11 +250,18 @@ def main():
                 frame_interval_ms=frame_interval_ms,
             )
 
-            tick_step_accum = service_timer_ticks(
-                system,
-                tick_step_accum,
-                timer_tick_steps=step_timer_tick_steps,
-            )
+            if timer_tick_ms > 0:
+                last_timer_tick_ms = service_timer_realtime(
+                    system,
+                    last_timer_tick_ms,
+                    ms_per_tick=timer_tick_ms,
+                )
+            else:
+                tick_step_accum = service_timer_ticks(
+                    system,
+                    tick_step_accum,
+                    timer_tick_steps=step_timer_tick_steps,
+                )
 
             time.sleep_ms(loop_idle_ms)
 

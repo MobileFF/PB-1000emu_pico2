@@ -193,6 +193,40 @@ def tests_f8_ff(t, check):
     def s(): hd61700.set_reg8(6,0xFF)  # TM = 0xFF
     check("F9 CLT TM&=C0", [0xF9], s,
           [lambda: (R8(6)==0xC0, f"TM={R8(6):02X}")])
+
+    # --- timer_tick (Python API, simulates hardware timer oscillator) ---
+    # timer_tick is not a CPU opcode: use empty code[] with setup to call it.
+    def s():
+        hd61700.set_reg8(6, 0)
+        hd61700.timer_tick()
+    check("timer_tick 0->1", [], s, [cr8(6, 1)])
+
+    def s():
+        hd61700.set_reg8(6, 58)
+        hd61700.timer_tick()
+    check("timer_tick 58->59", [], s, [cr8(6, 59)])
+
+    # At tick 60 (59->60): TIMER_INT fires, TM lower-6 resets, upper-2 increments.
+    # With 4-minute counter=0: TM becomes 0x40 (bits[7:6]=01, bits[5:0]=0).
+    def s():
+        hd61700.set_reg8(6, 59)        # TM = 59
+        hd61700.set_reg8(5, 0x10)      # IE = TIMER_INT enabled (bit4)
+        hd61700.set_reg8(2, 0x80)      # IB = GIE (bit7), clears CPU_SLP
+        hd61700.timer_tick()
+    check("timer_tick 59->TIMER_INT TM=0x40", [], s, [
+        cr8(6, 0x40),
+        lambda: ((R8(2) & 0x02) != 0, f"IB TIMER_INT not set: {R8(2):02X}"),
+    ])
+
+    # Without IE.TIMER_INT: TM still resets to 0x40 but IB is not set.
+    def s():
+        hd61700.set_reg8(6, 59)
+        hd61700.set_reg8(5, 0x00)      # IE = no interrupts enabled
+        hd61700.timer_tick()
+    check("timer_tick 59->TIMER_INT no IE TM=0x40", [], s, [
+        cr8(6, 0x40),
+        lambda: ((R8(2) & 0x02) == 0, f"IB TIMER_INT unexpectedly set: {R8(2):02X}"),
+    ])
     # --- 0xFA FST (set fast mode) ---
     check("FA FST", [0xFA], None, [cp(TB+1)])
     # --- 0xFB SLW (clear fast mode) ---

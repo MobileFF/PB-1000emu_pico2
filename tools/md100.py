@@ -554,7 +554,7 @@ def pc_name_to_md100(src_path: str, dest_pattern: Optional[str],
         if pat_list[i] == ord('?'):
             pat_list[i] = ord(' ')
 
-    return bytes(pat_list[:8]).upper(), bytes(pat_list[8:11]).upper()
+    return bytes(pat_list[:8]), bytes(pat_list[8:11])
 
 
 # ─── File data I/O ────────────────────────────────────────────────────────────

@@ -7,9 +7,13 @@ try:
 except Exception:
     pass
 
+# GP28: 外部SPI CS ピン。ファームウェア起動前にフローティングで誤アサートしないよう
+# PULL_UP を設定してHIGH（非選択）状態を保つ。
+machine.Pin(28, machine.Pin.IN, machine.Pin.PULL_UP)
+
 # UART0を起動し、REPLをUARTに複製する設定
 # Baudrateを115200に設定（標準設定）
-uart = machine.UART(0, baudrate=115200, tx=machine.Pin(0), rx=machine.Pin(1), txbuf=8192)
+uart = machine.UART(0, baudrate=115200, tx=machine.Pin(0), rx=machine.Pin(1), txbuf=192)
 os.dupterm(uart)
 # # Boot script for PB-1000 Emulator
 # # This runs automatically on power-up
