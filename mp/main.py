@@ -19,7 +19,7 @@ from main_boot import (
     initialize_usb_host_and_pio,
     load_default_roms,
 )
-from main_input import KeyboardInputManager, TouchInputManager, JoystickInputManager, _parse_joystick_key
+from main_input import KeyboardInputManager, TouchInputManager, JoystickInputManager, _parse_joystick_key, CursorRepeatManager
 from main_runtime import (
     run_cpu_slice,
     service_pio_uart_bridge,
@@ -105,6 +105,7 @@ def main():
         on_int_pulse_ms=30,
     )
     touch_input = TouchInputManager()
+    cursor_repeat = CursorRepeatManager()
     joystick_input = None
     if get_bool(cfg, "joystick", "enable"):
         _joy_key_map = dict(JoystickInputManager.DEFAULT_KEY_MAP)
@@ -222,6 +223,7 @@ def main():
                 keyboard_input.enqueue_key((1, 1), "BRK")
                 print("[AUTO-BRK] Queuing auto-BREAK after EOF")
             keyboard_input.poll(system)
+            cursor_repeat.poll(system, now)
             if _touch is not None and _touch.is_pressed():
                 touch_coords = _touch.get_touch()
                 handled_touch = False

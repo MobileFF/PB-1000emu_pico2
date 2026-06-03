@@ -150,6 +150,8 @@ static bool     c_beep_on         = false;
 
 /* Polling-based key notification (ISR-safe: no mp_sched_schedule) */
 static volatile int16_t c_kb_last_pressed_scancode = -1;
+/* Physical hold state for cursor keys only (set on press, cleared on release) */
+static volatile uint8_t c_kb_held_cursor = 0;
 
 /* Forward declaration */
 static void c_kb_process_usb_key(uint8_t scancode, bool pressed);
@@ -315,6 +317,10 @@ static void c_kb_process_usb_key(uint8_t scancode, bool pressed) {
   /* 0. Record last pressed scancode for Python polling (ISR-safe) */
   if (pressed) {
     c_kb_last_pressed_scancode = (int16_t)scancode;
+  }
+  /* Track cursor key physical hold state for Python key-repeat */
+  if (scancode == 0x4F || scancode == 0x50 || scancode == 0x51 || scancode == 0x52) {
+    c_kb_held_cursor = pressed ? scancode : 0;
   }
   /* 1. Update modifier state trackers */
   if (scancode == 0xE1 || scancode == 0xE5) {
@@ -1770,13 +1776,19 @@ static mp_obj_t mod_keyboard_config_base(mp_obj_t list_obj) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(mod_keyboard_config_base_obj, mod_keyboard_config_base);
 
-// module.get_last_key() -> int (-1 if none)
+// module.get_last_key() -> int (-1 if none, read-and-clear)
 static mp_obj_t mod_get_last_key(void) {
   int16_t sc = c_kb_last_pressed_scancode;
   c_kb_last_pressed_scancode = -1;
   return MP_OBJ_NEW_SMALL_INT(sc);
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(mod_get_last_key_obj, mod_get_last_key);
+
+// module.get_held_cursor_key() -> int (0 if none, else scancode of held cursor key)
+static mp_obj_t mod_get_held_cursor_key(void) {
+  return MP_OBJ_NEW_SMALL_INT(c_kb_held_cursor);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(mod_get_held_cursor_key_obj, mod_get_held_cursor_key);
 
 /* hd61700.press_row_ki(row, ki) */
 static mp_obj_t mod_press_row_ki(mp_obj_t row_obj, mp_obj_t ki_obj) {
@@ -2028,6 +2040,8 @@ static const mp_rom_map_elem_t hd61700_module_globals_table[] = {
      MP_ROM_PTR(&mod_keyboard_config_base_obj)},
     {MP_ROM_QSTR(MP_QSTR_get_last_key),
      MP_ROM_PTR(&mod_get_last_key_obj)},
+    {MP_ROM_QSTR(MP_QSTR_get_held_cursor_key),
+     MP_ROM_PTR(&mod_get_held_cursor_key_obj)},
     {MP_ROM_QSTR(MP_QSTR_press_row_ki),
      MP_ROM_PTR(&mod_press_row_ki_obj)},
     {MP_ROM_QSTR(MP_QSTR_release_row_ki),

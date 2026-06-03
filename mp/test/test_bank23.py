@@ -31,7 +31,6 @@ class _DummyCpuCore:
     def set_mem_callbacks(self, *a): pass
     def set_port_callbacks(self, *a): pass
     def set_io_callbacks(self, *a): pass
-    def use_c_memory(self, *a): pass
     def get_pc(self): return 0
     def get_flags(self): return 0
     def get_reg8(self, i): return 0

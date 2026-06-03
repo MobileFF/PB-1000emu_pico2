@@ -1,7 +1,6 @@
 # PB1000 System
 #
 #
-import array
 import hd61700 as cpu_core
 import gc
 import os
@@ -230,10 +229,6 @@ class PB1000System:
 
     def __init__(self, display=None, debug=False, restore_registers=True,
                  profile_dir=None, config=None):
-        direct_lcd_override = None
-        if isinstance(debug, dict):
-            if "c_lcd" in debug:
-                direct_lcd_override = bool(debug.get("c_lcd"))
         self.debug_cfg = self._normalize_debug_config(debug)
         self.debug = self.debug_cfg["sys"]
         # Detect C-port availability early so _beep_init() can skip machine.PWM
@@ -327,9 +322,6 @@ class PB1000System:
         self._port_last_write = 0x1C
         self._virtual_fdd_ack = False
         self._virtual_fdd_interface_powered = False
-        self._pc_trace = array.array('H', [0] * 512)
-        self._pc_trace_idx = 0
-        self._last_logged_crash_pc = -1
         self._fdd_active = False # SPI Bus Lock flag
         self._gpo_parity = 0   # Tracks gpo call parity for D92E P1/P0 protocol
         self._beep_init()
@@ -1189,90 +1181,7 @@ class PB1000System:
             print(f"Error loading registers: {e}")
 
     def step(self, cycles=100, stop_pc=-1):
-        cycles = int(cycles)
-        stop_pc = int(stop_pc)
-
-        # Prefer the current C API 'execute'.
-        if hasattr(cpu_core, "execute"):
-            try:
-                # When FDD transfer is active, use stop_pc to catch error entries
-                effective_stop = stop_pc
-                fdd_active = (self.has_virtual_fdd()
-                              and self._virtual_fdd_interface_powered
-                              and self.virtual_fdd_controller._index != 0)
-                if fdd_active and stop_pc == -1:
-                    effective_stop = 0xABE0  # NF Error handler entry
-
-                if fdd_active:
-                    res = 0
-                    for _ in range(cycles):
-                        res += cpu_core.execute(1, effective_stop)
-                        current_pc = cpu_core.get_pc()
-                        self._pc_trace[self._pc_trace_idx] = current_pc
-                        self._pc_trace_idx = (self._pc_trace_idx + 1) % 512
-                        if current_pc == effective_stop or current_pc == 0xD8D0:
-                            break
-                else:
-                    res = cpu_core.execute(cycles, effective_stop)
-                    current_pc = cpu_core.get_pc()
-                    self._pc_trace[self._pc_trace_idx] = current_pc
-                    self._pc_trace_idx = (self._pc_trace_idx + 1) % 512
-                
-                # Catch the exact moment the CPU enters error handlers
-                if current_pc in (0xD8D0, 0xABE0):
-                    regs = [cpu_core.get_reg(i) for i in range(8)]
-                    vfdd_status = self.virtual_fdd_controller.status_str if self.has_virtual_fdd() else "N/A"
-                    self._log_vfdd(f"*** HIT {current_pc:04X} (Error Handler Entry) ***")
-                    self._log_vfdd(f"  $0={regs[0]:02X} $1={regs[1]:02X} $2={regs[2]:02X} $3={regs[3]:02X}")
-                    self._log_vfdd(f"  $4={regs[4]:02X} $5={regs[5]:02X} $6={regs[6]:02X} $7={regs[7]:02X}")
-                    self._log_vfdd(f"  VFDD: {vfdd_status}")
-                    self._log_vfdd(f"  IO_RD[4]={self._io_rd_regs[4]:02X} PD={self.port_data:02X}")
-                    
-                    self._log_vfdd("  PC Trace(last 512):")
-                    _buf = self._pc_trace
-                    _start = self._pc_trace_idx
-                    for i in range(0, 512, 16):
-                        chunk = [_buf[(_start + i + j) % 512] for j in range(min(16, 512 - i))]
-                        trace_str = " ".join([f"{p:04X}" for p in chunk])
-                        self._log_vfdd(f"    {trace_str}")
-                elif 0xD8D0 < current_pc <= 0xD8E1:
-                    if self._last_logged_crash_pc == -1:
-                        self._last_logged_crash_pc = current_pc
-                        self._log_vfdd(f"*** CRASH in D8D0-D8E1 at PC={current_pc:04X} ***")
-                else:
-                    self._last_logged_crash_pc = -1
-                
-                return res
-            except TypeError:
-                if not getattr(self, "_step_api_warned", False):
-                    print("step(): execute(cycles, stop_pc) unavailable; trying compatibility path")
-                    self._step_api_warned = True
-                if stop_pc == -1:
-                    try:
-                        return cpu_core.execute(cycles)
-                    except TypeError:
-                        pass
-        
-        # Legacy fallback to 'cpu_run' if execute is not found
-        if hasattr(cpu_core, "cpu_run"):
-            try:
-                return cpu_core.cpu_run(cycles, stop_pc)
-            except TypeError:
-                try:
-                    return cpu_core.cpu_run(cycles)
-                except TypeError:
-                    pass
-
-        if not getattr(self, "_step_api_warned", False):
-            print("step(): falling back to single-step execution path")
-            self._step_api_warned = True
-        consumed = 0
-        while consumed < cycles:
-            if stop_pc != -1 and cpu_core.get_pc() == stop_pc:
-                break
-            cpu_core.step()
-            consumed += 1
-        return consumed
+        return cpu_core.execute(int(cycles), int(stop_pc))
 
     def reset_emulator(self):
         """Perform a hardware-like reset (PC=0x0000)."""

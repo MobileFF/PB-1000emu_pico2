@@ -1,7 +1,5 @@
 """
 Common helpers for test scripts:
-- debug.ini loading
-- debug override extraction
 - trace-output-aware log tee
 """
 
@@ -11,54 +9,6 @@ import time
 
 def to_bool(text):
     return str(text).strip().lower() in ("1", "true", "yes", "on")
-
-
-def parse_ini(path):
-    data = {}
-    current = ""
-    with open(path, "r") as f:
-        for raw in f:
-            line = raw.strip()
-            if not line:
-                continue
-            if line.startswith("#") or line.startswith(";"):
-                continue
-            if line.startswith("[") and line.endswith("]"):
-                current = line[1:-1].strip().lower()
-                if current not in data:
-                    data[current] = {}
-                continue
-            if "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            key = key.strip().lower()
-            value = value.split(";", 1)[0].split("#", 1)[0].strip()
-            if current not in data:
-                data[current] = {}
-            data[current][key] = value
-    return data
-
-
-def load_debug_ini():
-    ini_paths = ("debug.ini", "/debug.ini", "/mp/debug.ini")
-    for path in ini_paths:
-        try:
-            return parse_ini(path), path
-        except OSError:
-            pass
-    return None, ""
-
-
-def get_debug_overrides(ini_data):
-    cfg = {"c_memory": None, "c_lcd": None}
-    if not ini_data:
-        return cfg
-    debug = ini_data.get("debug", {})
-    if "c_memory" in debug:
-        cfg["c_memory"] = to_bool(debug["c_memory"])
-    if "c_lcd" in debug:
-        cfg["c_lcd"] = to_bool(debug["c_lcd"])
-    return cfg
 
 
 def _split_path_dir_file(path):
@@ -211,20 +161,9 @@ class LazyLogger:
 
 
 def create_script_runtime(default_log_path):
-    """Return a runtime dictionary for test scripts.
-
-    Instead of immediately instantiating :class:`ScriptLogger`, create a
-    :class:`LazyLogger` proxy.  Memory used by the actual logger (INI parsing,
-    file-path allocation, etc.) is deferred until the first time the caller
-    accesses ``runtime['logger']`` or calls ``install_print_hook``.
-    """
-    ini_data, ini_path = load_debug_ini()
-    logger = LazyLogger(ini_data, default_log_path)
-    debug_overrides = get_debug_overrides(ini_data)
+    """Return a runtime dictionary for test scripts."""
+    logger = LazyLogger(None, default_log_path)
     return {
-        "ini_data": ini_data,
-        "ini_path": ini_path,
         "logger": logger,
-        "debug_overrides": debug_overrides,
     }
 

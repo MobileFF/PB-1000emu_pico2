@@ -158,7 +158,7 @@ def select_disk_ui(display, images, current_path):
                 elif sc == 0x29:    # BREAK — cancel
                     return False
 
-            time.sleep_ms(50)
+            time.sleep_ms(30)
 
     except Exception as e:
         print(f"[DiskUI] error: {e}")

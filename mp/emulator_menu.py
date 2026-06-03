@@ -28,7 +28,8 @@ _WARN   = 0xFD20   # warning (orange)
 _SEP    = 0x528A   # separator (mid grey)
 
 _ROW_H   = 14
-_MAX_VIS = 12      # rows visible (320×240, header=26px, footer=14px)
+_SEP_ROW_H = 6     # separator row height (13×14 + 3×6 = 200px = available body)
+_MAX_VIS = 20      # larger than total items; all fit without scrolling
 _HDR_H   = 26
 _FTR_H   = 14
 
@@ -110,10 +111,10 @@ def _build_items(system, state):
     items.append({'type': 'separator'})
 
     # Display
-    fg_hex = "{:04X}".format(system.lcd._color_fg)
-    bg_hex = "{:04X}".format(system.lcd._color_bg_on)
-    items.append({'id': 'fg_color', 'label': 'Foreground Color', 'badge': fg_hex, 'badge_color': _FG})
-    items.append({'id': 'bg_color', 'label': 'Background Color', 'badge': bg_hex, 'badge_color': _FG})
+    fg_c = _rgb565_to_rgb332(system.lcd._color_fg)
+    bg_c = _rgb565_to_rgb332(system.lcd._color_bg_on)
+    items.append({'id': 'fg_color', 'label': 'Foreground Color', 'badge': "%02X" % fg_c, 'badge_color': _FG})
+    items.append({'id': 'bg_color', 'label': 'Background Color', 'badge': "%02X" % bg_c, 'badge_color': _FG})
 
     items.append({'type': 'separator'})
     items.append({'id': 'exit',     'label': 'Exit'})
@@ -136,8 +137,8 @@ def _draw_menu(display, items, cursor, scroll, msg=""):
     for i in range(scroll, vis_end):
         item = items[i]
         if item.get('type') == 'separator':
-            display.fill_rect(0, y + 4, W, 1, _SEP)
-            y += _ROW_H
+            display.fill_rect(0, y + _SEP_ROW_H // 2, W, 1, _SEP)
+            y += _SEP_ROW_H
             continue
 
         is_cur = (i == cursor)
@@ -184,6 +185,30 @@ _SC_ALPHA = {
     0x23:'6', 0x24:'7', 0x25:'8', 0x26:'9', 0x27:'0',
     0x2D:'-',
 }
+
+_SC_DIGIT = {
+    0x1E:'1', 0x1F:'2', 0x20:'3', 0x21:'4', 0x22:'5',
+    0x23:'6', 0x24:'7', 0x25:'8', 0x26:'9', 0x27:'0',
+}
+
+
+def _rgb565_to_rgb332(c):
+    """Convert RGB565 to nearest RGB332 (color VRAM format)."""
+    r3 = (c >> 13) & 7
+    g3 = (c >> 8)  & 7
+    b2 = (c >> 3)  & 3
+    return (r3 << 5) | (g3 << 2) | b2
+
+
+def _rgb332_to_rgb565(c):
+    """Convert RGB332 (color VRAM format) to RGB565."""
+    r3 = (c >> 5) & 7
+    g3 = (c >> 2) & 7
+    b2 = c & 3
+    r5 = (r3 << 2) | (r3 >> 1)
+    g6 = (g3 << 3) | g3
+    b5 = (b2 << 3) | (b2 << 1) | (b2 >> 1)
+    return (r5 << 11) | (g6 << 5) | b5
 
 
 def _pick_color(display, title, current):
@@ -264,6 +289,76 @@ def _text_input(display, title, max_len=16):
         time.sleep_ms(30)
 
 
+# ── Numeric input & color preview ─────────────────────────────────────────────
+
+def _number_input(display, title, current=0):
+    """Integer input (0-255). Returns int or None on cancel."""
+    import hd61700
+    W, H = display.width, display.height
+    buf = list(str(max(0, min(255, current))))
+
+    def _redraw():
+        display.fill_rect(0, 0, W, H, _BG)
+        _draw_text(display, 4,  4, title, _HDR)
+        _draw_text(display, 4, 16, "0-9  BS:del  EXE:ok  BRK:cancel", _FTR)
+        _draw_text(display, 4, H // 2 - 4, "".join(buf) + "_", _FG)
+
+    _redraw()
+    prev_sc = -1
+    while True:
+        sc = hd61700.get_last_key()
+        if sc != prev_sc:
+            prev_sc = sc
+            if sc in _SC_DIGIT and len(buf) < 3:
+                buf.append(_SC_DIGIT[sc])
+                _redraw()
+            elif sc == 0x2A and buf:        # Backspace
+                buf.pop()
+                _redraw()
+            elif sc == 0x28 and buf:        # EXE
+                val = int("".join(buf))
+                if 0 <= val <= 255:
+                    return val
+                display.fill_rect(0, H // 2 - 6, W, 20, _BG)
+                _draw_text(display, 4, H // 2 - 4, "!! 0-255 only", _WARN)
+            elif sc == 0x29:                # BRK
+                return None
+        time.sleep_ms(30)
+
+
+def _show_color_preview(display, title, rgb332):
+    """Show color swatch for an RGB332 value and confirm.
+    Returns True (apply) or False (cancel)."""
+    import hd61700
+    W, H = display.width, display.height
+    rgb565 = _rgb332_to_rgb565(rgb332)
+    sw_w, sw_h = 160, 60
+    sw_x = (W - sw_w) // 2
+    sw_y = 28
+
+    def _redraw():
+        display.fill_rect(0, 0, W, H, _BG)
+        _draw_text(display, 4, 4, title, _HDR)
+        display.fill_rect(sw_x, sw_y, sw_w, sw_h, rgb565)
+        _draw_text(display, 4, sw_y + sw_h + 6,
+                   "RGB332: %d (0x%02X)" % (rgb332, rgb332), _FG)
+        _draw_text(display, 4, sw_y + sw_h + 18,
+                   "RGB565: %04X" % rgb565, _FTR)
+        _draw_text(display, 4, H - 12, "EXE:apply  BRK:cancel", _FTR)
+
+    _redraw()
+    prev_sc = -1
+    while True:
+        sc = hd61700.get_last_key()
+        if sc != prev_sc:
+            prev_sc = sc
+            if sc == 0x28:   # EXE
+                return True
+            elif sc == 0x29: # BRK
+                return False
+        time.sleep_ms(30)
+
+
 # ── RAM save folder picker ─────────────────────────────────────────────────────
 
 def _pick_save_dir(display, dirs, current_dir):
@@ -325,6 +420,73 @@ def _pick_save_dir(display, dirs, current_dir):
             elif sc == 0x29:
                 return None, None
         time.sleep_ms(30)
+
+
+# ── INI persistence helpers ───────────────────────────────────────────────────
+
+def _update_ini(path, section, kv):
+    """Update [section] keys in an INI file, preserving all other content."""
+    lines = []
+    try:
+        with open(path, "r") as f:
+            for line in f:
+                lines.append(line)
+    except OSError:
+        pass
+
+    sec_header = "[" + section + "]"
+    sec_start = -1
+    sec_end = len(lines)
+    for i in range(len(lines)):
+        stripped = lines[i].strip()
+        if stripped.lower() == sec_header.lower():
+            sec_start = i
+        elif sec_start >= 0 and i > sec_start and stripped.startswith("[") and stripped.endswith("]"):
+            sec_end = i
+            break
+
+    new_block = [sec_header + "\n"]
+    if sec_start >= 0:
+        for line in lines[sec_start + 1:sec_end]:
+            s = line.strip()
+            if not s or s[0] in ("#", ";"):
+                new_block.append(line)
+                continue
+            if "=" in s:
+                k = s.split("=", 1)[0].strip().lower()
+                if k not in kv:
+                    new_block.append(line)
+    for k, v in kv.items():
+        new_block.append(k + " = " + str(v) + "\n")
+    new_block.append("\n")
+
+    if sec_start >= 0:
+        out = lines[:sec_start] + new_block + lines[sec_end:]
+    else:
+        out = lines
+        if out and out[-1].strip():
+            out.append("\n")
+        out += new_block
+
+    with open(path, "w") as f:
+        for line in out:
+            f.write(line)
+
+
+def _save_display_colors(fg_color, bg_color):
+    """Write display color settings (RGB332) to pb1000.ini. Returns save path or error string."""
+    import os
+    try:
+        os.listdir("/sd")
+        path = "/sd/pb1000.ini"
+    except OSError:
+        path = "/pb1000.ini"
+    kv = {"fg_color": str(fg_color), "bg_color": str(bg_color)}
+    try:
+        _update_ini(path, "display", kv)
+        return path
+    except Exception as e:
+        return "ERR:" + str(e)
 
 
 # ── Individual action handlers ─────────────────────────────────────────────────
@@ -619,25 +781,42 @@ def _do_vram_save(system):
 
 
 def _do_fg_color(system, display):
-    new = _pick_color(display, "Foreground Color", system.lcd._color_fg)
-    system.lcd.set_colors(new, system.lcd._color_bg_on)
-    return "FG: {:04X}".format(new)
+    cur = _rgb565_to_rgb332(system.lcd._color_fg)
+    val = _number_input(display, "Foreground Color (RGB332 0-255)", cur)
+    if val is None:
+        return ""
+    if not _show_color_preview(display, "Foreground Color", val):
+        return ""
+    system.lcd.set_colors(_rgb332_to_rgb565(val), system.lcd._color_bg_on)
+    result = _save_display_colors(val, _rgb565_to_rgb332(system.lcd._color_bg_on))
+    if result.startswith("ERR:"):
+        return "FG:0x%02X save %s" % (val, result)
+    return "FG:0x%02X -> %s" % (val, result)
 
 
 def _do_bg_color(system, display):
-    new = _pick_color(display, "Background Color", system.lcd._color_bg_on)
-    system.lcd.set_bg_colors(new, system.lcd._color_bg_off)
-    return "BG: {:04X}".format(new)
+    cur = _rgb565_to_rgb332(system.lcd._color_bg_on)
+    val = _number_input(display, "Background Color (RGB332 0-255)", cur)
+    if val is None:
+        return ""
+    if not _show_color_preview(display, "Background Color", val):
+        return ""
+    system.lcd.set_bg_colors(_rgb332_to_rgb565(val), system.lcd._color_bg_off)
+    result = _save_display_colors(_rgb565_to_rgb332(system.lcd._color_fg), val)
+    if result.startswith("ERR:"):
+        return "BG:0x%02X save %s" % (val, result)
+    return "BG:0x%02X -> %s" % (val, result)
 
 
 # ── Cursor navigation helpers ─────────────────────────────────────────────────
 
 def _next_cursor(items, cur, direction):
-    n = cur + direction
-    while 0 <= n < len(items):
-        if items[n].get('type') != 'separator':
-            return n
-        n += direction
+    """Move cursor by direction with wraparound, skipping separators."""
+    n = len(items)
+    for _ in range(n):
+        cur = (cur + direction) % n
+        if items[cur].get('type') != 'separator':
+            return cur
     return cur
 
 
@@ -679,6 +858,8 @@ def show_emulator_menu(system, display, fkbar, joystick_input, cfg):
                 cursor = new
                 if cursor < scroll:
                     scroll = cursor
+                elif cursor >= scroll + _MAX_VIS:        # wrapped to bottom
+                    scroll = max(0, cursor - _MAX_VIS + 1)
                 _draw_menu(display, items, cursor, scroll, msg)
 
         elif sc == 0x51: # DOWN
@@ -687,6 +868,8 @@ def show_emulator_menu(system, display, fkbar, joystick_input, cfg):
                 cursor = new
                 if cursor >= scroll + _MAX_VIS:
                     scroll = cursor - _MAX_VIS + 1
+                elif cursor < scroll:                    # wrapped to top
+                    scroll = 0
                 _draw_menu(display, items, cursor, scroll, msg)
 
         elif sc == 0x28: # EXE — activate item

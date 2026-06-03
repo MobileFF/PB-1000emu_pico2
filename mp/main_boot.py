@@ -57,6 +57,14 @@ def create_system(display_ret, profile_dir=None, config=None, *, console_uart=No
     if console_uart is not None:
         system._console_uart_hw = console_uart  # store hw ref; console starts OFF by default
     system.lcd.set_display_scale(1.5)
+    if config:
+        from config import get_int as _gi
+        fg_c = _gi(config, "display", "fg_color")
+        bg_c = _gi(config, "display", "bg_color")
+        def _rgb332_to_rgb565(c):
+            r3=(c>>5)&7; g3=(c>>2)&7; b2=c&3
+            return (((r3<<2)|(r3>>1))<<11)|(((g3<<3)|g3)<<5)|((b2<<3)|(b2<<1)|(b2>>1))
+        system.lcd.set_colors(_rgb332_to_rgb565(fg_c), _rgb332_to_rgb565(bg_c))
     return system
 
 

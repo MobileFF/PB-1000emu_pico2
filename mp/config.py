@@ -57,6 +57,10 @@ _DEFAULTS = {
     "pio_uart": {
         "baudrate": "9600",
     },
+    "display": {
+        "fg_color": "0",
+        "bg_color": "180",
+    },
 }
 
 
