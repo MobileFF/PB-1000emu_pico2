@@ -445,8 +445,10 @@ class CursorRepeatManager:
     """
 
     _DELAY_MS    = 400  # initial hold before first repeat
-    _RELEASE_MS  =  35  # release gap (must exceed one KEY_INT cycle = 25ms)
-    _INTERVAL_MS = 100  # interval between repeats
+    # ROM requires ~7 consecutive row-3 empty KEY_INT scans (25ms each) to clear
+    # its cursor-key hold state. 175ms confirmed minimum; 150ms insufficient.
+    _RELEASE_MS  = 175  # release gap (key absent from matrix)
+    _INTERVAL_MS = 100  # key present in matrix per repeat cycle
 
     _IDLE    = 0
     _ARMED   = 1  # cursor held, waiting for initial delay
@@ -457,6 +459,7 @@ class CursorRepeatManager:
         import hd61700 as _hd
         self._hd        = _hd
         self._available = hasattr(_hd, 'get_held_cursor_key')
+        self._steer     = getattr(_hd, 'steer_next_key_int', None)
         self._coord  = None
         self._sc     = 0
         self._phase  = self._IDLE
@@ -470,7 +473,7 @@ class CursorRepeatManager:
         if sc and sc in _CURSOR_COORDS:
             coord = _CURSOR_COORDS[sc]
             if sc != self._sc:
-                # Different cursor key: just (re)start ARMED state.
+                # Different cursor key: restart ARMED state.
                 # The C module handles releasing the previous key from the
                 # matrix when its USB release event arrives — do NOT call
                 # system.press_key() here, that would cause phantom presses.
@@ -481,16 +484,22 @@ class CursorRepeatManager:
             elif self._phase == self._ARMED:
                 if time.ticks_diff(now, self._next) >= 0:
                     system.release_key(self._coord)
+                    if self._steer:
+                        self._steer(self._coord[0])
                     self._phase = self._RELEASE
                     self._next  = time.ticks_add(now, self._RELEASE_MS)
             elif self._phase == self._RELEASE:
                 if time.ticks_diff(now, self._next) >= 0:
                     system.press_key(self._coord)
+                    if self._steer:
+                        self._steer(self._coord[0])
                     self._phase = self._PRESS
                     self._next  = time.ticks_add(now, self._INTERVAL_MS)
             elif self._phase == self._PRESS:
                 if time.ticks_diff(now, self._next) >= 0:
                     system.release_key(self._coord)
+                    if self._steer:
+                        self._steer(self._coord[0])
                     self._phase = self._RELEASE
                     self._next  = time.ticks_add(now, self._RELEASE_MS)
         else:

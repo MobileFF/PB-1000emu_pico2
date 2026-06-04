@@ -72,7 +72,10 @@ CPU コアの制御と周辺 I/O 全般を担う中心モジュール。主な A
 | `set_call_hook_enabled(addr, bool)` | フック有効・無効の切り替え |
 | `set_port_direct(tx, rx, beep, freq, duty)` | C ダイレクト UART・ビープ初期化 |
 | `press_row_ki(row, ki)` | キーマトリクスへのキー入力 |
-| `get_last_key()` | 最後に受信した HID スキャンコードを取得 |
+| `release_row_ki(row, ki)` | キーマトリクスからキーを解放（解放後にポストリリースパルスを自動設定） |
+| `get_last_key()` | 最後に受信した HID スキャンコードを取得（読み出しでクリア） |
+| `get_held_cursor_key()` | 現在物理的に押下中のカーソルキースキャンコードを返す（0=なし） |
+| `steer_next_key_int(row)` | 次の KEY_INT を指定行に向け即時発火させる（カーソルリピートで使用） |
 
 ### `lcd_c` モジュール（`src/modlcd_controller.c`）
 
@@ -123,10 +126,11 @@ RP2350 の USB ホスト機能（TinyUSB HID）を MicroPython から操作。
 
 ### プロファイルディレクトリ
 
-`/sd/profiles/<name>/` が 1 つのプロファイル。起動時に `boot_session.scan_profiles()` が列挙し、選択 UI で選ぶ。
+`/sd/rams/<name>/` が 1 つのプロファイル。起動時に `boot_session.scan_profiles()` が列挙し、選択 UI で選ぶ。
+`/sd/rams/` ディレクトリはエミュレータメニューの RAM Save / Load でも共用される。
 
 ```text
-/sd/profiles/
+/sd/rams/
   default/
     pb1000.ini    # プロファイル個別設定（省略可）
     rom0.bin      # プロファイル個別 ROM（省略可、なければグローバルを使用）
@@ -279,7 +283,49 @@ hd61700.set_lcd_debug(True) # LCD 書き込みトレース
 
 ---
 
-## 13. UTF-8 の運用ルール
+## 13. カーソルキーリピート（`CursorRepeatManager`）
+
+`mp/main_input.py` の `CursorRepeatManager` クラスが PB-1000 エミュレーション中のカーソルキー自動リピートを実装する。
+
+### 動作原理
+
+PB-1000 ROM の KEY_INT ISR はキーマトリクスの特定行を繰り返しスキャンし、
+同一キーが「押されたまま」の場合はリピートしない（エッジ検出）。
+カーソルキーのリピートは「意図的なリリース→再押下サイクル」を合成することで実現する。
+
+```text
+ARMED（押下検出）
+  → 400ms 後に FIRE: release_key() + steer_next_key_int(row)
+  → 175ms の RELEASE フェーズ（ROM が row-3 を空スキャンするのを待つ）
+  → press_key() + steer_next_key_int(row)
+  → 100ms の PRESS フェーズ
+  → release_key() + steer_next_key_int(row)
+  → RELEASE → PRESS サイクルを繰り返す
+```
+
+### RELEASE_MS のチューニング
+
+ROM の KEY_INT ISR は row 0 と cursor row を交互にスキャンする（25ms 間隔）。
+「hold state のクリア」には **7 回以上連続** して cursor row の KY = 0 が必要と判明。
+175ms は最小動作確認値（150ms = 失敗）。
+
+| パラメータ | デフォルト | 意味 |
+| --- | --- | --- |
+| `_DELAY_MS` | 400 ms | 初期押下からリピート開始までの遅延 |
+| `_RELEASE_MS` | 175 ms | キーをマトリクスから離す時間（ROM デバウンス待ち） |
+| `_INTERVAL_MS` | 100 ms | キーをマトリクスに入れる時間 |
+
+### 依存 C API
+
+| API | 説明 |
+| --- | --- |
+| `hd61700.get_held_cursor_key()` | 物理的に保持中のカーソルスキャンコードを返す |
+| `hd61700.steer_next_key_int(row)` | `c_kb_ia_select` を指定行に設定し `c_kb_next_pulse_ms=0` で即時 KEY_INT 発火 |
+| `hd61700.release_row_ki(row, ki)` | マトリクスを解放し `c_kb_post_release_pulses_remaining` を設定 |
+
+---
+
+## 14. UTF-8 の運用ルール
 
 このプロジェクトでは、テキストファイルの文字コードを UTF-8 に統一する。
 

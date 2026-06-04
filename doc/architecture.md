@@ -72,6 +72,7 @@
 - `KeyboardInputManager`: UART キーボード入力管理
 - `TouchInputManager`: タッチパネル入力管理
 - `JoystickInputManager`: ジョイスティック入力管理（デフォルト GP18–21/26/27）
+- `CursorRepeatManager`: カーソルキー自動リピート（ROM の KEY_INT ISR に release/press サイクルを合成）
 
 ---
 
@@ -156,7 +157,7 @@
 
 役割:
 
-- `/sd/profiles/` ディレクトリの走査・列挙
+- `/sd/rams/` ディレクトリの走査・列挙
 - プロファイル選択 UI（タイムアウト付き）の表示
 - プロファイルディレクトリパスの解決
 

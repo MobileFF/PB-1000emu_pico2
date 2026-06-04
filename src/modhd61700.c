@@ -153,6 +153,7 @@ static volatile int16_t c_kb_last_pressed_scancode = -1;
 /* Physical hold state for cursor keys only (set on press, cleared on release) */
 static volatile uint8_t c_kb_held_cursor = 0;
 
+
 /* Forward declaration */
 static void c_kb_process_usb_key(uint8_t scancode, bool pressed);
 
@@ -1790,6 +1791,29 @@ static mp_obj_t mod_get_held_cursor_key(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(mod_get_held_cursor_key_obj, mod_get_held_cursor_key);
 
+/* hd61700.steer_next_key_int(row)
+ * Steer the next KEY_INT pulse to fire for the given keyboard row.
+ * Used by cursor-key repeat: after a synthetic press_row_ki(), the ROM's IA
+ * scan sequence may be pointing at a different row, so KY would return 0 and
+ * the ROM would miss the key.  This call:
+ *   1. Updates c_kb_ia_select / IA register so the ROM scans the right row.
+ *   2. Resets c_kb_next_pulse_ms to 0 so KEY_INT fires on the next
+ *      c_kb_service_input_lines() call without waiting for the 25 ms interval.
+ * The mode bit (IA bit 7) is preserved; only the row-select bits are changed.
+ * When ia_select is already in all-rows mode (0x0D) the row is still forced so
+ * the ROM reads KY for exactly the cursor key's row and identifies it correctly.
+ */
+
+static mp_obj_t mod_steer_next_key_int(mp_obj_t row_obj) {
+  int row = mp_obj_get_int(row_obj);
+  if (row < 0 || row > 12) return mp_const_none;
+  c_kb_ia_select = (c_kb_ia_select & 0x80) | (uint8_t)(row & 0x0F);
+  cpu_state.reg8bit[4] = c_kb_ia_select;
+  c_kb_next_pulse_ms = 0;
+  return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(mod_steer_next_key_int_obj, mod_steer_next_key_int);
+
 /* hd61700.press_row_ki(row, ki) */
 static mp_obj_t mod_press_row_ki(mp_obj_t row_obj, mp_obj_t ki_obj) {
   int row = mp_obj_get_int(row_obj);
@@ -1804,6 +1828,11 @@ static mp_obj_t mod_release_row_ki(mp_obj_t row_obj, mp_obj_t ki_obj) {
   int row = mp_obj_get_int(row_obj);
   int ki = mp_obj_get_int(ki_obj);
   c_kb_release(row, ki);
+  /* Ensure KEY_INT fires during the release gap even in IA scan-filtered mode,
+     so the ROM sees the key-up before the synthetic re-press. */
+  if (!c_kb_has_key_pressed()) {
+    c_kb_post_release_pulses_remaining = C_KB_POST_RELEASE_PULSES_MAX;
+  }
   return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_2(mod_release_row_ki_obj, mod_release_row_ki);
@@ -2042,6 +2071,8 @@ static const mp_rom_map_elem_t hd61700_module_globals_table[] = {
      MP_ROM_PTR(&mod_get_last_key_obj)},
     {MP_ROM_QSTR(MP_QSTR_get_held_cursor_key),
      MP_ROM_PTR(&mod_get_held_cursor_key_obj)},
+    {MP_ROM_QSTR(MP_QSTR_steer_next_key_int),
+     MP_ROM_PTR(&mod_steer_next_key_int_obj)},
     {MP_ROM_QSTR(MP_QSTR_press_row_ki),
      MP_ROM_PTR(&mod_press_row_ki_obj)},
     {MP_ROM_QSTR(MP_QSTR_release_row_ki),
