@@ -242,7 +242,8 @@ def main():
             if joystick_input is not None:
                 joystick_input.poll(system)
 
-            handle_key_status_and_capture(system, sc)
+            _sc_mod = 8 if time.ticks_diff(gui_active_until, now) > 0 else 0
+            handle_key_status_and_capture(system, sc, _sc_mod)
             handle_save_state_request(system, enable_usb_kbd=enable_usb_kbd)
 
             frame_time = update_frame_if_due(

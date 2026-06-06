@@ -51,14 +51,14 @@ def handle_disk_swap(system, display, fkbar=None):
         pass
 
 
-def handle_key_status_and_capture(system, sc=-1):
+def handle_key_status_and_capture(system, sc=-1, mod=0):
     try:
         if sc < 0:
             sc = hd61700.get_last_key()
         if sc < 0:
             return
 
-        system.set_status(keymap.get_label(sc))
+        system.set_status(keymap.get_label(sc, mod))
 
         if sc != 0x46:
             return

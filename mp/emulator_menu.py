@@ -47,13 +47,15 @@ def _draw_text(display, x, y, text, fg, bg=_BG):
     text = text[:max_chars]
     if not text:
         return
-    tw = len(text) * 8
-    buf = bytearray(tw * 8 * 2)
-    fb = framebuf.FrameBuffer(buf, tw, 8, framebuf.RGB565)
-    fb.fill(_sw16(bg))
-    fb.text(text, 0, 0, _sw16(fg))
-    display.set_window(x, y, x + tw - 1, y + 7)
-    display.write_data(buf)
+    buf = bytearray(8 * 8 * 2)  # 128 B: one 8x8 character cell
+    fb = framebuf.FrameBuffer(buf, 8, 8, framebuf.RGB565)
+    cx = x
+    for ch in text:
+        fb.fill(_sw16(bg))
+        fb.text(ch, 0, 0, _sw16(fg))
+        display.set_window(cx, y, cx + 7, y + 7)
+        display.write_data(buf)
+        cx += 8
 
 
 # ── Item list builder ──────────────────────────────────────────────────────────
@@ -584,6 +586,27 @@ def _do_joystick(state):
     return "Joystick: not configured"
 
 
+def _confirm(display, title, detail=""):
+    """Yes/No confirmation dialog. Returns True (EXE) or False (BRK)."""
+    import hd61700
+    W, H = display.width, display.height
+    display.fill_rect(0, 0, W, H, _BG)
+    _draw_text(display, 4,  4, title,  _WARN)
+    if detail:
+        _draw_text(display, 4, 18, detail, _FG)
+    _draw_text(display, 4, H - 10, "EXE:yes  BRK:no", _FTR)
+    prev_sc = -1
+    while True:
+        sc = hd61700.get_last_key()
+        if sc != prev_sc:
+            prev_sc = sc
+            if sc == 0x28:   # EXE
+                return True
+            elif sc == 0x29: # BRK
+                return False
+        time.sleep_ms(30)
+
+
 def _do_fd_swap(system, display, fkbar):
     from main_actions import handle_disk_swap
     handle_disk_swap(system, display, fkbar)
@@ -615,6 +638,10 @@ def _do_ram_save(system, display):
         if name is None:
             return ""   # cancelled at text input
         path = _RAM_BASE + "/" + name
+    elif kind == 'existing':
+        folder = path.rsplit("/", 1)[-1]
+        if not _confirm(display, "Overwrite?", folder):
+            return ""   # cancelled at confirmation
 
     try:
         system.save_state(path=path)

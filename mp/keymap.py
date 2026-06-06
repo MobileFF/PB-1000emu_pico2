@@ -178,10 +178,27 @@ KEY_MAP.update({
 
 # ── Public helpers ────────────────────────────────────────────────────────────
 
-def get_label(scancode):
-    """Resolve a USB scancode to a display label."""
-    entry = USB_MAP.get(scancode)
-    return entry[1] if entry else f"SC:{scancode:02X}"
+# Human-readable overrides for internal labels used in the status bar
+_DISPLAY_LABEL_MAP = {
+    'NEWALL': 'NEW ALL',
+    'LCKEY':  'LC KEY',
+}
+
+def get_label(scancode, mod=0):
+    """Resolve a USB scancode (and optional modifier bitmask) to a display label.
+
+    mod bitmask: 1=Shift 2=Alt 4=Ctrl 8=Win/GUI
+    Checks ADV_MAP first when mod is non-zero, then falls back to USB_MAP.
+    """
+    label = None
+    if mod:
+        adv_entry = ADV_MAP.get((scancode, mod))
+        if adv_entry:
+            label = adv_entry[1]
+    if label is None:
+        entry = USB_MAP.get(scancode)
+        label = entry[1] if entry else "SC:{:02X}".format(scancode)
+    return _DISPLAY_LABEL_MAP.get(label, label)
 
 def get_adv_map_list():
     """Returns ADV_MAP as [(scancode, mod, [(row, ki), ...]), ...] for the C module."""

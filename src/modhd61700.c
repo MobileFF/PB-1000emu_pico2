@@ -147,6 +147,11 @@ static uint     c_beep_pwm_slice  = 0;
 static uint     c_beep_channel    = 0;
 static uint32_t c_beep_duty       = 0;      /* 0-65535 */
 static bool     c_beep_on         = false;
+/* After reset, block beep-ON until ROM writes 0xC0 (explicit silence) or
+   until c_port_read_count > C_BEEP_GUARD_READS.  Prevents stuck-beep programs
+   from restarting the buzz through the ROM's boot-time PD writes. */
+static bool     c_beep_post_reset_guard = false;
+#define C_BEEP_GUARD_READS 500u
 
 /* Polling-based key notification (ISR-safe: no mp_sched_schedule) */
 static volatile int16_t c_kb_last_pressed_scancode = -1;
@@ -760,6 +765,10 @@ static uint8_t c_port_read(void *ctx) {
   /* Normal mode: read RX GPIO + boot-sequence ON key simulation */
   uint8_t rx_bit = (c_rx_pin >= 0) ? (gpio_get((uint)c_rx_pin) ? 1u : 0u) : 0u;
   c_port_read_count++;
+  /* Fallback: clear beep post-reset guard once boot sequence is well past */
+  if (c_beep_post_reset_guard && c_port_read_count > C_BEEP_GUARD_READS) {
+    c_beep_post_reset_guard = false;
+  }
   uint8_t on_key = (c_port_read_count < 100u) ? 0u : 1u;
   return on_key | (uint8_t)(rx_bit << 3);
 }
@@ -776,13 +785,25 @@ static void c_port_write(void *ctx, uint8_t data) {
     gpio_put((uint)c_tx_pin, (data >> 2) & 1u);
   }
 
-  /* BEEP: bit6=0x40 or bit7=0x80 → sound; both set (0xC0) → silence */
+  /* BEEP: bit6=0x40 or bit7=0x80 → sound; both set (0xC0) → silence
+     Post-reset guard: block beep-ON until ROM explicitly writes 0xC0.
+     This prevents stuck-beep programs from re-activating the buzzer through
+     the ROM's boot-time PD writes after a reset. */
   if (c_beep_pin >= 0) {
     uint8_t beep_bits = data & 0xC0u;
     if (beep_bits == 0xC0u) {
+      c_beep_post_reset_guard = false;  /* ROM silenced beep: normal ops resume */
       c_beep_apply(false);
     } else if (beep_bits == 0x40u || beep_bits == 0x80u) {
-      c_beep_apply(true);
+      if (!c_beep_post_reset_guard) {
+        c_beep_apply(true);
+      }
+      /* guard active: skip beep-ON to prevent stuck-beep restart after reset */
+    } else {
+      /* beep_bits == 0x00: both pins LOW = no potential difference = silence.
+         ROM BEEP uses 0xC0 to silence, but programs like SOS.ASM use
+         AN PD,0x3F (clearing both bits to 0x00) as the off-phase. */
+      c_beep_apply(false);
     }
   }
 
@@ -1096,6 +1117,7 @@ static mp_obj_t mod_reset(size_t n_args, const mp_obj_t *args) {
   c_port_read_count = 0;
   c_port_data = 0;
   c_beep_on = false;
+  c_beep_post_reset_guard = true;  /* block beep-ON until ROM writes 0xC0 */
   if (c_beep_pin >= 0) {
     pwm_set_chan_level(c_beep_pwm_slice, c_beep_channel, 0); /* silence on reset */
   }
