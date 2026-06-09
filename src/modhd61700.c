@@ -1486,9 +1486,9 @@ static mp_obj_t mod_get_bank_view(mp_obj_t bank_obj) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(mod_get_bank_view_obj, mod_get_bank_view);
 
-/* hd61700.get_ext_work_view() — returns memoryview of ext_work_buf (0x5F00-0x5FFF) */
+/* hd61700.get_ext_work_view() — returns writable bytearray backed by ext_work_buf */
 static mp_obj_t mod_get_ext_work_view(void) {
-  return mp_obj_new_memoryview('B', sizeof(ext_work_buf), ext_work_buf);
+  return mp_obj_new_bytearray_by_ref(sizeof(ext_work_buf), ext_work_buf);
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(mod_get_ext_work_view_obj, mod_get_ext_work_view);
 
