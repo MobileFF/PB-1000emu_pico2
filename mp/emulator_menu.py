@@ -738,6 +738,7 @@ def _do_ram_load(system, display):
 def _do_vram_save(system):
     import lcd_c as _lc
     import os as _os
+    import utime as _utime
     W = 192
 
     vram = bytes(system.lcd.vram)                           # 768 B mono (copy)
@@ -749,6 +750,13 @@ def _do_vram_save(system):
         base = "/sd"
     except OSError:
         base = ""
+
+    # Timestamp suffix: YYYYMMDD_HHMMSS
+    try:
+        t = _utime.localtime()
+        ts = "%04d%02d%02d_%02d%02d%02d" % (t[0], t[1], t[2], t[3], t[4], t[5])
+    except Exception:
+        ts = "000000_000000"
 
     saved = []
     errors = []
@@ -762,7 +770,7 @@ def _do_vram_save(system):
             errors.append(name)
 
     # ── 1. Mono VRAM — raw binary (768 bytes) ───────────────────────────────
-    _try("vram.bin", lambda f: f.write(vram))
+    _try("vram_%s.bin" % ts, lambda f: f.write(vram))
 
     # ── 2. Mono VRAM — PBM image (P4 binary, 192×32) ────────────────────────
     def _pbm(f):
@@ -776,11 +784,11 @@ def _do_vram_save(system):
                     p = (p << 1) | ((vram[page * W + i * 8 + j] >> bit) & 1)
                 row[i] = p
             f.write(row)
-    _try("vram.pbm", _pbm)
+    _try("vram_%s.pbm" % ts, _pbm)
 
     if cvram is not None:
         # ── 3. Color VRAM — raw binary (12,288 bytes) ───────────────────────
-        _try("color_vram.bin", lambda f: f.write(cvram))
+        _try("color_vram_%s.bin" % ts, lambda f: f.write(cvram))
 
         # ── 4. Color VRAM — PPM image (P6 binary, 192×64, RGB332→RGB888) ───
         H_C = len(cvram) // W   # = 64
@@ -797,7 +805,7 @@ def _do_vram_save(system):
                     row[x*3+1] = (g << 5) | (g << 2) | (g >> 1)
                     row[x*3+2] = (bl << 6) | (bl << 4) | (bl << 2) | bl
                 f.write(row)
-        _try("color_vram.ppm", _ppm)
+        _try("color_vram_%s.ppm" % ts, _ppm)
 
     if not saved:
         return "!! VRAM save: no files written"
