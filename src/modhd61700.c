@@ -41,6 +41,28 @@ static uint8_t lcd_read_q_tail = 0; /* consumer */
 static bool has_bank[4] = {true, false, false, false};
 static bool has_bank_forced = false; /* true = Python override via set_has_exp_ram */
 
+/* MMIO DMA: Bank RAM → color_vram block transfer (0x0C30-0x0C37) */
+static uint8_t  dma_src_bank = 0;
+static uint16_t dma_src_addr = 0;
+static uint16_t dma_dst_addr = 0;
+static uint16_t dma_len      = 0;
+static uint8_t  dma_status   = 0x00; /* bit0=error */
+
+static void _dma_execute(void) {
+    static uint8_t * const bufs[3] = {bank1_buf, bank2_buf, bank3_buf};
+    if (dma_src_bank < 1 || dma_src_bank > 3 || !has_bank[dma_src_bank]
+        || dma_len == 0
+        || (uint32_t)dma_src_addr + dma_len > 0x8000u
+        || (uint32_t)dma_dst_addr + dma_len > LCD_COLOR_VRAM_SIZE) {
+        dma_status = 0x01;
+        return;
+    }
+    lcd_state_t *lcd = lcd_c_get_state();
+    memcpy(lcd->color_vram + dma_dst_addr,
+           bufs[dma_src_bank - 1] + dma_src_addr, dma_len);
+    dma_status = 0x00;
+}
+
 /* Dedup trace state for SSTOP/SBOT (0x6931-0x6934). */
 static uint8_t sstop_sbot_last[4];
 static bool sstop_sbot_last_valid[4];
@@ -216,6 +238,10 @@ static uint8_t c_io_read_wrapper(void *ctx, uint8_t segment, uint32_t offset) {
     if (offset >= 0x0C20 && offset <= 0x0C24) {
         return lcd_vdp_read(lcd_c_get_state(), offset - 0x0C20);
     }
+    /* DMA status register (0x0C37) */
+    if (offset == 0x0C37) {
+        return dma_status;
+    }
     if (py_io_read_callback != MP_OBJ_NULL) {
         mp_obj_t args[2];
         args[0] = MP_OBJ_NEW_SMALL_INT(segment);
@@ -230,6 +256,20 @@ static void c_io_write_wrapper(void *ctx, uint8_t segment, uint32_t offset, uint
     /* VDP registers (0x0C20-0x0C24): handle entirely in C, no Python call */
     if (offset >= 0x0C20 && offset <= 0x0C24) {
         lcd_vdp_write(lcd_c_get_state(), offset - 0x0C20, data);
+        return;
+    }
+    /* DMA registers (0x0C30-0x0C37): handle entirely in C, no Python call */
+    if (offset >= 0x0C30 && offset <= 0x0C37) {
+        switch (offset) {
+        case 0x0C30: dma_src_bank =  data & 0x03u; break;
+        case 0x0C31: dma_src_addr = (dma_src_addr & 0x7F00u) | data; break;
+        case 0x0C32: dma_src_addr = (dma_src_addr & 0x00FFu) | ((uint16_t)(data & 0x7Fu) << 8); break;
+        case 0x0C33: dma_dst_addr = (dma_dst_addr & 0x3F00u) | data; break;
+        case 0x0C34: dma_dst_addr = (dma_dst_addr & 0x00FFu) | ((uint16_t)(data & 0x3Fu) << 8); break;
+        case 0x0C35: dma_len      = (dma_len & 0x3F00u) | data; break;
+        case 0x0C36: dma_len      = (dma_len & 0x00FFu) | ((uint16_t)(data & 0x3Fu) << 8); break;
+        case 0x0C37: _dma_execute(); break;
+        }
         return;
     }
     if (py_io_write_callback != MP_OBJ_NULL) {

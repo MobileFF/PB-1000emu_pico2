@@ -1,4 +1,3 @@
-import time
 import hd61700
 import keymap
 
@@ -66,27 +65,10 @@ def handle_key_status_and_capture(system, sc=-1, mod=0):
         system.set_status("CAPTURING...")
         system.update_display(x_offset=16, y_offset=40)
         try:
-            ts = time.localtime()
-            ts_str = "{:04}{:02}{:02}_{:02}{:02}{:02}".format(*ts[:6])
-
-            base_dir = "/sd/screenshots" if system.sd_mounted else "/roms"
-            if system.sd_mounted:
-                system._ensure_dir(base_dir)
-
-            pbm_path = f"{base_dir}/screenshot_{ts_str}.pbm"
-            vram_path = f"{base_dir}/vram_dump_{ts_str}.bin"
-
-            system.lcd.save_pbm(pbm_path)
-
-            ram_dump = bytearray(0x2000)
-            for addr in range(0x6000, 0x8000):
-                ram_dump[addr - 0x6000] = hd61700.read_mem(addr)
-
-            with open(vram_path, "wb") as f:
-                f.write(ram_dump)
-
-            system.set_status("CAPTURED!", 2000)
-            print(f"Captured: {pbm_path}, {vram_path}")
+            from emulator_menu import _do_vram_save
+            msg = _do_vram_save(system)
+            print(f"PrtScr: {msg}")
+            system.set_status(msg, 2000)
         except Exception as ex:
             print(f"Capture failed: {ex}")
             system.set_status("CAP ERROR!", 2000)

@@ -741,15 +741,20 @@ def _do_vram_save(system):
     import utime as _utime
     W = 192
 
-    vram = bytes(system.lcd.vram)                           # 768 B mono (copy)
+    vram  = bytes(system.lcd.vram)                           # 768 B mono (copy)
     cvram = _lc.get_color_vram() if hasattr(_lc, 'get_color_vram') else None  # 12288 B ref
+    edtop = bytes(system.ram[0x0100:0x0200])                 # 256 B EDTOP VRAM (0x6100-0x61FF)
 
-    # Determine writable base directory (/sd preferred)
+    # Determine writable base directory (/sd/screenshots preferred)
     try:
         _os.listdir("/sd")
-        base = "/sd"
+        base = "/sd/screenshots"
     except OSError:
-        base = ""
+        base = "/screenshots"
+    try:
+        _os.mkdir(base)
+    except OSError:
+        pass  # already exists
 
     # Timestamp suffix: YYYYMMDD_HHMMSS
     try:
@@ -785,6 +790,9 @@ def _do_vram_save(system):
                 row[i] = p
             f.write(row)
     _try("vram_%s.pbm" % ts, _pbm)
+
+    # ── 3. EDTOP VRAM — raw binary (256 bytes, 0x6100-0x61FF) ───────────────
+    _try("edtop_%s.bin" % ts, lambda f: f.write(edtop))
 
     if cvram is not None:
         # ── 3. Color VRAM — raw binary (12,288 bytes) ───────────────────────
