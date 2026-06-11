@@ -141,10 +141,13 @@ def _write_result(w, result, xfer_len=0):
 
 
 def _finish_transfer(system, bank_buf, slot, dst, xfer_len):
-    """バンクRAM → カラーVRAM 転送の共通後処理。"""
+    """バンクRAM → カラーVRAM 転送の共通後処理。
+    転送後に VDP を有効化して dirty フラグを立て、次フレームで再描画させる。"""
     import lcd_c as _lc
     cvram = _lc.get_color_vram()
     cvram[dst:dst + xfer_len] = _bank_read(bank_buf, 0, xfer_len)
+    _lc.set_vdp_enable(True)   # カラーVRAM レンダリングを有効化
+    _lc.mark_dirty()           # 次フレームで全ページ再描画
 
 
 # ---------------------------------------------------------------------------
@@ -225,10 +228,10 @@ def _to_name11(fname):
         return bytearray(fname.encode('ascii', 'replace'))
     if '.' in fname:
         parts = fname.rsplit('.', 1)
-        name = parts[0][:8].ljust(8)
-        ext  = parts[1][:3].ljust(3)
+        name = (parts[0][:8] + '        ')[:8]
+        ext  = (parts[1][:3] + '   ')[:3]
     else:
-        name = fname[:8].ljust(8)
+        name = (fname[:8] + '        ')[:8]
         ext  = '   '
     return bytearray((name + ext).encode('ascii', 'replace'))
 
