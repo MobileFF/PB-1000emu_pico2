@@ -54,6 +54,16 @@ def main():
     # Step 2: Global config (needed for timeout, default_profile)
     global_cfg = load_config()
 
+    # Step 2a: REPL UART 制御 — boot.py が os.dupterm(uart) で有効にした UART REPL を
+    # enable_repl_uart=false の場合に無効化する。USB CDC REPL (slot 0) は維持される。
+    if not get_bool(global_cfg, "emulator", "enable_repl_uart"):
+        try:
+            import uos as _uos
+            _uos.dupterm(None, 1)
+            print("REPL UART disabled.")
+        except Exception as _e:
+            print(f"REPL UART disable failed: {_e}")
+
     # Step 3: Early USB keyboard init — must precede profile UI so keys are accepted
     init_usb_keyboard_early(enable_usb_kbd=get_bool(global_cfg, "keyboard", "enable_usb_kbd"))
 
@@ -138,9 +148,13 @@ def main():
     gc.collect()
     print("[MEM] after VFDD init: free=%d alloc=%d" %
           (gc.mem_free(), gc.mem_alloc()))
-    print("[MEM] before load_state: free=%d alloc=%d" %
-          (gc.mem_free(), gc.mem_alloc()))
+    print("[MEM] before load_state: free=%d alloc=%d  banks=%s" %
+          (gc.mem_free(), gc.mem_alloc(),
+           ''.join(str(i) for i in range(1, 4) if system.has_bank[i])))
     system.load_state()  # Restore RAM + registers from profile dir (or default path)
+    gc.collect()
+    print("[MEM] after  load_state: free=%d alloc=%d" %
+          (gc.mem_free(), gc.mem_alloc()))
     pio_uart_baudrate = get_int(cfg, "pio_uart", "baudrate")
     initialize_usb_host_and_pio(system, enable_usb_kbd=enable_usb_kbd,
                                  pio_uart_baudrate=pio_uart_baudrate)

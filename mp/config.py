@@ -25,6 +25,7 @@ _DEFAULTS = {
         "timer_tick_ms": "1000",
         "loop_idle_ms": "0",
         "step_chunk": "2048",
+        "enable_repl_uart": "true",
     },
     "disk": {
         "enabled": "false",

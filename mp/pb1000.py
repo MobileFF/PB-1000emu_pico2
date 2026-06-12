@@ -1112,52 +1112,70 @@ class PB1000System:
         import gc
         gc.collect()
 
+        def _load_direct(f, view):
+            """readinto でCバッファに直接書き込む。Pythonヒープ割り当てゼロ。"""
+            return f.readinto(view)
+
+        def _load_chunked(f, ram_target, chunk_size=256):
+            """チャンク単位で書き込む。chunk_size を小さくしてヒープ断片化に対応。"""
+            offset = 0
+            buf = bytearray(chunk_size)
+            while True:
+                n = f.readinto(buf)
+                if not n:
+                    break
+                ram_target[offset:offset + n] = buf[:n]
+                offset += n
+                gc.collect()
+            return offset
+
         def _load_to_ram(file_path, ram_target, slot):
             if not self._file_exists(file_path):
-                 print(f"RAM file not found: {file_path}")
-                 return False
+                print(f"RAM file not found: {file_path}")
+                return False
             try:
                 gc.collect()
                 with open(file_path, "rb") as f:
-                    if hasattr(cpu_core, "load_ram"):
+                    if slot == 0 and hasattr(cpu_core, "load_ram"):
+                        # メインRAM(8KB): C-API 経由で一括ロード
                         gc.collect()
                         try:
                             data = f.read()
                             cpu_core.load_ram(slot, data)
-                            print(f"RAM slot {slot} restored via C-API from {file_path} ({len(data)} bytes)")
+                            print(f"RAM slot {slot} loaded via C-API ({len(data)}B)")
                             del data
                             gc.collect()
                         except MemoryError:
                             f.seek(0)
-                            offset = 0
-                            while True:
-                                chunk = f.read(4096)
-                                if not chunk:
-                                    break
-                                ram_target[offset:offset + len(chunk)] = chunk
-                                offset += len(chunk)
-                            print(f"RAM slot {slot} restored (chunked) from {file_path} ({offset} bytes)")
+                            n = _load_chunked(f, ram_target)
+                            print(f"RAM slot {slot} loaded chunked ({n}B)")
+                    elif hasattr(ram_target, '_view'):
+                        # バンクRAM(32KB): readinto でCバッファに直接書き込み
+                        # f.readinto(memoryview) はPythonヒープを一切消費しない
+                        gc.collect()
+                        try:
+                            n = _load_direct(f, ram_target._view)
+                            print(f"RAM slot {slot} loaded direct ({n}B) from {file_path}")
+                        except Exception:
+                            f.seek(0)
+                            n = _load_chunked(f, ram_target)
+                            print(f"RAM slot {slot} loaded chunked ({n}B) from {file_path}")
                     else:
-                        # Fallback for old/generic core
-                        offset = 0
-                        total = 0
-                        while True:
-                            chunk = f.read(1024)
-                            if not chunk: break
-                            ram_target[offset:offset+len(chunk)] = chunk
-                            offset += len(chunk)
-                            total += len(chunk)
-                        print(f"RAM slot {slot} restored via Python loop from {file_path} ({total} bytes)")
+                        # fallback: bytearray バッファへのチャンク書き込み
+                        n = _load_chunked(f, ram_target)
+                        print(f"RAM slot {slot} loaded chunked ({n}B) from {file_path}")
                 return True
             except Exception as e:
                 print(f"Error loading {file_path}: {e}")
                 return False
 
         _load_to_ram(path0, self.ram, 0)
+        gc.collect()
         for slot in range(1, 4):
             if self.has_bank[slot]:
                 rp = (self._get_storage_path(f"ram{slot}.bin") if path is None else f"{path}/ram{slot}.bin")
                 _load_to_ram(rp, self._bank_ram[slot], slot)
+                gc.collect()
 
         try:
             if self._file_exists(reg_path):
