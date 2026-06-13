@@ -22,7 +22,9 @@ Offset             Size    Type        Contents
 0x0C00 - 0x0C07   8 B     MMIO       SIO / VFDD / printer I/O ports
 0x0C08 - 0x0C1F  24 B     -          (unused I/O page space)
 0x0C20 - 0x0C24   5 B     MMIO       VDP registers (emulator extension)
-0x0C25 - 0x0CFF  219 B    -          (unused I/O page space, reserved)
+0x0C25 - 0x0C2F  11 B     -          (unused I/O page space)
+0x0C30 - 0x0C37   8 B     MMIO       DMA registers (bank RAM → colour VRAM transfer)
+0x0C38 - 0x0CFF  200 B    -          (unused I/O page space)
 0x0D00 - 0x17FF  ~2.75 KB ROM (R)    ROM0 data region (font, tables)
 0x1800 - 0x5EFF  ~27 KB   -          Unmapped (reads 0xFF / writes ignored)
                            Note: 0x5E00–0x5EFF is conventionally used for extension call_hook addresses
@@ -90,7 +92,45 @@ The full MMIO range 0x0C00–0x0CFF is checked first by the C core (`hd61700.c`)
 | `0x0C23` | VDP foreground colour register (RGB332) (R/W) | Implemented |
 | `0x0C24` | VDP background colour register (RGB332) (R/W) | Implemented |
 | `0x0C08–0x0C1F` | Unused | Reserved for expansion |
-| `0x0C25–0x0CFF` | Unused | Reserved for expansion |
+| `0x0C25–0x0C2F` | Unused | Reserved for expansion |
+| `0x0C30` | DMA source bank number (W) | Implemented |
+| `0x0C31` | DMA source offset bit[7:0] (W) | Implemented |
+| `0x0C32` | DMA source offset bit[14:8] (W) | Implemented |
+| `0x0C33` | DMA destination offset bit[7:0] (W) | Implemented |
+| `0x0C34` | DMA destination offset bit[13:8] (W) | Implemented |
+| `0x0C35` | DMA transfer byte count bit[7:0] (W) | Implemented |
+| `0x0C36` | DMA transfer byte count bit[13:8] (W) | Implemented |
+| `0x0C37` | DMA trigger (W) / status (R, bit0=error) | Implemented |
+| `0x0C38–0x0CFF` | Unused | Reserved for expansion |
+
+### DMA Registers (0x0C30–0x0C37)
+
+Performs a synchronous block transfer from bank RAM (Bank 1/2/3) to the colour VRAM (192×64 = 12,288 B) entirely in C — no Python callbacks are involved.
+
+```
+Source:      bankN_buf[dma_src_addr .. dma_src_addr + dma_len - 1]
+Destination: color_vram[dma_dst_addr .. dma_dst_addr + dma_len - 1]
+```
+
+| Constraint | Value |
+| --- | --- |
+| Source bank | 1 / 2 / 3 (`has_bank[N]` must be true) |
+| Source offset upper limit | src_addr + len ≤ 0x8000 |
+| Destination offset upper limit | dst_addr + len ≤ 12,288 (LCD_COLOR_VRAM_SIZE) |
+| Transfer length 0 | Treated as error |
+
+BASIC example (transfer all of Bank 2 to colour VRAM):
+```basic
+POKE &H0C30,2      : REM bank=2
+POKE &H0C31,0      : REM src offset = 0x0000
+POKE &H0C32,0
+POKE &H0C33,0      : REM dst offset = 0x0000
+POKE &H0C34,0
+POKE &H0C35,0      : REM length = 0x3000 = 12288
+POKE &H0C36,&H30
+POKE &H0C37,0      : REM FIRE
+IF PEEK(&H0C37) AND 1 THEN PRINT "DMA ERROR"
+```
 
 > Because the `io_read`/`io_write` hook range in `hd61700.c` covers 0x0C00–0x0CFF, VDP reads and writes work correctly even in C-direct mode via `_fdd_read/write_bridge_fn`.
 

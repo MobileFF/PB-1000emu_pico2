@@ -1503,13 +1503,13 @@ static MP_DEFINE_CONST_FUN_OBJ_2(mod_load_ram_obj, mod_load_ram);
 
 /* hd61700.get_ram_view() */
 static mp_obj_t mod_get_ram_view(void) {
-  return mp_obj_new_memoryview('B', sizeof(ram_buf), ram_buf);
+  return mp_obj_new_bytearray_by_ref(sizeof(ram_buf), ram_buf);
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(mod_get_ram_view_obj, mod_get_ram_view);
 
 /* hd61700.get_exp_ram_view()  — backward-compatible alias for get_bank_view(1) */
 static mp_obj_t mod_get_exp_ram_view(void) {
-  return mp_obj_new_memoryview('B', sizeof(bank1_buf), bank1_buf);
+  return mp_obj_new_bytearray_by_ref(sizeof(bank1_buf), bank1_buf);
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(mod_get_exp_ram_view_obj, mod_get_exp_ram_view);
 
@@ -1522,7 +1522,7 @@ static mp_obj_t mod_get_bank_view(mp_obj_t bank_obj) {
   else if (bank == 2) { ptr = bank2_buf; sz = sizeof(bank2_buf); }
   else if (bank == 3) { ptr = bank3_buf; sz = sizeof(bank3_buf); }
   else return mp_const_none;
-  return mp_obj_new_memoryview('B', sz, ptr);
+  return mp_obj_new_bytearray_by_ref(sz, ptr);
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(mod_get_bank_view_obj, mod_get_bank_view);
 

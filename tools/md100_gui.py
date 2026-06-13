@@ -244,6 +244,16 @@ def put_raw_to_disk(disk: MD100Disk, raw: bytes,
     return entry.display_name(), blks
 
 
+def _is_binary(data: bytes) -> bool:
+    """Return True if data appears to contain binary (non-text) content."""
+    sample = data[:4096]
+    if not sample:
+        return False
+    text_chars = set(range(0x20, 0x7F)) | {0x09, 0x0A, 0x0D}
+    non_text = sum(1 for b in sample if b not in text_chars)
+    return non_text > len(sample) * 0.05
+
+
 def hexdump(data: bytes, width: int = 16) -> str:
     """Return hex+ASCII dump of data."""
     lines = []
@@ -298,6 +308,41 @@ class BasicModeDialog(simpledialog.Dialog):
                   '   PC上で書いたソーステキストをそのまま保存します'),
             ('B', 'BASICバイナリに変換して格納  (Type B)\n'
                   '   キーワードをトークン化し、PB-1000が直接実行できる形式にします'),
+        ]
+        for val, lbl in opts:
+            tk.Radiobutton(frame, text=lbl, variable=self._var, value=val,
+                           justify='left', anchor='w').pack(fill='x', pady=2)
+
+    def apply(self) -> None:
+        self.result = self._var.get()
+
+
+class BinaryTypeDialog(simpledialog.Dialog):
+    """Ask the user what disk type to use for binary files with unrecognized extensions."""
+
+    def __init__(self, parent, filenames: List[str]):
+        self.filenames = filenames
+        self.result: Optional[str] = None
+        super().__init__(parent, title="バイナリファイルの格納種別")
+
+    def body(self, frame: tk.Frame) -> None:
+        names = ', '.join(os.path.basename(f) for f in self.filenames[:3])
+        if len(self.filenames) > 3:
+            names += f' ... ({len(self.filenames)}件)'
+        tk.Label(frame, text=f"バイナリデータを含むファイル: {names}", anchor='w',
+                 wraplength=380).pack(fill='x', pady=(0, 4))
+        tk.Label(frame,
+                 text="拡張子から種別を判定できませんでした。ディスク上の格納種別を選択してください:",
+                 anchor='w', wraplength=380).pack(fill='x', pady=(0, 8))
+
+        self._var = tk.StringVar(value='M')
+        opts = [
+            ('M', 'Type M  (マシン語)  ← 推奨\n'
+                  '   バイナリデータをそのまま保存します'),
+            ('R', 'Type R  (ランダムアクセス)\n'
+                  '   レコード構造を持つバイナリファイルに使います'),
+            ('S', 'Type S  (シーケンシャルテキスト)\n'
+                  '   バイナリデータは破損する場合があります'),
         ]
         for val, lbl in opts:
             tk.Radiobutton(frame, text=lbl, variable=self._var, value=val,
@@ -699,7 +744,7 @@ class MD100App(_BaseClass):
             self._do_put(paths)
 
     def _do_put(self, paths: List[str]) -> None:
-        """Core put logic: determine mode for .bas files and write all files."""
+        """Core put logic: determine mode for .bas/.binary files and write all files."""
         bas_paths = [p for p in paths
                      if os.path.splitext(p)[1].lower() == '.bas']
 
@@ -710,13 +755,40 @@ class MD100App(_BaseClass):
                 return
             bas_mode = dlg.result
 
+        # Detect binary files whose extension maps to a text type (or is unknown)
+        _text_types = (TYPE_S, TYPE_C)
+        binary_paths: List[str] = []
+        for p in paths:
+            pc_ext = os.path.splitext(p)[1].lower().lstrip('.')
+            if pc_ext == 'bas':
+                continue
+            if EXT_TYPE.get(pc_ext, TYPE_S) not in _text_types:
+                continue   # already known binary extension — handled automatically
+            try:
+                with open(p, 'rb') as f:
+                    head = f.read(4096)
+                if _is_binary(head):
+                    binary_paths.append(p)
+            except OSError:
+                pass
+
+        binary_type: Optional[str] = None
+        binary_set: set = set()
+        if binary_paths:
+            dlg2 = BinaryTypeDialog(self, binary_paths)
+            if dlg2.result is None:
+                return
+            binary_type = dlg2.result
+            binary_set = set(binary_paths)
+
         errors = []
         written = []
         for path in paths:
             if self._disk_path and os.path.abspath(path) == os.path.abspath(self._disk_path):
                 continue
             try:
-                name, ts, blks = self._put_file(path, bas_mode)
+                bt = binary_type if path in binary_set else None
+                name, ts, blks = self._put_file(path, bas_mode, bt)
                 written.append(f"{name}  [{ts}]  {blks}ブロック")
             except Exception as e:
                 errors.append(f"{os.path.basename(path)}: {e}")
@@ -733,10 +805,12 @@ class MD100App(_BaseClass):
                                 f"{len(written)} 件のファイルを書き込みました:\n" +
                                 "\n".join(written))
 
-    def _put_file(self, path: str, bas_mode: str) -> Tuple[str, str, int]:
+    def _put_file(self, path: str, bas_mode: str,
+                  binary_type: Optional[str] = None) -> Tuple[str, str, int]:
         """
         Write one PC file to the disk image.
         Returns (md100_name, type_str, blocks).
+        binary_type: 'M', 'R', or 'S' when caller overrides the disk type for binary data.
         """
         ext = os.path.splitext(path)[1].lower()
 
@@ -748,19 +822,29 @@ class MD100App(_BaseClass):
             name_8, ext_3 = pc_name_to_md100(path, None, 'AS_IS')
             display, blks = put_raw_to_disk(self._disk, binary, name_8, ext_3, TYPE_B)
             return display, 'B', blks
-        else:
-            # Regular put (auto type/mode via _put_one)
-            type_byte = 0   # auto-detect
-            mode      = 'AUTO'
-            if ext == '.bas':
-                # Store as text TYPE_S instead of TYPE_B
-                type_byte = TYPE_S
-                mode      = 'ASCII'
-            name, ts, blks = _put_one(
-                self._disk, path, None, mode, _ESC_NONE, 'AS_IS',
-                type_byte, 0, False,
-            )
-            return name, ts, blks
+
+        if binary_type is not None:
+            # Binary file: user specified the disk type
+            with open(path, 'rb') as f:
+                raw = f.read()
+            name_8, ext_3 = pc_name_to_md100(path, None, 'AS_IS')
+            type_byte = TYPE_BY_LETTER[binary_type]
+            disk_bytes = pc_to_disk_bytes(raw, _ESC_NONE) if binary_type == 'S' else raw
+            display, blks = put_raw_to_disk(self._disk, disk_bytes, name_8, ext_3, type_byte)
+            return display, binary_type, blks
+
+        # Regular put (auto type/mode via _put_one)
+        type_byte = 0   # auto-detect
+        mode      = 'AUTO'
+        if ext == '.bas':
+            # Store as text TYPE_S instead of TYPE_B
+            type_byte = TYPE_S
+            mode      = 'ASCII'
+        name, ts, blks = _put_one(
+            self._disk, path, None, mode, _ESC_NONE, 'AS_IS',
+            type_byte, 0, False,
+        )
+        return name, ts, blks
 
     # ── Get ───────────────────────────────────────────────────────────────────
 

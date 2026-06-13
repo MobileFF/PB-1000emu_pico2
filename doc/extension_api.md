@@ -80,8 +80,8 @@ RESULT = PEEK(&5F01)
 mp/
 └── ext/
     ├── __init__.py       # 空ファイル（パッケージ宣言）
+    ├── bank_loader.py    # バンク RAM ローダー（実装済み）
     ├── dht20.py          # DHT20 温湿度センサー（実装済み）
-    ├── ram_test.py       # BANK2/3 RAM テスト + バンク切替（実装済み）
     ├── vram_loader.py    # カラーVRAM イメージローダー（実装済み）
     └── myext.py          # 追加したい拡張をここに置く
 ```
@@ -194,10 +194,8 @@ hd61700.set_call_hook_enabled(CALL_ADDR, True)   # 有効化
 | `0x5E10` | `dht20.py` | DHT20 温湿度センサー読み取り |
 | `0x5E20` | `vram_loader.py` | SD/フラッシュファイル → バンク RAM → カラー VRAM 転送 |
 | `0x5E21` | `vram_loader.py` | 仮想FDDイメージ内ファイル → バンク RAM → カラー VRAM 転送 |
-| `0x5E30` | `ram_test.py` | BANK2/3 RAM 全テスト実行 (Python 直接 R/W) |
-| `0x5E41` | `ram_test.py` | UA データバンクビット → BANK2 (BASIC PEEK/POKE 用) |
-| `0x5E51` | `ram_test.py` | UA データバンクビット → BANK3 (BASIC PEEK/POKE 用) |
-| `0x5E61` | `ram_test.py` | UA データバンクビット → 復元 (bank0) |
+| `0x5E81` | `bank_loader.py` | SD/フラッシュファイル → バンク RAM ロード |
+| `0x5E91` | `bank_loader.py` | 仮想FDDイメージ内ファイル → バンク RAM ロード |
 
 ---
 
@@ -224,6 +222,8 @@ hd61700.set_call_hook_enabled(CALL_ADDR, True)   # 有効化
 | `0x5F46` | IN | 転送バイト数 hi |
 | `0x5F47` | OUT | 実転送バイト数 lo |
 | `0x5F48` | OUT | 実転送バイト数 hi |
+| `0x5F49` | IN | 先頭スキップバイト数 lo（デフォルト=0；BSAVE ヘッダは 4） |
+| `0x5F4A` | IN | 先頭スキップバイト数 hi |
 
 #### ファイル名の指定形式
 
@@ -260,6 +260,45 @@ IF PEEK(&H0C37) AND 1 THEN PRINT "DMA ERR"
 
 ---
 
+### `bank_loader.py` — バンク RAM ローダー
+
+**CALL &H5E81**: SD/フラッシュファイル → バンク RAM  
+**CALL &H5E91**: 仮想FDDイメージ内ファイル → バンク RAM
+
+バンク RAM（1/2/3）にバイナリデータをロードする。VRAM への転送は行わない。
+DMA MMIO (`0x0C30-0x0C37`) と組み合わせることで任意タイミングで VRAM 転送が可能。
+
+#### ext_work レイアウト（CALL &H5E81 — SD ロード）
+
+| オフセット | 方向 | 内容 |
+| --- | --- | --- |
+| `0x5F00` | IN | バンク番号 (1/2/3) |
+| `0x5F01` | IN | 転送先オフセット hi |
+| `0x5F02` | IN | 転送先オフセット lo |
+| `0x5F03` | IN | ファイル内スキップオフセット hi (0=先頭) |
+| `0x5F04` | IN | ファイル内スキップオフセット lo |
+| `0x5F05` | IN | 最大転送バイト数 hi (0=全体) |
+| `0x5F06` | IN | 最大転送バイト数 lo |
+| `0x5F07–` | IN | ファイルパス（ヌル終端 ASCII）例: `/sd/game.bin` |
+| `0x5F00` | OUT | 結果コード: `0x00`=OK / `0x01`=バンク未割当 / `0x02`=ファイルエラー / `0xFF`=その他 |
+| `0x5F01` | OUT | 実転送バイト数 hi |
+| `0x5F02` | OUT | 実転送バイト数 lo |
+
+#### ext_work レイアウト（CALL &H5E91 — FDD ロード）
+
+| オフセット | 方向 | 内容 |
+| --- | --- | --- |
+| `0x5F00` | IN | バンク番号 (1/2/3) |
+| `0x5F01` | IN | 転送先オフセット hi |
+| `0x5F02` | IN | 転送先オフセット lo |
+| `0x5F03` | IN | スキップレコード数 (0=先頭) |
+| `0x5F04–0x5F0E` | IN | ファイル名 11 バイト（8.3形式、スペース埋め） |
+| `0x5F00` | OUT | 結果コード: `0x00`=OK / `0x01`=バンク未割当 / `0x02`=ファイル未発見 / `0x03`=FDD 未マウント / `0xFF`=その他 |
+| `0x5F01` | OUT | 実転送バイト数 hi |
+| `0x5F02` | OUT | 実転送バイト数 lo |
+
+---
+
 ## 変更履歴
 
 | 日付 | 内容 |
@@ -267,4 +306,4 @@ IF PEEK(&H0C37) AND 1 THEN PRINT "DMA ERR"
 | 2026-05-14 | 初版作成 |
 | 2026-05-14 | 単一ディスパッチアドレス廃止。call_hook を関数ごとに直接登録する方式に変更 |
 | 2026-05-28 | `enable_call_hook` / `disable_call_hook` API を追記 |
-| 2026-06-11 | `ram_test.py` バンク切替フック、`vram_loader.py` を追加 |
+| 2026-06-11 | `vram_loader.py` を追加。`bank_loader.py` を追加 |

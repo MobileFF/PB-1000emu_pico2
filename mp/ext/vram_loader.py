@@ -197,10 +197,24 @@ def _load_vram_sd(system):
         _write_result(w, _ERR_RANGE)
         return
 
-    read_cap = min((rlen + skip) if rlen else _COLOR_VRAM_SIZE + skip, _BANK_SIZE + skip)
+    max_bytes = min(rlen if rlen else _COLOR_VRAM_SIZE, _BANK_SIZE, _COLOR_VRAM_SIZE - dst)
+    bank_buf  = system._bank_ram[slot]
+    _CHUNK    = 512
+    offset    = 0
     try:
         with open(path, 'rb') as f:
-            data = f.read(read_cap)
+            if skip:
+                skipped = f.read(skip)
+                if len(skipped) < skip:
+                    _write_result(w, _ERR_RANGE)
+                    print(f"vram_loader(SD): skip({skip}) >= file size")
+                    return
+            while offset < max_bytes:
+                chunk = f.read(min(_CHUNK, max_bytes - offset))
+                if not chunk:
+                    break
+                _bank_write(bank_buf, offset, chunk)
+                offset += len(chunk)
     except OSError:
         _write_result(w, _ERR_NOFILE)
         print(f"vram_loader: not found: {path}")
@@ -210,21 +224,11 @@ def _load_vram_sd(system):
         print(f"vram_loader: read error: {e}")
         return
 
-    # ヘッダスキップ
-    if skip:
-        if skip >= len(data):
-            _write_result(w, _ERR_RANGE)
-            print(f"vram_loader(SD): skip({skip}) >= file size({len(data)})")
-            return
-        data = data[skip:]
-
-    xfer_len = min(len(data), _COLOR_VRAM_SIZE - dst, _BANK_SIZE)
-    if xfer_len == 0:
+    xfer_len = offset
+    if not xfer_len:
         _write_result(w, _ERR_RANGE)
         return
 
-    bank_buf = system._bank_ram[slot]
-    _bank_write(bank_buf, 0, data[:xfer_len])
     _finish_transfer(system, bank_buf, slot, dst, xfer_len)
     _write_result(w, _OK, xfer_len)
     print(f"vram_loader(SD): '{path}' skip={skip} -> BANK{slot}+cvram[{dst}:{dst+xfer_len}] ({xfer_len}B)")

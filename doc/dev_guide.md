@@ -59,9 +59,10 @@ CPU コアの制御と周辺 I/O 全般を担う中心モジュール。主な A
 | 関数 | 説明 |
 | --- | --- |
 | `reset(debug)` | CPU をリセット（オプションでデバッグフラグ有効化） |
-| `execute_steps(n)` | n ステップ実行 |
+| `execute(cycles, stop_pc)` | 最大 cycles サイクル実行 |
 | `get_pc()` / `set_pc(addr)` | プログラムカウンタの読み書き |
-| `get_reg(name)` / `set_reg(name, val)` | レジスタの読み書き |
+| `get_reg(idx)` / `set_reg(idx, val)` | 汎用レジスタの読み書き（整数インデックス） |
+| `get_reg8(idx)` / `set_reg8(idx, val)` | 8 ビット特殊レジスタ（IA/IB/IE/UA）の読み書き |
 | `load_rom(data, slot)` | ROM バイナリをロード |
 | `load_ram(data, slot)` | RAM バイナリをロード |
 | `set_port_callbacks(read_fn, write_fn)` | ポート I/O コールバック登録 |
