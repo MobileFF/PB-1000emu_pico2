@@ -57,8 +57,8 @@ PB-1000_emu_AG2/
 - CPUの実装/エミュレータ動作の実装には、以下の資料を参考とさせていただきました。ありがとうございます。
   - CASIO社「TECHNICAL MANUAL PB-1000」（英語版）
   - あお氏による「HD61700アセンブリ言語簡易マニュアル(Ver 0.29 2008-05-05)」および「HD61700 INSTRUCTION SET」
-  - Piotr Piatek氏による![PB-1000エミュレータ](https://www.pisi.com.pl/piotr433/pb1000ee.htm)のソースコード
-  - Jun Amano氏による「![CASIO PB-1000/C FOREVER!](http://www.lsigame.com/pb-1000/pb-1000.htm)」の各種技術記事
+  - Piotr Piatek氏による[PB-1000エミュレータ](https://www.pisi.com.pl/piotr433/pb1000ee.htm)のソースコード
+  - Jun Amano氏による「[CASIO PB-1000/C FOREVER!](http://www.lsigame.com/pb-1000/pb-1000.htm)」の各種技術記事
   - MAME プロジェクトによる HD61700 のソースコード
 - その他、PB-1000に関する情報を発信されているすべての皆様に感謝いたします。
 - ソースコードの作成には主に以下のAIエージェントツールを利用しています。
