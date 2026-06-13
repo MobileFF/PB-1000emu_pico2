@@ -15,6 +15,10 @@ vram_loader.py — カラーVRAM イメージローダー 拡張モジュール
   &H5F44  転送先オフセット hi
   &H5F45  転送バイト数 lo      (0=ファイル全体)
   &H5F46  転送バイト数 hi
+  &H5F49  先頭スキップバイト数 lo  (デフォルト=0)
+  &H5F4A  先頭スキップバイト数 hi
+          BSAVE で保存したファイルは先頭4バイトがヘッダ
+          (開始アドレス2B + 長さ2B) のため POKE &H5F49,4 を指定
 
 【CALL &H5E20 専用パラメータ】
   &H5F01  ファイル名バイト長 (1-64)
@@ -53,6 +57,7 @@ vram_loader.py — カラーVRAM イメージローダー 拡張モジュール
   30 FOR I=1 TO LEN(S$):POKE &H5F01+I,ASC(MID$(S$,I,1)):NEXT I
   40 POKE &H5F42,2:POKE &H5F43,0:POKE &H5F44,0
   50 POKE &H5F45,0:POKE &H5F46,0
+  55 POKE &H5F49,4:POKE &H5F4A,0  : REM BSAVEヘッダ4バイトをスキップ
   60 CALL &H5E21
   70 IF PEEK(&H5F00)<>0 THEN PRINT "ERR:";PEEK(&H5F00):END
   80 PRINT PEEK(&H5F47)+PEEK(&H5F48)*256;"bytes"
@@ -90,6 +95,8 @@ _W_LEN_LO    = 0x45
 _W_LEN_HI    = 0x46
 _W_XFER_LO   = 0x47
 _W_XFER_HI   = 0x48
+_W_SKIP_LO   = 0x49   # 先頭スキップバイト数 lo (BSAVEヘッダ除去用)
+_W_SKIP_HI   = 0x4A   # 先頭スキップバイト数 hi
 
 # 結果コード
 _OK         = 0x00
@@ -121,7 +128,8 @@ def _parse_common(w):
     slot = w[_W_BANK] if w[_W_BANK] in (1, 2, 3) else 2
     dst  = w[_W_DST_LO] | (w[_W_DST_HI] << 8)
     rlen = w[_W_LEN_LO] | (w[_W_LEN_HI] << 8)
-    return slot, dst, rlen
+    skip = w[_W_SKIP_LO] | (w[_W_SKIP_HI] << 8)
+    return slot, dst, rlen, skip
 
 
 def _bank_write(buf, offset, data):
@@ -179,7 +187,7 @@ def _load_vram_sd(system):
     fname = bytes(w[_W_FNAME:_W_FNAME + fname_len]).decode('ascii', 'ignore')
     path  = _resolve_path(fname)
 
-    slot, dst, rlen = _parse_common(w)
+    slot, dst, rlen, skip = _parse_common(w)
 
     if not system.has_bank[slot]:
         _write_result(w, _ERR_NOBANK)
@@ -189,7 +197,7 @@ def _load_vram_sd(system):
         _write_result(w, _ERR_RANGE)
         return
 
-    read_cap = min(rlen if rlen else _COLOR_VRAM_SIZE, _BANK_SIZE)
+    read_cap = min((rlen + skip) if rlen else _COLOR_VRAM_SIZE + skip, _BANK_SIZE + skip)
     try:
         with open(path, 'rb') as f:
             data = f.read(read_cap)
@@ -202,6 +210,14 @@ def _load_vram_sd(system):
         print(f"vram_loader: read error: {e}")
         return
 
+    # ヘッダスキップ
+    if skip:
+        if skip >= len(data):
+            _write_result(w, _ERR_RANGE)
+            print(f"vram_loader(SD): skip({skip}) >= file size({len(data)})")
+            return
+        data = data[skip:]
+
     xfer_len = min(len(data), _COLOR_VRAM_SIZE - dst, _BANK_SIZE)
     if xfer_len == 0:
         _write_result(w, _ERR_RANGE)
@@ -211,7 +227,7 @@ def _load_vram_sd(system):
     _bank_write(bank_buf, 0, data[:xfer_len])
     _finish_transfer(system, bank_buf, slot, dst, xfer_len)
     _write_result(w, _OK, xfer_len)
-    print(f"vram_loader(SD): '{path}' -> BANK{slot}+cvram[{dst}:{dst+xfer_len}] ({xfer_len}B)")
+    print(f"vram_loader(SD): '{path}' skip={skip} -> BANK{slot}+cvram[{dst}:{dst+xfer_len}] ({xfer_len}B)")
 
 
 # ---------------------------------------------------------------------------
@@ -269,7 +285,7 @@ def _load_vram_fdd(system):
     fname = bytes(w[_W_FNAME:_W_FNAME + fname_len]).decode('ascii', 'ignore')
     name11 = _to_name11(fname)
 
-    slot, dst, rlen = _parse_common(w)
+    slot, dst, rlen, skip = _parse_common(w)
 
     if not system.has_bank[slot]:
         _write_result(w, _ERR_NOBANK)
@@ -300,18 +316,28 @@ def _load_vram_fdd(system):
         return
 
     # ── セクタ単位で読み込みバンクRAMに積む ──────────────────────────────
-    max_bytes = min(rlen if rlen else _COLOR_VRAM_SIZE, _BANK_SIZE, _COLOR_VRAM_SIZE - dst)
-    bank_buf  = system._bank_ram[slot]
-    sec_buf   = bytearray(SIZE_SECTOR)
-    offset    = 0
+    max_bytes      = min(rlen if rlen else _COLOR_VRAM_SIZE, _BANK_SIZE, _COLOR_VRAM_SIZE - dst)
+    bank_buf       = system._bank_ram[slot]
+    sec_buf        = bytearray(SIZE_SECTOR)
+    offset         = 0
+    remaining_skip = skip   # まだスキップすべき残バイト数
     try:
         while offset < max_bytes:
             n = dos.read_disk_file(handle, sec_buf)
             if n == 0:
                 break
-            copy_n = min(n, max_bytes - offset)
-            _bank_write(bank_buf, offset, sec_buf[:copy_n])
-            offset += copy_n
+
+            if remaining_skip >= n:
+                # セクタ全体をスキップ
+                remaining_skip -= n
+            else:
+                # セクタの一部（先頭 remaining_skip バイト）をスキップして残りをコピー
+                src_start = remaining_skip
+                remaining_skip = 0
+                copy_n = min(n - src_start, max_bytes - offset)
+                _bank_write(bank_buf, offset, sec_buf[src_start:src_start + copy_n])
+                offset += copy_n
+
             if dos.is_end_of_disk_file(handle):
                 break
             dos.seek_rel_disk_file(handle, 1)
@@ -331,4 +357,4 @@ def _load_vram_fdd(system):
     # ── バンクRAM → カラーVRAM 転送 ───────────────────────────────────────
     _finish_transfer(system, bank_buf, slot, dst, xfer_len)
     _write_result(w, _OK, xfer_len)
-    print(f"vram_loader(FDD): '{fname}' -> BANK{slot}+cvram[{dst}:{dst+xfer_len}] ({xfer_len}B)")
+    print(f"vram_loader(FDD): '{fname}' skip={skip} -> BANK{slot}+cvram[{dst}:{dst+xfer_len}] ({xfer_len}B)")
