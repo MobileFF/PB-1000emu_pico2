@@ -296,8 +296,7 @@ class TouchInputManager:
             ry = (y - ly0) / lh
 
             col = max(0, min(3, int(rx * 4)))
-            row = 3 - int(ry * 4)
-            row = max(0, min(3, row))
+            row = max(0, min(3, int(ry * 4)))
 
             t_idx = row * 4 + col + 1
             t_key = f"TK{t_idx}"

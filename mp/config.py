@@ -61,6 +61,8 @@ _DEFAULTS = {
     "display": {
         "fg_color": "0",
         "bg_color": "180",
+        "driver":   "ILI9341",
+        "scale":    "1.5",
     },
 }
 

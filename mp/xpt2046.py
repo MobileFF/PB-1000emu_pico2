@@ -2,8 +2,9 @@ import time
 from machine import Pin, SPI
 
 class XPT2046:
-    def __init__(self, spi, cs_pin, irq_pin=None, width=320, height=240, 
-                 x_min=200, y_min=200, x_max=3900, y_max=3900, baudrate=1000000):
+    def __init__(self, spi, cs_pin, irq_pin=None, width=320, height=240,
+                 x_min=200, y_min=200, x_max=3900, y_max=3900, baudrate=1000000,
+                 swap_xy=False, x_inv=False, y_inv=False):
         self.spi = spi
         self.cs = Pin(cs_pin, Pin.OUT)
         self.cs.value(1)
@@ -21,9 +22,9 @@ class XPT2046:
         self.x_max = x_max
         self.y_max = y_max
         
-        self.x_inv = False
-        self.y_inv = False
-        self.swap_xy = False
+        self.x_inv = x_inv
+        self.y_inv = y_inv
+        self.swap_xy = swap_xy
         self.baudrate = baudrate
         self.lcd_baudrate = 40000000  # Default to pb1000.py setting
 

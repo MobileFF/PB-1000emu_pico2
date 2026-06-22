@@ -1,5 +1,4 @@
 #include "usb_host_core.h"
-#include "py/runtime.h"
 #include "py/mpprint.h"
 #include "py/gc.h"
 #include "tusb.h"

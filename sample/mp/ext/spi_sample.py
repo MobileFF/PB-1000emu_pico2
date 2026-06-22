@@ -4,7 +4,12 @@ SPI デバイス拡張モジュール サンプル
 SPI1 (SCK=GP10, MOSI=GP11, MISO=GP12) を LCD/SD/タッチと共有し、
 CSピン切り替えで独自デバイスを接続する例。
 
-接続例: CS=GP18  (gpio_pin_map.md で空きピンを確認)
+接続例: CS=GP28  (gpio_pin_map.md の空きピンを使用)
+
+  GP28 は本プロジェクト唯一の汎用予備ピン。
+  EXT_SD_CS_PIN も GP28 を使うため、MY_CS_PIN と EXT_SD_CS_PIN を
+  同時に使う場合はどちらかをジョイスティック未使用ピン
+  (GP18–GP21, GP26–GP27) に変更すること。
 
 BASIC 使用例:
     CALL &5E30
@@ -24,7 +29,7 @@ import machine
 import os
 
 CALL_ADDR      = 0x5E30
-MY_CS_PIN      = 18          # 使用するCSピン番号
+MY_CS_PIN      = 28          # 使用するCSピン番号 (GP28: 汎用予備ピン)
 MY_BAUD        = 1_000_000   # デバイスのボーレート
 LCD_BAUD       = 40_000_000  # LCDが使う40MHz に戻す値
 
@@ -111,7 +116,6 @@ def list_ext_sd(cs_pin=EXT_SD_CS_PIN, mount_path=EXT_MOUNT_PATH):
 
 def _callback(system, cs):
     """CALL &5E30 ハンドラ: SPI デバイスから1バイト読み取る"""
-    list_ext_sd()
     w = system._ext_work
     try:
         spi = system.spi

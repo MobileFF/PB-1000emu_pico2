@@ -169,9 +169,9 @@ def main():
     try:
         from funckey_bar import FuncKeyBar
         _fkbar_y = system._disp_y + int(32 * system.lcd.scale) + 24
-        fkbar = FuncKeyBar(display, _fkbar_y)
+        fkbar = FuncKeyBar(display, _fkbar_y, x_offset=system._disp_x)
         fkbar.draw()
-        print(f"FuncKeyBar drawn at y={_fkbar_y}.")
+        print(f"FuncKeyBar drawn at x={system._disp_x} y={_fkbar_y}.")
     except Exception as _e:
         print(f"FuncKeyBar init failed: {_e}")
 

@@ -39,6 +39,29 @@ def init_display_only():
     return ret
 
 
+def _setup_touch_offsets(system, dw, dh, config=None):
+    """Apply touch offset settings from config, falling back to built-in defaults."""
+    touch_cfg = (config or {}).get("touch", {})
+
+    def _gi(key, default):
+        try:
+            return int(touch_cfg[key]) if key in touch_cfg else default
+        except (ValueError, TypeError):
+            return default
+
+    if dw >= 480:
+        system.touch_x_offset         = _gi("x_offset",         8)
+        system.touch_y_offset         = _gi("y_offset",        -4)
+        system.funckey_touch_x_offset = _gi("funckey_x_offset",  8)
+        system.funckey_touch_y_offset = _gi("funckey_y_offset", -8)
+    else:
+        _ty = dh / 240.0
+        system.touch_x_offset         = _gi("x_offset",         0)
+        system.touch_y_offset         = _gi("y_offset",         round(-104 * _ty))
+        system.funckey_touch_x_offset = _gi("funckey_x_offset",  0)
+        system.funckey_touch_y_offset = _gi("funckey_y_offset",  round(24  * _ty))
+
+
 def create_system(display_ret, profile_dir=None, config=None, *, console_uart=None):
     """Create PB1000System with the given profile directory and merged config."""
     display = display_ret[0] if isinstance(display_ret, tuple) else display_ret
@@ -56,7 +79,23 @@ def create_system(display_ret, profile_dir=None, config=None, *, console_uart=No
     system.touch = touch
     if console_uart is not None:
         system._console_uart_hw = console_uart  # store hw ref; console starts OFF by default
-    system.lcd.set_display_scale(1.5)
+    disp_cfg = (config or {}).get("display", {})
+    scale = float(disp_cfg.get("scale", "1.5"))
+    # x/y_offset: explicit INI value, or auto-center on the display
+    display_obj = display_ret[0] if isinstance(display_ret, tuple) else display_ret
+    dw = getattr(display_obj, "width", 320)
+    dh = getattr(display_obj, "height", 240)
+    auto_x = max(0, (dw - int(192 * scale)) // 2)
+    # Center the whole group (LCD + gap + fkbar) vertically
+    _lcd_h = int(32 * scale)
+    _group_h = _lcd_h + 24 + 42  # 24=gap, 42=fkbar height
+    auto_y = max(0, (dh - _group_h) // 2)
+    disp_x = int(disp_cfg.get("x_offset", str(auto_x)))
+    disp_y = int(disp_cfg.get("y_offset", str(auto_y)))
+    system._disp_x = disp_x
+    system._disp_y = disp_y
+    system.lcd.set_display_scale(scale)
+    _setup_touch_offsets(system, dw, dh, config)
     if config:
         from config import get_int as _gi
         fg_c = _gi(config, "display", "fg_color")
@@ -106,7 +145,21 @@ def initialize_system(*, console_uart=None):
     system.touch = touch
     if console_uart is not None:
         system._console_uart_hw = console_uart  # store hw ref; console starts OFF by default
-    system.lcd.set_display_scale(1.5)
+    dw = getattr(display, "width", 320)
+    dh = getattr(display, "height", 240)
+    # Default scale: 1.5 for 320x240, 2.0 for 480x320
+    scale = 2.0 if dw >= 480 else 1.5
+    auto_x = max(0, (dw - int(192 * scale)) // 2)
+    # Center the whole group (LCD + gap + fkbar) vertically
+    _lcd_h = int(32 * scale)
+    _group_h = _lcd_h + 24 + 42  # 24=gap, 42=fkbar height
+    auto_y = max(0, (dh - _group_h) // 2)
+    system._disp_x = auto_x
+    system._disp_y = auto_y
+    system.lcd.set_display_scale(scale)
+    from config import load_config
+    _cfg = load_config()
+    _setup_touch_offsets(system, dw, dh, _cfg)
     return system
 
 

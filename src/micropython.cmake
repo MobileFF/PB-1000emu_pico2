@@ -88,7 +88,7 @@ target_include_directories(usb_host_core_lib PRIVATE
     ${CMAKE_SOURCE_DIR}                # micropython root
     ${CMAKE_SOURCE_DIR}/boards/${BOARD}  # board-specific config header
     ${CMAKE_SOURCE_DIR}/boards/${PICO_BOARD}  # board-specific config header
-    ${CMAKE_SOURCE_DIR}/build-RPI_PICO2
+    ${CMAKE_BINARY_DIR}
 )
 
 # make sure the TinyUSB sources are compiled with our malloc override

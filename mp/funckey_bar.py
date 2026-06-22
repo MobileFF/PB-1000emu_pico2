@@ -24,18 +24,19 @@ _FKEYS = [
 ]
 
 
-def hit_test(x, y, y_top):
-    if 0 <= x < _IMG_W and y_top <= y < y_top + _IMG_H:
-        col = (x * 8) // _IMG_W
+def hit_test(x, y, y_top, x_left=0):
+    if x_left <= x < x_left + _IMG_W and y_top <= y < y_top + _IMG_H:
+        col = ((x - x_left) * 8) // _IMG_W
         key_coord, label = _FKEYS[col]
         return col, key_coord, label
     return None
 
 
 class FuncKeyBar:
-    def __init__(self, display, y_top):
+    def __init__(self, display, y_top, x_offset=0):
         self._display = display
         self._y_top = y_top
+        self._x_offset = x_offset
         self._active_key = None
 
     def draw(self):
@@ -50,7 +51,8 @@ class FuncKeyBar:
 
     def _blit_raw(self, path):
         d = self._display
-        d.set_window(0, self._y_top, _IMG_W - 1, self._y_top + _IMG_H - 1)
+        x0 = self._x_offset
+        d.set_window(x0, self._y_top, x0 + _IMG_W - 1, self._y_top + _IMG_H - 1)
         d.dc.value(1)
         d.cs.value(0)
         buf = bytearray(512)
@@ -70,7 +72,7 @@ class FuncKeyBar:
         # Gray for navigation keys, pink-ish for MEMO/MEMO-IN
         colors = [0x7BEF, 0x7BEF, 0x7BEF, 0xD8BF, 0xD8BF, 0x7BEF, 0x7BEF, 0x7BEF]
         for i, color in enumerate(colors):
-            d.fill_rect(i * w + 1, self._y_top + 1, w - 2, _IMG_H - 2, color)
+            d.fill_rect(self._x_offset + i * w + 1, self._y_top + 1, w - 2, _IMG_H - 2, color)
 
     def release(self, system):
         if self._active_key is not None:
@@ -86,7 +88,7 @@ class FuncKeyBar:
         x += getattr(system, 'funckey_touch_x_offset', _TOUCH_X_OFFSET)
         y += getattr(system, 'funckey_touch_y_offset', _TOUCH_Y_OFFSET)
 
-        hit = hit_test(x, y, self._y_top)
+        hit = hit_test(x, y, self._y_top, self._x_offset)
         if hit is not None:
             _, key_coord, label = hit
             if self._active_key != key_coord:

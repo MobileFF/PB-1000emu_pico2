@@ -484,7 +484,7 @@ uint8_t lcd_vdp_read(lcd_state_t *lcd, uint32_t reg) {
 #include "hardware/dma.h"
 
 static int lcd_dma_chan = -1;
-static uint8_t dma_buffer[288 * 48 * 2]; /* 1.5x scale max size, 2 bytes/pixel */
+static uint8_t dma_buffer[384 * 64 * 2]; /* 2x scale max size (192*2 x 32*2), 2 bytes/pixel */
 
 void lcd_wait_for_idle(lcd_state_t *lcd) {
   if (lcd_dma_chan >= 0) {
@@ -637,7 +637,7 @@ void lcd_render_to_display(lcd_state_t *lcd) {
     gpio_put(lcd->pin_dc, 1);
     gpio_put(lcd->pin_cs, 0);
     uint32_t total_pixels = (uint32_t)out_w * out_h;
-    uint32_t fill_limit = (total_pixels > (288 * 48)) ? (288 * 48) : total_pixels;
+    uint32_t fill_limit = (total_pixels > (384 * 64)) ? (384 * 64) : total_pixels;
     for (uint32_t i = 0; i < fill_limit; i++) {
         dma_buffer[i*2] = lcd_off_h;
         dma_buffer[i*2+1] = lcd_off_l;

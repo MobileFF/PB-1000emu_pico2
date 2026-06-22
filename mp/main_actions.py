@@ -42,7 +42,7 @@ def handle_disk_swap(system, display, fkbar=None):
         # 2. PB-1000 LCD エリアを強制再描画
         if hasattr(system.lcd, 'mark_dirty'):
             system.lcd.mark_dirty()
-        system.update_display(x_offset=16, y_offset=40)
+        system.update_display()
         # 3. FuncKeyBar を再描画（全画面クリアで消えるため）
         if fkbar is not None:
             fkbar.draw()
@@ -63,7 +63,7 @@ def handle_key_status_and_capture(system, sc=-1, mod=0):
             return
 
         system.set_status("CAPTURING...")
-        system.update_display(x_offset=16, y_offset=40)
+        system.update_display()
         try:
             from emulator_menu import _do_vram_save
             msg = _do_vram_save(system)
@@ -82,7 +82,7 @@ def handle_save_state_request(system, *, enable_usb_kbd):
 
     system._save_requested = False
     system.set_status("SAVING STATE...")
-    system.update_display(x_offset=16, y_offset=40)
+    system.update_display()
     if hasattr(system.lcd, 'lcd_sync'):
         system.lcd.lcd_sync()
 

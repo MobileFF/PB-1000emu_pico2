@@ -86,7 +86,7 @@ def update_frame_if_due(system, now, frame_time, *, frame_interval_ms):
         # Avoid rendering during active SPI transfers (SD Card)
         if system._fdd_active:
             return frame_time
-        system.update_display(x_offset=16, y_offset=40)
+        system.update_display()
         return now
     return frame_time
 

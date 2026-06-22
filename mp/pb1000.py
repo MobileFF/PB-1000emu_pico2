@@ -8,6 +8,7 @@ import sys
 import time
 import machine
 from ili9341 import ILI9341
+# ST7796 is imported lazily inside init_display() when selected
 from fdd_protocol import FDDProtocol
 from fdd_storage import ImageStorageBackend
 from md100_dos import MD100Dos
@@ -66,7 +67,34 @@ def init_sdcard(spi):
         print(f"SD Card mount optional: {e}")
         return False
 
+def _read_display_ini():
+    """Read only the [display] section from /pb1000.ini and /roms/pb1000.ini.
+    SD card is not yet mounted at this point, so only internal flash is checked."""
+    cfg = {}
+    for path in ("/pb1000.ini", "/roms/pb1000.ini"):
+        try:
+            with open(path, "r") as f:
+                in_section = False
+                for raw in f:
+                    line = raw.strip()
+                    if not line or line[0] in (";", "#"):
+                        continue
+                    if line.startswith("[") and line.endswith("]"):
+                        in_section = (line[1:-1].strip().lower() == "display")
+                        continue
+                    if in_section and "=" in line:
+                        k, v = line.split("=", 1)
+                        k = k.strip().lower()
+                        v = v.split(";", 1)[0].split("#", 1)[0].strip()
+                        cfg[k] = v
+        except OSError:
+            pass
+    return cfg
+
 def init_display():
+    disp_cfg = _read_display_ini()
+    driver = disp_cfg.get("driver", "ILI9341").upper()
+
     spi = machine.SPI(
         SPI_ID,
         baudrate=40_000_000,
@@ -84,16 +112,26 @@ def init_display():
     rst = machine.Pin(RST_PIN, machine.Pin.OUT)
     machine.Pin(BL_PIN, machine.Pin.OUT, value=1)
 
-    display = ILI9341(spi, cs, dc, rst, width=320, height=240)
-    display.fill_rect(0, 0, 320, 240, 0x0000)
-    
+    if driver == "ST7796":
+        from st7796 import ST7796
+        display = ST7796(spi, cs, dc, rst, width=480, height=320)
+        display.fill_rect(0, 0, 480, 320, 0x0000)
+        print("Display: ST7796 480x320")
+    else:
+        display = ILI9341(spi, cs, dc, rst, width=320, height=240)
+        display.fill_rect(0, 0, 320, 240, 0x0000)
+        print("Display: ILI9341 320x240")
+
     # Try mounting SD card
     sd_mounted = init_sdcard(spi)
-    
+
     touch = None
     try:
         from xpt2046 import XPT2046
-        touch = XPT2046(spi, T_CS_PIN, T_IRQ_PIN, x_min=325, x_max=3850)
+        touch = XPT2046(spi, T_CS_PIN, T_IRQ_PIN,
+                        width=display.width, height=display.height,
+                        swap_xy=True, x_inv=True, y_inv=True,
+                        y_min=325, y_max=3850)
     except Exception as e:
         print("Touch panel init failed:", e)
 
@@ -300,7 +338,9 @@ class PB1000System:
         self._disp_x = 16
         self._disp_y = 40
         self.touch_x_offset = 0
-        self.touch_y_offset = -104  # adjust if touch mapping seems biased downward
+        self.touch_y_offset = -104
+        self.funckey_touch_x_offset = 0
+        self.funckey_touch_y_offset = 24
         self.port_data = 0
         self._console_uart = None      # active uart (None = serial console OFF)
         self._console_uart_hw = None   # uart hardware ref; set by main_boot, used by menu
