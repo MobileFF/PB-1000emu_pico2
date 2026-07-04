@@ -132,6 +132,16 @@ POKE &H0C37,0      : REM FIRE
 IF PEEK(&H0C37) AND 1 THEN PRINT "DMA ERROR"
 ```
 
+> **Known concern (unverified)**: the DMA execution path in `modhd61700.c` only
+> `memcpy()`s into `color_vram` — it never calls `lcd_c`'s `mark_dirty()`.
+> Since `lcd_render_to_display()` returns immediately when the `dirty` flag
+> isn't set, a DMA re-transfer performed with no other LCD write in between
+> (nothing else setting `dirty`) may not actually appear on screen.
+> `vram_loader.py` (the initial CALL-based load) works fine because
+> `_finish_transfer()` explicitly calls `mark_dirty()`, but this standalone
+> DMA-MMIO re-transfer path has not been confirmed on real hardware. Needs
+> verification.
+
 > Because the `io_read`/`io_write` hook range in `hd61700.c` covers 0x0C00–0x0CFF, VDP reads and writes work correctly even in C-direct mode via `_fdd_read/write_bridge_fn`.
 
 ---

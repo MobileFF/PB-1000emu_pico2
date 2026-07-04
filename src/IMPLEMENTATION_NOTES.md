@@ -1,51 +1,28 @@
 # HD61700 CPU Core - Implementation Notes
 
+> **Note:** This file predates the current implementation and originally described an
+> early, partial CPU core. The core in `src/hd61700.c` has since grown into a full
+> implementation (see below) capable of running the real PB-1000 ROM/BASIC. For
+> authoritative, actively-maintained documentation see `doc/architecture.md`,
+> `doc/dev_guide.md`, and `doc/memory_map.md`; this file is kept mainly as historical
+> background on the opcode encoding.
+
 ## Current Implementation Status
 
 ### Completed
-- Basic CPU state structure (registers, PC, flags)
-- Memory/IO callback system
-- Fetch cycle
-- Basic instruction decoder framework
+- Full CPU state structure (general registers, index registers, SIR, PC, flags, IA/IB/IE/UA)
+- Memory/IO callback system (C-managed and Python-managed modes; see `doc/dev_guide.md`)
+- Fetch/decode/execute cycle with a large opcode dispatch table (`src/hd61700.c`,
+  roughly 270 `case` branches) covering data transfer, arithmetic/logical, control
+  flow, stack, and I/O instructions — sufficient to boot and run the PB-1000 ROM
+  and BASIC interpreter.
+- Bank-switched memory (`0x8000`–`0xFFFF`, banks 1-3) and MMIO peripherals
+  (LCD/VDP, keyboard matrix, PIO UART, virtual FDD, DMA) are implemented and
+  wired through `modhd61700.c`.
 
-### Instruction Set (Partial)
-Currently implemented opcodes:
-- `0x00`: NOP
-- `0x01`: SLP (Sleep/Halt)
-- `0x40-0x5F`: LD reg, imm8 (example - needs verification)
-- `0x60`: JP imm16 (Jump absolute)
-- `0x80-0x9F`: Arithmetic operations (placeholder)
-
-### TODO - Full Instruction Set
-
-Based on HD61700.TXT and MAME sources, the following instruction categories need implementation:
-
-#### Data Transfer (LD, LDI, LDD等)
-- Register to Register
-- Memory to Register
-- Immediate to Register  
-- Indexed addressing modes
-
-#### Arithmetic/Logical
-- ADD, ADC, SUB, SBC
-- AND, OR, XOR
-- INC, DEC
-- Multi-byte operations (ADBM, SBBM, etc.)
-
-#### Control Flow
-- JP, JR (conditional/unconditional)
-- CALL (CAL), RETURN (RTN)
-- TRAP (TRP)
-
-#### Stack Operations
-- PUSH (PHU, PHS, PPU, PPS)
-- POP
-- PRE (Prepare stack)
-
-#### I/O and Special
-- IN, OUT (Port I/O)
-- LCD commands (STL, LDL, etc.)
-- Timer operations
+Exact per-opcode coverage is not tracked in this file; consult `src/hd61700.c`
+directly (or MAME's `hd61700_device` for the reference encoding) if you need to
+verify a specific instruction.
 
 ## Opcode Encoding
 
@@ -60,22 +37,14 @@ The HD61700 uses variable-length instructions (1-4 bytes):
 
 ## Memory Map (PB-1000)
 
-```
-0x0000-0x17FF:  Internal ROM (6KB) - rom0.bin
-0x1800-0x?:     External ROM bank
-0x2000-0x9FFF:  RAM (32KB)
-0xA000-0xFFFF:  Banked memory
-```
-
-## Next Steps
-
-1. Study MAME `hd61700_device::state_string_export()` for complete opcode table
-2. Implement instruction groups systematically
-3. Add disassembler for debugging
-4. Test with simple ROM code
+The authoritative, up-to-date memory map (bank-common area, bank-switched area,
+MMIO addresses, etc.) lives in `doc/memory_map.md` — refer to it instead of
+duplicating the layout here.
 
 ## References
 
-- `src/hd61700.cpp` (MAME) - Complete implementation
-- `HD61700.TXT` - Assembly language manual
-- PB-1000 Technical Reference - System architecture
+- `src/hd61700.c` / `src/hd61700.h` — CPU core implementation
+- `src/modhd61700.c` — MicroPython ↔ CPU core wrapper module
+- `HD61700.TXT` — Assembly language manual
+- MAME `hd61700_device` — reference implementation used during development
+- `doc/architecture.md`, `doc/dev_guide.md`, `doc/memory_map.md` — current design docs

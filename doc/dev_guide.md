@@ -90,6 +90,7 @@ HD61830 LCD コントローラエミュレーションと SPI レンダリング
 | `get_vram()` | 現在の VRAM バイト列を返す |
 | `set_colors(fg, bg)` | 点灯・消灯ピクセルの RGB565 色設定 |
 | `set_vdp_enable(bool)` | per-pixel カラー VRAM（VDP）の有効・無効 |
+| `set_vdp_init_done(bool)` / `vdp_init_done()` | VDP「初期描画済み」フラグの強制設定・参照（§8 参照） |
 | `set_scale(num, den)` | スケール設定（整数または分数） |
 
 Python ラッパー `lcd_controller_c.py` の `LCDControllerC` クラスを通じて操作するのが標準。
@@ -231,7 +232,13 @@ system.lcd.set_vdp_enable(False)  # グローバル色設定に戻す
 
 MMIO アドレス 0x0C20–0x0C24 で BASIC / マシン語から色 VRAM を操作できる（詳細は `doc/memory_map.md` 参照）。
 
-エミュレータメニューの **Color VRAM** 項目でオン/オフ切り替え可能。
+エミュレータメニューの **Color VRAM** 項目でオン/オフ切り替え可能（内部的には `set_vdp_enable()` を呼ぶだけ）。
+
+実際にカラー VRAM が描画に使われるには `set_vdp_enable(True)` に加えて `vdp_init_fill_done` フラグ
+（`vdp_init_done()` で参照可能）が立っている必要がある。このフラグは通常 CPU 側の VDP ポート書き込み
+（`lcd_c.vdp_write()` reg=2、0xFF 以外のデータ）で自動的に立つが、`get_color_vram()` 経由でカラー VRAM に
+直接書き込む拡張（`mp/ext/vram_loader.py` 等）はこの経路を通らないため、`set_vdp_init_done(True)` を明示的に
+呼ばない限り古いモノクロ VRAM 側の描画にフォールバックしてしまう。
 
 ---
 

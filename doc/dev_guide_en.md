@@ -93,6 +93,7 @@ Emulates the HD61830 LCD controller and drives the SPI display.
 | `get_vram()` | Return the current VRAM as bytes |
 | `set_colors(fg, bg)` | Set lit/unlit pixel colours in RGB565 |
 | `set_vdp_enable(bool)` | Enable/disable per-pixel colour VRAM (VDP) |
+| `set_vdp_init_done(bool)` / `vdp_init_done()` | Force-set / read the VDP "initial fill done" flag (see §8) |
 | `set_scale(num, den)` | Set the display scale factor |
 
 Use the `LCDControllerC` wrapper class in `lcd_controller_c.py` in normal code.
@@ -228,7 +229,14 @@ system.lcd.set_vdp_enable(False)  # revert to global colour settings
 
 MMIO addresses 0x0C20–0x0C24 allow BASIC programs or machine code to write colour VRAM directly (see `doc/memory_map.md`).
 
-The **Color VRAM** entry in the emulator menu toggles this feature at runtime.
+The **Color VRAM** entry in the emulator menu toggles this feature at runtime (it simply calls `set_vdp_enable()`).
+
+For colour VRAM to actually be used while rendering, `set_vdp_enable(True)` alone is not enough — the
+`vdp_init_fill_done` flag (readable via `vdp_init_done()`) must also be set. This flag is normally set
+automatically by a CPU-side VDP port write (`lcd_c.vdp_write()` reg=2, with data != 0xFF). Extensions that
+write to colour VRAM directly via `get_color_vram()` (e.g. `mp/ext/vram_loader.py`) bypass that path, so they
+must call `set_vdp_init_done(True)` explicitly — otherwise the renderer keeps falling back to the monochrome
+VRAM.
 
 ### Global LCD Colours
 

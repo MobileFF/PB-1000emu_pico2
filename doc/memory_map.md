@@ -137,6 +137,15 @@ POKE &H0C37,0      : REM FIRE
 IF PEEK(&H0C37) AND 1 THEN PRINT "DMA ERROR"
 ```
 
+> **既知の懸念(未検証)**: `modhd61700.c` の DMA 実行処理は `color_vram` へ
+> `memcpy()` するのみで `lcd_c` 側の `mark_dirty()` を呼んでいない。
+> `lcd_render_to_display()` は `dirty` フラグが立っていないと即座に return
+> するため、直前に他の LCD 書き込み（dirty を立てる操作）が無い状態で
+> DMA 再転送だけを行った場合、画面に反映されない可能性がある。
+> `vram_loader.py`（CALL 経由の初回ロード）は `_finish_transfer()` 内で
+> 明示的に `mark_dirty()` を呼んでいるため問題なく動作しているが、この
+> DMA MMIO 単体の再転送パスは実機で未確認。要検証。
+
 > `hd61700.c` の `io_read`/`io_write` フック範囲は `0x0C00–0x0CFF` であるため、
 > C ダイレクトモードでも `_fdd_read/write_bridge_fn` 経由で VDP 読み書きが正しく機能する。
 

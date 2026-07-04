@@ -198,6 +198,8 @@ hd61700.set_call_hook_enabled(CALL_ADDR, True)   # enable
 
 Loads a file into bank RAM (1/2/3) and simultaneously writes it to the colour VRAM. The data remains in bank RAM after loading, enabling fast re-transfer via DMA MMIO (`0x0C30–0x0C37`) without further file I/O.
 
+After the transfer, the handler calls `set_vdp_enable(True)`, `set_vdp_init_done(True)`, and `mark_dirty()` so the newly loaded image is picked up on the next frame. The write to `color_vram` bypasses `lcd_c.vdp_write()` (the CPU's VDP port), so `vdp_init_fill_done` is never set automatically — without the explicit `set_vdp_init_done(True)` call the renderer would keep falling back to the monochrome VRAM and the loaded image would never appear on screen.
+
 #### ext_work Layout (common)
 
 | Offset | Dir | Contents |
@@ -263,3 +265,4 @@ Loads binary data into bank RAM (1/2/3) without writing to colour VRAM. Combine 
 | 2026-05-14 | Removed single dispatch address; switched to direct call_hook registration per function |
 | 2026-05-28 | Added `enable_call_hook` / `disable_call_hook` API |
 | 2026-06-11 | Added `vram_loader.py` and `bank_loader.py` |
+| 2026-07-04 | `vram_loader.py`: now calls `set_vdp_init_done(True)` after transfer so a direct colour-VRAM write is picked up by the renderer immediately |
