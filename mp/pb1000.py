@@ -7,8 +7,7 @@ import os
 import sys
 import time
 import machine
-from ili9341 import ILI9341
-# ST7796 is imported lazily inside init_display() when selected
+# ILI9341 and ST7796 are imported lazily inside init_display() when selected
 from fdd_protocol import FDDProtocol
 from fdd_storage import ImageStorageBackend
 from md100_dos import MD100Dos
@@ -53,18 +52,19 @@ VFDD_IO_READ_ADDR = 0x0C03
 VFDD_IO_WRITE_ADDR = 0x0C04
 ENABLE_VIRTUAL_FDD = True
 
-def init_sdcard(spi):
+def init_sdcard(spi, lcd_baudrate=40_000_000):
     try:
         from sdcard import SDCard
         sd_cs = machine.Pin(SD_CS_PIN, machine.Pin.OUT, value=1)
-        # Use verified 400kHz for stable initialization, restore to 40MHz for LCD
-        sd = SDCard(spi, sd_cs, baudrate=400000, restore_baudrate=40_000_000)
+        # Use 400kHz for stable SD init, restore to the actual LCD SPI baudrate
+        sd = SDCard(spi, sd_cs, baudrate=400000, restore_baudrate=lcd_baudrate)
         vfs = os.VfsFat(sd)
         os.mount(vfs, "/sd")
         print("SD Card mounted at /sd")
         return True
     except Exception as e:
         print(f"SD Card mount optional: {e}")
+        sys.print_exception(e)
         return False
 
 def _read_display_ini():
@@ -93,15 +93,22 @@ def _read_display_ini():
 
 def init_display():
     disp_cfg = _read_display_ini()
-    driver = disp_cfg.get("driver", "ILI9341").upper()
+    # Accept both "driver=ST7796" and "display=ST7796" as equivalent keys.
+    driver = disp_cfg.get("driver", disp_cfg.get("display", "ILI9341")).upper()
+
+    # ILI9341: 26 MHz (safe for all modules). ST7796: 40 MHz.
+    # Override with spi_baudrate in [display] section of pb1000.ini if needed.
+    default_baud = 40_000_000 if driver == "ST7796" else 26_000_000
+    spi_baud = int(disp_cfg.get("spi_baudrate", str(default_baud)))
 
     spi = machine.SPI(
         SPI_ID,
-        baudrate=40_000_000,
+        baudrate=spi_baud,
         sck=machine.Pin(SCK_PIN),
         mosi=machine.Pin(MOSI_PIN),
         miso=machine.Pin(MISO_PIN),
     )
+    print(f"SPI baudrate: {spi_baud}")
     # Ensure all CS pins are high before starting
     machine.Pin(CS_PIN, machine.Pin.OUT, value=1)
     machine.Pin(T_CS_PIN, machine.Pin.OUT, value=1)
@@ -118,12 +125,14 @@ def init_display():
         display.fill_rect(0, 0, 480, 320, 0x0000)
         print("Display: ST7796 480x320")
     else:
+        from ili9341 import ILI9341
         display = ILI9341(spi, cs, dc, rst, width=320, height=240)
         display.fill_rect(0, 0, 320, 240, 0x0000)
         print("Display: ILI9341 320x240")
+    display.spi_baudrate = spi_baud
 
-    # Try mounting SD card
-    sd_mounted = init_sdcard(spi)
+    # Try mounting SD card; pass actual SPI baudrate so it's restored correctly
+    sd_mounted = init_sdcard(spi, spi_baud)
 
     touch = None
     try:
@@ -131,17 +140,19 @@ def init_display():
         touch = XPT2046(spi, T_CS_PIN, T_IRQ_PIN,
                         width=display.width, height=display.height,
                         swap_xy=True, x_inv=True, y_inv=True,
-                        y_min=325, y_max=3850)
+                        y_min=325, y_max=3850,
+                        lcd_baudrate=spi_baud)
     except Exception as e:
         print("Touch panel init failed:", e)
+        sys.print_exception(e)
 
     return display, touch, sd_mounted, spi
 
-def draw_bezel(display, scale=1.0, x=16, y=40):
+def draw_bezel(display, scale=1.0, x=16, y=40, lcd_height=32):
     """Draws the PB-1000 LCD bezel scaled to fit the display."""
     # Inner LCD area size
     lw = int(192 * scale)
-    lh = int(32 * scale)
+    lh = int(lcd_height * scale)
     
     # Margin and boarders (scaled or fixed?)
     # Original: (12, 36, 296, 72, 0x4228) -> inner (16,40, 288,64)
@@ -337,6 +348,7 @@ class PB1000System:
         
         self._disp_x = 16
         self._disp_y = 40
+        self._lcd_height = 32  # updated by create_system from ini
         self.touch_x_offset = 0
         self.touch_y_offset = -104
         self.funckey_touch_x_offset = 0
@@ -373,7 +385,8 @@ class PB1000System:
             # Note: main.py will replace this with a real PioUart instance if needed
             print("PIO UART support enabled in system.")
         except Exception as e:
-            print("PIO UART setup warning")
+            print(f"PIO UART setup warning: {e}")
+            sys.print_exception(e)
 
         # Initialize CPU
         cpu_core.reset(self.debug_cfg["sys"])
@@ -410,6 +423,7 @@ class PB1000System:
                 cpu_core.set_port_direct(6, 13, _beep_pin, _freq_hz, _duty_pct)
             except Exception as _e:
                 print(f"PORT: C-direct init failed: {_e}")
+                sys.print_exception(_e)
                 self._c_port_active = False
 
         if restore_registers:
@@ -627,6 +641,7 @@ class PB1000System:
             print(f"BEEP: PWM on GP{gpio_pin} @ {freq_hz}Hz duty={duty_pct}%")
         except Exception as e:
             print(f"BEEP: init failed: {e}")
+            sys.print_exception(e)
             self._beep_pwm = None
 
     def _beep_set(self, on):
@@ -680,6 +695,7 @@ class PB1000System:
                         print(f"EXT: {mod_name} has no register(), skipped")
                 except Exception as e:
                     print(f"EXT: {mod_name} load error: {e}")
+                    sys.print_exception(e)
             break  # 最初に見つかったディレクトリのみ使用
 
     def _log_vfdd(self, msg):
@@ -775,6 +791,7 @@ class PB1000System:
                 print(f"[VFDD] Injected OPTCD=0x55 at 0x6BFA ({reason})")
         except Exception as e:
             print(f"[VFDD] Failed to inject OPTCD ({reason}): {e}")
+            sys.print_exception(e)
 
     def _register_dump_path(self):
         return "/roms/register.bin"
@@ -801,8 +818,8 @@ class PB1000System:
                     os.mkdir(curr)
                 except OSError:
                     pass
-        except Exception:
-            pass
+        except Exception as _e:
+            sys.print_exception(_e)
 
     def _get_storage_path(self, filename):
         """Return the best path for a file. Profile dir takes highest priority."""
@@ -983,6 +1000,7 @@ class PB1000System:
             return self.configure_virtual_fdd(new_path)
         except Exception as e:
             print(f"[VFDD] swap_disk failed: {e}")
+            sys.print_exception(e)
             return False
 
     def activate_pending_virtual_fdd(self):
@@ -1071,6 +1089,7 @@ class PB1000System:
             print(f"RAM0 saved: {path0} ({len(buf)} bytes)")
         except Exception as e:
             print(f"Error saving RAM0: {e}")
+            sys.print_exception(e)
 
         for slot in range(1, 4):
             if not self.has_bank[slot]:
@@ -1087,6 +1106,7 @@ class PB1000System:
                 print(f"RAM{slot} saved: {rp} ({len(data)} bytes)")
             except Exception as e:
                 print(f"Error saving RAM{slot}: {e}")
+                sys.print_exception(e)
 
         try:
             regs = {
@@ -1105,6 +1125,7 @@ class PB1000System:
             print(f"State saved to {reg_path}")
         except Exception as e:
             print(f"Error saving registers: {e}")
+            sys.print_exception(e)
 
     def save_ram(self):
         """Compatibility alias for save_state."""
@@ -1196,7 +1217,8 @@ class PB1000System:
                         try:
                             n = _load_direct(f, ram_target._view)
                             print(f"RAM slot {slot} loaded direct ({n}B) from {file_path}")
-                        except Exception:
+                        except Exception as _e:
+                            print(f"RAM direct load failed ({_e}), retrying chunked")
                             f.seek(0)
                             n = _load_chunked(f, ram_target)
                             print(f"RAM slot {slot} loaded chunked ({n}B) from {file_path}")
@@ -1207,6 +1229,7 @@ class PB1000System:
                 return True
             except Exception as e:
                 print(f"Error loading {file_path}: {e}")
+                sys.print_exception(e)
                 return False
 
         _load_to_ram(path0, self.ram, 0)
@@ -1237,6 +1260,7 @@ class PB1000System:
                 print(f"Register file not found: {reg_path}")
         except Exception as e:
             print(f"Error loading registers: {e}")
+            sys.print_exception(e)
 
     def step(self, cycles=100, stop_pc=-1):
         return cpu_core.execute(int(cycles), int(stop_pc))
@@ -1244,6 +1268,7 @@ class PB1000System:
     def reset_emulator(self):
         """Perform a hardware-like reset (PC=0x0000)."""
         print("Emulator Reset triggered (PC=0x0000)")
+        import time
         cpu_core.reset(self.debug_cfg["sys"])
         # cpu_core.reset() already silences the PWM and sets the post-reset beep
         # guard.  Also force Python-side beep off in case the Python path is in use.
@@ -1257,6 +1282,16 @@ class PB1000System:
         self._uart_vfdd_warn = False
         self._pio_uart_eof_pending = False
 
+        # Reset page count to default (4=32-dot, 8=64-dot) so the renderer
+        # doesn't expose pages 4-7 if a previous program used 64-dot mode.
+        #print(f"lcd.set_num_pages({self._lcd_height // 8})")
+        self.lcd.set_num_pages(self._lcd_height // 8)
+        # Drop back to mono rendering so a color image left in color_vram by a
+        # previous program (e.g. vram_loader) doesn't keep showing through in
+        # the vacated lower half; the ROM/BASIC re-enables VDP explicitly if needed.
+        self.lcd.set_vdp_enable(False)
+        # time.sleep(3)
+        
         self.set_status("SYSTEM RESET", 1500)
         # Re-initialize basic state if needed but usually reset() is enough
         # We might want to keep RAM as is (like a warm reset) or clear it?
@@ -1314,7 +1349,7 @@ class PB1000System:
     def force_full_redraw(self):
         """Redraw bezel + LCD after overlaying the screen (e.g. after menu closes)."""
         if hasattr(self.lcd, 'display') and self.lcd.display is not None:
-            draw_bezel(self.lcd.display, self.lcd.scale, self._disp_x, self._disp_y)
+            draw_bezel(self.lcd.display, self.lcd.scale, self._disp_x, self._disp_y, lcd_height=self._lcd_height)
         self.lcd.mark_dirty()
         self._status_rendered_msg = None  # force status bar refresh
         self.update_display()
@@ -1338,7 +1373,7 @@ class PB1000System:
         if active_msg == self._status_rendered_msg:
             return
         
-        y_pos = self._disp_y + int(32 * self.lcd.scale) + 12
+        y_pos = self._disp_y + int(self._lcd_height * self.lcd.scale) + 12
         display = self.lcd.display
         
         # Clear/Draw backdrop
@@ -1350,8 +1385,8 @@ class PB1000System:
         self._status_rendered_msg = active_msg
 
         # Draw status text below the bezel
-        # LCD height is 32 * scale. Bezel margin is ~4.
-        y_pos = self._disp_y + int(32 * self.lcd.scale) + 12
+        # LCD height is lcd_height * scale. Bezel margin is ~4.
+        y_pos = self._disp_y + int(self._lcd_height * self.lcd.scale) + 12
         display = self.lcd.display
         
         # Simple backdrop for text
@@ -1401,7 +1436,7 @@ class PB1000System:
         """Callback from LCDController when scale is changed."""
         if hasattr(self.lcd, 'display') and self.lcd.display:
             # Re-draw the bezel with new scale
-            draw_bezel(self.lcd.display, scale, self._disp_x, self._disp_y)
+            draw_bezel(self.lcd.display, scale, self._disp_x, self._disp_y, lcd_height=self._lcd_height)
             # Ensure the LCD content itself is marked dirty to fill the new bezel
             if hasattr(self.lcd, 'dirty'):
                 self.lcd.dirty = True

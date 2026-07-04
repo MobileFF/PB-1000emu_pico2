@@ -148,14 +148,30 @@ def _write_result(w, result, xfer_len=0):
     w[_W_XFER_HI] = (xfer_len >> 8) & 0xFF
 
 
+def _dump_hex(label, data, length=64, offset=0):
+    """data[offset:] の先頭 length バイトを16進ダンプ出力。
+    data はスライスせずそのまま渡すこと — data[offset:] のような事前スライスは
+    (memoryview でなく bytearray/array の場合) 全体コピーの新規確保を招き、
+    大きなバッファ(カラーVRAM等)では MemoryError の原因になる。"""
+    n = min(length, len(data) - offset)
+    print(f"[DUMP] {label} (showing {n}/{len(data) - offset}B):")
+    for base in range(0, n, 16):
+        row = data[offset + base:offset + base + min(16, n - base)]
+        print(f"  {base:04X}: {' '.join(f'{b:02X}' for b in row)}")
+
+
 def _finish_transfer(system, bank_buf, slot, dst, xfer_len):
     """バンクRAM → カラーVRAM 転送の共通後処理。
     転送後に VDP を有効化して dirty フラグを立て、次フレームで再描画させる。"""
     import lcd_c as _lc
     cvram = _lc.get_color_vram()
     cvram[dst:dst + xfer_len] = _bank_read(bank_buf, 0, xfer_len)
-    _lc.set_vdp_enable(True)   # カラーVRAM レンダリングを有効化
-    _lc.mark_dirty()           # 次フレームで全ページ再描画
+    _lc.set_vdp_enable(True)      # カラーVRAM レンダリングを有効化
+    _lc.set_vdp_init_done(True)   # レンダラーに color_vram を参照させる
+                                   # (この転送は vdp_write() を経由しないため
+                                   #  vdp_init_fill_done が自動では立たない)
+    _lc.mark_dirty()              # 次フレームで全ページ再描画
+    print(f"[VDP] enabled={_lc.get_vdp_enable()} init_done={_lc.vdp_init_done()} write_count={_lc.vdp_write_count()}")
 
 
 # ---------------------------------------------------------------------------
@@ -229,7 +245,10 @@ def _load_vram_sd(system):
         _write_result(w, _ERR_RANGE)
         return
 
+    # _dump_hex(f"SD bank_buf (read from '{path}')", bank_buf, xfer_len)
     _finish_transfer(system, bank_buf, slot, dst, xfer_len)
+    import lcd_c as _lc
+    # _dump_hex(f"cvram[{dst}:] after transfer", _lc.get_color_vram(), xfer_len, offset=dst)
     _write_result(w, _OK, xfer_len)
     print(f"vram_loader(SD): '{path}' skip={skip} -> BANK{slot}+cvram[{dst}:{dst+xfer_len}] ({xfer_len}B)")
 
@@ -311,54 +330,70 @@ def _load_vram_fdd(system):
         print("vram_loader(FDD): no free file handle")
         return
 
-    # ── ファイルオープン ───────────────────────────────────────────────────
-    from md100_dos import DS_NO_ERROR, DS_FILE_NOT_FOUND
-    idx = dos.open_disk_file(handle, name11)
-    if idx < 0:
-        _write_result(w, _ERR_NOFILE)
-        print(f"vram_loader(FDD): not found: {fname!r} (status={dos.dos_status})")
-        return
-
-    # ── セクタ単位で読み込みバンクRAMに積む ──────────────────────────────
-    max_bytes      = min(rlen if rlen else _COLOR_VRAM_SIZE, _BANK_SIZE, _COLOR_VRAM_SIZE - dst)
-    bank_buf       = system._bank_ram[slot]
-    sec_buf        = bytearray(SIZE_SECTOR)
-    offset         = 0
-    remaining_skip = skip   # まだスキップすべき残バイト数
+    # ── SD カードアクセス前に SPI バスを解放 ──────────────────────────────
+    # The LCD C module drives the same SPI bus as the SD card.  Ensure any
+    # in-flight LCD DMA has fully completed (including SPI shift-register drain)
+    # before asserting the SD card CS.  Matches the guard in the FDD polling path.
+    import time as _t
+    _lcd = getattr(system, 'lcd', None)
+    if _lcd is not None and hasattr(_lcd, 'wait_for_idle'):
+        _lcd.wait_for_idle()
+        _t.sleep_us(50)
+    system._fdd_active = True
     try:
-        while offset < max_bytes:
-            n = dos.read_disk_file(handle, sec_buf)
-            if n == 0:
-                break
+        # ── ファイルオープン ──────────────────────────────────────────────────
+        from md100_dos import DS_NO_ERROR, DS_FILE_NOT_FOUND
+        idx = dos.open_disk_file(handle, name11)
+        if idx < 0:
+            _write_result(w, _ERR_NOFILE)
+            print(f"vram_loader(FDD): not found: {fname!r} (status={dos.dos_status})")
+            return
 
-            if remaining_skip >= n:
-                # セクタ全体をスキップ
-                remaining_skip -= n
-            else:
-                # セクタの一部（先頭 remaining_skip バイト）をスキップして残りをコピー
-                src_start = remaining_skip
-                remaining_skip = 0
-                copy_n = min(n - src_start, max_bytes - offset)
-                _bank_write(bank_buf, offset, sec_buf[src_start:src_start + copy_n])
-                offset += copy_n
+        # ── セクタ単位で読み込みバンクRAMに積む ──────────────────────────────
+        max_bytes      = min(rlen if rlen else _COLOR_VRAM_SIZE, _BANK_SIZE, _COLOR_VRAM_SIZE - dst)
+        bank_buf       = system._bank_ram[slot]
+        sec_buf        = bytearray(SIZE_SECTOR)
+        offset         = 0
+        remaining_skip = skip   # まだスキップすべき残バイト数
+        try:
+            while offset < max_bytes:
+                n = dos.read_disk_file(handle, sec_buf)
+                if n == 0:
+                    break
 
-            if dos.is_end_of_disk_file(handle):
-                break
-            dos.seek_rel_disk_file(handle, 1)
-    except Exception as e:
+                if remaining_skip >= n:
+                    # セクタ全体をスキップ
+                    remaining_skip -= n
+                else:
+                    # セクタの一部（先頭 remaining_skip バイト）をスキップして残りをコピー
+                    src_start = remaining_skip
+                    remaining_skip = 0
+                    copy_n = min(n - src_start, max_bytes - offset)
+                    _bank_write(bank_buf, offset, sec_buf[src_start:src_start + copy_n])
+                    offset += copy_n
+
+                if dos.is_end_of_disk_file(handle):
+                    break
+                dos.seek_rel_disk_file(handle, 1)
+        except Exception as e:
+            dos.close_disk_file(handle)
+            _write_result(w, _ERR_READ)
+            print(f"vram_loader(FDD): read error: {e}")
+            return
+
         dos.close_disk_file(handle)
-        _write_result(w, _ERR_READ)
-        print(f"vram_loader(FDD): read error: {e}")
-        return
 
-    dos.close_disk_file(handle)
+        xfer_len = offset
+        if xfer_len == 0:
+            _write_result(w, _ERR_NOFILE)
+            return
 
-    xfer_len = offset
-    if xfer_len == 0:
-        _write_result(w, _ERR_NOFILE)
-        return
-
-    # ── バンクRAM → カラーVRAM 転送 ───────────────────────────────────────
-    _finish_transfer(system, bank_buf, slot, dst, xfer_len)
-    _write_result(w, _OK, xfer_len)
-    print(f"vram_loader(FDD): '{fname}' skip={skip} -> BANK{slot}+cvram[{dst}:{dst+xfer_len}] ({xfer_len}B)")
+        # ── バンクRAM → カラーVRAM 転送 ──────────────────────────────────────
+        # _dump_hex(f"FDD bank_buf (read from '{fname}')", bank_buf, xfer_len)
+        _finish_transfer(system, bank_buf, slot, dst, xfer_len)
+        import lcd_c as _lc
+        # _dump_hex(f"cvram[{dst}:] after transfer", _lc.get_color_vram(), xfer_len, offset=dst)
+        _write_result(w, _OK, xfer_len)
+        print(f"vram_loader(FDD): '{fname}' skip={skip} -> BANK{slot}+cvram[{dst}:{dst+xfer_len}] ({xfer_len}B)")
+    finally:
+        system._fdd_active = False

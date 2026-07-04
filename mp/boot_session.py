@@ -103,7 +103,13 @@ def _draw_text(display, x, y, text, fg, bg=0x0000):
     fb.fill(_swap16(bg))
     fb.text(text, 0, 0, _swap16(fg))
     display.set_window(x, y, x + tw - 1, y + 7)
-    display.write_data(buf)
+    # Send pixel data in 1024-byte chunks (same as fill_rect) to avoid SPI transfer issues
+    mv = memoryview(buf)
+    display.dc.value(1)
+    display.cs.value(0)
+    for i in range(0, len(buf), 1024):
+        display.spi.write(mv[i:i + 1024])
+    display.cs.value(1)
 
 
 def _draw_profile_ui(display, profiles, sel, timeout_ms):

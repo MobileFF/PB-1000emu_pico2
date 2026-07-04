@@ -80,19 +80,28 @@ def create_system(display_ret, profile_dir=None, config=None, *, console_uart=No
     if console_uart is not None:
         system._console_uart_hw = console_uart  # store hw ref; console starts OFF by default
     disp_cfg = (config or {}).get("display", {})
-    scale = float(disp_cfg.get("scale", "1.5"))
-    # x/y_offset: explicit INI value, or auto-center on the display
     display_obj = display_ret[0] if isinstance(display_ret, tuple) else display_ret
     dw = getattr(display_obj, "width", 320)
     dh = getattr(display_obj, "height", 240)
+    default_scale = 2.0 if dw >= 480 else 1.5
+    scale = float(disp_cfg.get("scale", str(default_scale)))
+    lcd_height = int(disp_cfg.get("lcd_height", "32"))
+    if lcd_height not in (32, 64):
+        lcd_height = 32
+    print(f"LCD height: {lcd_height} dots")
+    # Apply LCD height mode to controller
+    if hasattr(system.lcd, "set_num_pages"):
+        system.lcd.set_num_pages(lcd_height // 8)
+    system._lcd_height = lcd_height
+    # x/y_offset: explicit INI value, or auto-center on the display
     auto_x = max(0, (dw - int(192 * scale)) // 2)
     # Center the whole group (LCD + gap + fkbar) vertically
-    _lcd_h = int(32 * scale)
+    _lcd_h = int(lcd_height * scale)
     _group_h = _lcd_h + 24 + 42  # 24=gap, 42=fkbar height
     auto_y = max(0, (dh - _group_h) // 2)
     disp_x = int(disp_cfg.get("x_offset", str(auto_x)))
     disp_y = int(disp_cfg.get("y_offset", str(auto_y)))
-    system._disp_x = disp_x
+    system._disp_x = max(0, min(disp_x, dw - int(192 * scale)))
     system._disp_y = disp_y
     system.lcd.set_display_scale(scale)
     _setup_touch_offsets(system, dw, dh, config)
@@ -149,16 +158,24 @@ def initialize_system(*, console_uart=None):
     dh = getattr(display, "height", 240)
     # Default scale: 1.5 for 320x240, 2.0 for 480x320
     scale = 2.0 if dw >= 480 else 1.5
+    from config import load_config
+    _cfg = load_config()
+    _disp_cfg = (_cfg or {}).get("display", {})
+    lcd_height = int(_disp_cfg.get("lcd_height", "32"))
+    if lcd_height not in (32, 64):
+        lcd_height = 32
+    print(f"LCD height: {lcd_height} dots")
+    if hasattr(system.lcd, "set_num_pages"):
+        system.lcd.set_num_pages(lcd_height // 8)
+    system._lcd_height = lcd_height
     auto_x = max(0, (dw - int(192 * scale)) // 2)
     # Center the whole group (LCD + gap + fkbar) vertically
-    _lcd_h = int(32 * scale)
+    _lcd_h = int(lcd_height * scale)
     _group_h = _lcd_h + 24 + 42  # 24=gap, 42=fkbar height
     auto_y = max(0, (dh - _group_h) // 2)
     system._disp_x = auto_x
     system._disp_y = auto_y
     system.lcd.set_display_scale(scale)
-    from config import load_config
-    _cfg = load_config()
     _setup_touch_offsets(system, dw, dh, _cfg)
     return system
 
@@ -194,6 +211,8 @@ def initialize_usb_host_and_pio(system, *, enable_usb_kbd, pio_uart_baudrate=960
         pio_uart = PioUart(tx_pin=6, rx_pin=13, baudrate=pio_uart_baudrate, sm_tx=6, sm_rx=7)
         system.pio_uart = pio_uart
         print(f"PIO UART (GP6/GP13) initialized on SM 6/7 @ {pio_uart_baudrate}bps.")
+        import gc
+        print(f"[MEM] after PIO init: free={gc.mem_free()} alloc={gc.mem_alloc()}")
     except Exception as e:
         print(f"Failed to init PIO UART: {e}")
 
@@ -236,8 +255,11 @@ def configure_usb_keyboard_routing():
     print("Configuring C keyboard routing...")
     try:
         import usb_host
+        # Keep the bg timer that was started in init_usb_keyboard_early() running.
+        # On Pico 2W, CYW43+BTstack+LwIP consume alarm pool slots; stop+start
+        # after NTP causes add_repeating_timer_ms() to fail and kills keyboard input.
         if hasattr(usb_host, 'start_bg_timer'):
-            usb_host.start_bg_timer(8)
+            usb_host.start_bg_timer(8)  # no-op if already active
             print("USB background timer active (8ms).")
     except Exception as e:
         print(f"C keyboard routing setup failed: {e}")

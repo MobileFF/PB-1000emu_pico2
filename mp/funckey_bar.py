@@ -36,7 +36,8 @@ class FuncKeyBar:
     def __init__(self, display, y_top, x_offset=0):
         self._display = display
         self._y_top = y_top
-        self._x_offset = x_offset
+        disp_w = getattr(display, 'width', _IMG_W)
+        self._x_offset = max(0, min(x_offset, disp_w - _IMG_W))
         self._active_key = None
 
     def draw(self):

@@ -140,18 +140,20 @@ def select_disk_ui(display, images, current_path):
             # Edge detection: act only on new key press
             if sc != prev_sc:
                 prev_sc = sc
-                if sc == 0x52:      # UP
-                    if cursor > 0:
-                        cursor -= 1
-                        if cursor < scroll:
-                            scroll = cursor
-                        _draw_disk_ui(display, entries, cursor, scroll, current_name)
-                elif sc == 0x51:    # DOWN
-                    if cursor < len(entries) - 1:
-                        cursor += 1
-                        if cursor >= scroll + _MAX_VIS:
-                            scroll = cursor - _MAX_VIS + 1
-                        _draw_disk_ui(display, entries, cursor, scroll, current_name)
+                if sc == 0x52:      # UP (wraps to bottom)
+                    cursor = cursor - 1 if cursor > 0 else len(entries) - 1
+                    if cursor < scroll:
+                        scroll = cursor
+                    elif cursor >= scroll + _MAX_VIS:
+                        scroll = max(0, cursor - _MAX_VIS + 1)
+                    _draw_disk_ui(display, entries, cursor, scroll, current_name)
+                elif sc == 0x51:    # DOWN (wraps to top)
+                    cursor = cursor + 1 if cursor < len(entries) - 1 else 0
+                    if cursor >= scroll + _MAX_VIS:
+                        scroll = cursor - _MAX_VIS + 1
+                    elif cursor < scroll:
+                        scroll = 0
+                    _draw_disk_ui(display, entries, cursor, scroll, current_name)
                 elif sc == 0x28:    # EXE — confirm
                     _, path = entries[cursor]
                     return path     # None = eject, str = new path

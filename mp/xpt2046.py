@@ -4,29 +4,29 @@ from machine import Pin, SPI
 class XPT2046:
     def __init__(self, spi, cs_pin, irq_pin=None, width=320, height=240,
                  x_min=200, y_min=200, x_max=3900, y_max=3900, baudrate=1000000,
-                 swap_xy=False, x_inv=False, y_inv=False):
+                 swap_xy=False, x_inv=False, y_inv=False, lcd_baudrate=40000000):
         self.spi = spi
         self.cs = Pin(cs_pin, Pin.OUT)
         self.cs.value(1)
-        
+
         self.irq = None
         if irq_pin is not None:
             self.irq = Pin(irq_pin, Pin.IN, Pin.PULL_UP)
-            
+
         self.width = width
         self.height = height
-        
+
         # Calibration defaults
         self.x_min = x_min
         self.y_min = y_min
         self.x_max = x_max
         self.y_max = y_max
-        
+
         self.x_inv = x_inv
         self.y_inv = y_inv
         self.swap_xy = swap_xy
         self.baudrate = baudrate
-        self.lcd_baudrate = 40000000  # Default to pb1000.py setting
+        self.lcd_baudrate = lcd_baudrate  # Must match the display SPI baudrate
 
     def is_pressed(self):
         """Check if the screen is currently being touched."""

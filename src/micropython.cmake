@@ -1,14 +1,31 @@
 # To use this module, add the following to your MicroPython build command:
 # USER_C_MODULES=../../../PB-1000_emu_AG2/src/micropython.cmake
 
-add_compile_options(-Wno-error)
+add_compile_options(-Wno-error -Wno-error=implicit-function-declaration)
 add_compile_definitions(CFG_TUH_HID_EP_BUFSIZE=64)
 
 # globally disable pico_malloc panic so that C heap exhaustion doesn't
 # terminate the program; USB host module will handle NULL returns gracefully
 add_definitions(-DPICO_MALLOC_PANIC=0)
+
+# USB: device mode disabled (USB-C port is used for USB keyboard host).
+# CFG_TUH_ENABLED=1 must be global so MicroPython's build pulls in TinyUSB
+# host utility symbols (tu_edpt_*, tusb_time_delay_ms_api) needed by usbh.c.
+add_compile_definitions(CFG_TUH_ENABLED=1)
+add_compile_definitions(CFG_TUD_ENABLED=0)
+add_compile_definitions(CFG_TUSB_RHPORT1_MODE=0x0101)
+add_compile_definitions(MICROPY_HW_ENABLE_USBDEV=0)
 add_compile_definitions(MICROPY_HW_USB_CDC=0)
 add_compile_definitions(MICROPY_HW_USB_MSC=0)
+add_compile_definitions(MICROPY_HW_USB_HID=0)
+
+add_compile_definitions(MICROPY_PY_PIO_USB=1)
+
+# Enable UART REPL on GP0/GP1 (UART0) so mpremote can connect
+add_compile_definitions(MICROPY_HW_ENABLE_UART_REPL=1)
+add_compile_definitions(PICO_DEFAULT_UART=0)
+add_compile_definitions(PICO_DEFAULT_UART_TX_PIN=0)
+add_compile_definitions(PICO_DEFAULT_UART_RX_PIN=1)
 
 # ============================================================
 # 1) HD61700 + MicroPython wrapper modules (INTERFACE library)
@@ -83,7 +100,7 @@ target_include_directories(usb_host_core_lib PRIVATE
     # (hd61700/src/../../micropython/ports/rp2/boards/<board>)
     #${CMAKE_CURRENT_LIST_DIR}/../../pico/micropython/ports/rp2/boards/${BOARD}
     #${CMAKE_SOURCE_DIR}/boards/${BOARD}  # board-specific config header
-    ${CMAKE_SOURCE_DIR}/boards/RPI_PICO2  # board-specific config header
+    ${CMAKE_SOURCE_DIR}/boards/${MICROPY_BOARD}  # board-specific config header
     ${CMAKE_SOURCE_DIR}/ports/rp2      # also include rp2 tree just in case
     ${CMAKE_SOURCE_DIR}                # micropython root
     ${CMAKE_SOURCE_DIR}/boards/${BOARD}  # board-specific config header

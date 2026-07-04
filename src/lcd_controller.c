@@ -41,7 +41,7 @@ static int mode_to_chip(uint8_t mode_byte) {
 
 static void mark_all_dirty(lcd_state_t *lcd) {
   lcd->dirty = true;
-  for (int i = 0; i < LCD_PAGES; i++) {
+  for (int i = 0; i < lcd->active_pages; i++) {
     lcd->dirty_pages[i] = true;
   }
 }
@@ -56,7 +56,7 @@ static void set_display_on_state(lcd_state_t *lcd, bool enabled) {
 
 static void write_vram_pixel_byte(lcd_state_t *lcd, int chip, int x_local,
                                   int y_page, uint8_t data) {
-  if (y_page < 0 || y_page >= 4)
+  if (y_page < 0 || y_page >= (int)lcd->active_pages)
     return;
   if (x_local < 0 || x_local >= 96)
     return;
@@ -74,12 +74,17 @@ static void write_vram_pixel_byte(lcd_state_t *lcd, int chip, int x_local,
     if (data != old || data == 0) {
       lcd->dirty = true;
       lcd->dirty_pages[y_page] = true;
-      uint8_t fg = lcd->current_fg_rgb332;
-      uint8_t bg = lcd->current_bg_rgb332;
-      int row_base = y_page * 8 * LCD_WIDTH + x;
-      for (int bit = 0; bit < 8; bit++) {
-        lcd->color_vram[row_base + bit * LCD_WIDTH] =
-            (data & (1 << bit)) ? fg : bg;
+      /* Only stamp color_vram when VDP is active.  While VDP is disabled
+         (e.g. right after a reset) we leave color_vram untouched so that
+         program-set VDP colors (0xFF white) cannot corrupt the cleared buffer. */
+      if (lcd->vdp_enabled) {
+        uint8_t fg = lcd->current_fg_rgb332;
+        uint8_t bg = lcd->current_bg_rgb332;
+        int row_base = y_page * 8 * LCD_WIDTH + x;
+        for (int bit = 0; bit < 8; bit++) {
+          lcd->color_vram[row_base + bit * LCD_WIDTH] =
+              (data & (1 << bit)) ? fg : bg;
+        }
       }
     }
   }
@@ -87,7 +92,7 @@ static void write_vram_pixel_byte(lcd_state_t *lcd, int chip, int x_local,
 
 static uint8_t read_vram_pixel_byte(lcd_state_t *lcd, int chip, int x_local,
                                     int y_page) {
-  if (y_page < 0 || y_page >= 4)
+  if (y_page < 0 || y_page >= (int)lcd->active_pages)
     return 0xFF;
   if (x_local < 0 || x_local >= 96)
     return 0xFF;
@@ -109,13 +114,13 @@ static void advance_xy(lcd_state_t *lcd, lcd_chip_state_t *st, bool draw_char,
     st->x -= step;
     if (st->x < 0) {
       st->x = 95;
-      st->y = (st->y + 1) & 0x03;
+      st->y = (st->y + 1) % lcd->active_pages;
     }
   } else {
     st->x += step;
     if (st->x >= 96) {
       st->x = 0;
-      st->y = (st->y + 1) & 0x03;
+      st->y = (st->y + 1) % lcd->active_pages;
     }
   }
 }
@@ -182,7 +187,8 @@ static void apply_lcdc_command(lcd_state_t *lcd, const uint8_t *cmd,
 
   if (cmd_len >= 3) {
     uint8_t col = cmd[1];
-    uint8_t row = cmd[2] & 0x03;
+    uint8_t row = cmd[2];
+    if (row >= lcd->active_pages) row = lcd->active_pages - 1;
     int block_off = (col & 0x80) ? 48 : 0;
     int col7 = col & 0x7F;
     st->y = row;
@@ -207,8 +213,11 @@ void lcd_init(lcd_state_t *lcd) {
   lcd->color_on = LCD_COLOR_ON;
   lcd->color_off = LCD_COLOR_OFF;
   lcd->color_lcd_off = LCD_COLOR_LCD_OFF;
+  lcd->spi_baudrate = 26000000;
+  lcd->active_pages = LCD_PAGES;
+  lcd->fill_pages   = LCD_PAGES;
   lcd->dirty = true;
-  for (int i = 0; i < LCD_PAGES; i++) {
+  for (int i = 0; i < LCD_PAGES_MAX; i++) {
     lcd->dirty_pages[i] = true;
   }
   lcd->x_mirror = false;
@@ -261,20 +270,104 @@ void lcd_init(lcd_state_t *lcd) {
 
 void lcd_set_vdp_enable(lcd_state_t *lcd, bool enabled) {
   lcd->vdp_enabled = enabled;
+  if (!enabled) {
+    lcd->vdp_init_fill_done = false;
+    lcd->vdp_any_write      = false;
+    lcd->vdp_write_count    = 0;
+    lcd->vdp_ff_run         = 0;
+  }
   lcd->dirty = true;
-  for (int i = 0; i < LCD_PAGES; i++) lcd->dirty_pages[i] = true;
+  for (int i = 0; i < lcd->active_pages; i++) lcd->dirty_pages[i] = true;
 }
+
+/* Force vdp_init_fill_done so _pixel_color() starts reading color_vram
+   immediately.  Needed by callers (e.g. vram_loader) that write color_vram
+   directly via get_color_vram() rather than through lcd_vdp_write(), since
+   that path never sets the flag on its own. */
+void lcd_set_vdp_init_done(lcd_state_t *lcd, bool done) {
+  lcd->vdp_init_fill_done = done;
+  if (done) {
+    lcd->dirty = true;
+    for (int i = 0; i < lcd->active_pages; i++) lcd->dirty_pages[i] = true;
+  }
+}
+
+bool     lcd_get_vdp_init_done(const lcd_state_t *lcd)  { return lcd->vdp_init_fill_done; }
+bool     lcd_get_vdp_any_write(const lcd_state_t *lcd)  { return lcd->vdp_any_write; }
+uint32_t lcd_get_vdp_write_count(const lcd_state_t *lcd){ return lcd->vdp_write_count; }
 
 bool lcd_get_vdp_enable(const lcd_state_t *lcd) {
   return lcd->vdp_enabled;
 }
 
+/* Called by Python after reset to switch the renderer to VDP mode once the
+   running program has completed its VDP initialisation (0xFF clear +
+   real drawing for pages 4-7).  We sync vram → color_vram for pages 0-3
+   using the configured reset colours, then enable VDP rendering. */
+void lcd_vdp_sync_enable(lcd_state_t *lcd) {
+  /* Derive sync colors from color_on/color_off (the configured reset colors),
+     NOT from current_fg/bg_rgb332.  The program writes to VDP reg3/reg4 during
+     its init sequence (often setting bg=0xFF white for the initial clear) while
+     VDP is disabled, which corrupts current_fg/bg_rgb332 before we get here.
+     color_on/color_off are only updated when VDP is enabled, so they retain
+     the values set by reset_emulator() → lcd_set_colors() throughout the
+     1000 ms boot window. */
+  uint8_t fg = (uint8_t)(((lcd->color_on  >> 13) & 0x07) << 5 |
+                           ((lcd->color_on  >>  8) & 0x07) << 2 |
+                           ((lcd->color_on  >>  3) & 0x03));
+  uint8_t bg = (uint8_t)(((lcd->color_off >> 13) & 0x07) << 5 |
+                           ((lcd->color_off >>  8) & 0x07) << 2 |
+                           ((lcd->color_off >>  3) & 0x03));
+  for (int pg = 0; pg < (int)lcd->active_pages; pg++) {
+    for (int col = 0; col < LCD_WIDTH; col++) {
+      uint8_t vbyte = lcd->vram[pg * LCD_WIDTH + col];
+      int row_base = pg * 8 * LCD_WIDTH + col;
+      for (int bit = 0; bit < 8; bit++) {
+        lcd->color_vram[row_base + bit * LCD_WIDTH] =
+            (vbyte & (1 << bit)) ? fg : bg;
+      }
+    }
+  }
+  lcd->color_on  = lcd->rgb332_to_565_table[fg];
+  lcd->color_off = lcd->rgb332_to_565_table[bg];
+  /* Also sync current_fg/bg_rgb332 so that any mono-LCD write that arrives
+     AFTER VDP is enabled (before the ROM sets the real VDP colors via reg3/4)
+     stamps color_vram with the reset colors rather than the 0xFF-white that
+     the ROM wrote to reg3/reg4 during its VDP clear phase (while VDP was
+     disabled).  Without this, write_vram_pixel_byte() would paint every
+     ON and OFF pixel white, causing the all-white screen on ST7796. */
+  lcd->current_fg_rgb332 = fg;
+  lcd->current_bg_rgb332 = bg;
+  lcd->vdp_enabled = true;
+  lcd->dirty = true;
+  for (int i = 0; i < lcd->active_pages; i++) lcd->dirty_pages[i] = true;
+}
+
+uint8_t lcd_get_num_pages(const lcd_state_t *lcd) {
+  return lcd->active_pages;
+}
+
+void lcd_set_num_pages(lcd_state_t *lcd, uint8_t pages) {
+  if (pages != 4 && pages != 8) return;
+  /* When shrinking (64→32), keep fill_pages at the old value so the next
+     LCD-OFF fill covers the full previous area and clears the lower half. */
+  lcd->fill_pages   = (lcd->active_pages > pages) ? lcd->active_pages : pages;
+  lcd->active_pages = pages;
+  lcd->dirty = true;
+  for (int i = 0; i < LCD_PAGES_MAX; i++) lcd->dirty_pages[i] = true;
+}
+
 /* Inline helper used by both render paths */
 static inline uint16_t _pixel_color(const lcd_state_t *lcd, int col, int sy) {
-  if (lcd->vdp_enabled) {
+  /* Use VDP color_vram only after the ROM has finished its initial 0xFF clear
+     and written at least one real color value (vdp_init_fill_done).  During
+     the clear phase color_vram[addr]==0xFF maps to white (0xFFFF) which would
+     cause a full-screen white flash on every reset or sleep-wakeup. */
+  if (lcd->vdp_enabled && lcd->vdp_init_fill_done) {
     return lcd->rgb332_to_565_table[lcd->color_vram[sy * LCD_WIDTH + col]];
   }
   int page = sy >> 3;
+  if (page >= (int)lcd->active_pages) return lcd->color_off;
   int bit  = sy & 7;
   bool on  = (lcd->vram[page * LCD_WIDTH + col] >> bit) & 1;
   return on ? lcd->color_on : lcd->color_off;
@@ -284,7 +377,7 @@ void lcd_clear(lcd_state_t *lcd) {
   memset(lcd->vram, 0, LCD_VRAM_SIZE);
   memset(lcd->color_vram, lcd->current_bg_rgb332, LCD_COLOR_VRAM_SIZE);
   lcd->dirty = true;
-  for (int i = 0; i < LCD_PAGES; i++) {
+  for (int i = 0; i < lcd->active_pages; i++) {
     lcd->dirty_pages[i] = true;
   }
 }
@@ -363,7 +456,7 @@ uint8_t lcd_read(lcd_state_t *lcd) {
 }
 
 bool lcd_get_pixel(lcd_state_t *lcd, int x, int y) {
-  if (x < 0 || x >= LCD_WIDTH || y < 0 || y >= LCD_HEIGHT)
+  if (x < 0 || x >= LCD_WIDTH || y < 0 || y >= (int)(lcd->active_pages * 8))
     return false;
   int page = y / 8;
   int bit = y % 8;
@@ -398,7 +491,7 @@ void lcd_set_bg_colors(lcd_state_t *lcd, uint16_t on_bg, uint16_t off_bg) {
   /* Refresh color_vram: ON pixels keep current fg, OFF pixels get new bg */
   uint8_t fg = lcd->current_fg_rgb332;
   uint8_t bg = lcd->current_bg_rgb332;
-  for (int page = 0; page < LCD_PAGES; page++) {
+  for (int page = 0; page < (int)lcd->active_pages; page++) {
     for (int col = 0; col < LCD_WIDTH; col++) {
       uint8_t vbyte = lcd->vram[page * LCD_WIDTH + col];
       for (int bit = 0; bit < 8; bit++) {
@@ -435,23 +528,56 @@ void lcd_vdp_write(lcd_state_t *lcd, uint32_t reg, uint8_t data) {
     lcd->vdp_addr = (uint16_t)((lcd->vdp_addr & 0x00FFu) | ((data & 0x3Fu) << 8));
     break;
   case 2:
+    /* Always write to color_vram regardless of vdp_enabled so that both the
+       ROM's initial 0xFF clear and its subsequent real draws land in the buffer.
+       Dirty marking is gated on vdp_init_fill_done (see below) to suppress the
+       white flash caused by 0xFF → 0xFFFF (white in RGB565) during the clear. */
+    lcd->vdp_any_write = true;
+    lcd->vdp_write_count++;
     if (lcd->vdp_addr < LCD_COLOR_VRAM_SIZE) {
+      /* Detect VDP clear cycle — two triggers:
+         1. ROM starts writing 0xFF from address 0  (most common pattern)
+         2. 192+ consecutive 0xFF writes at any address (one full row = clear in progress)
+         Either trigger suppresses dirty marking until real color data arrives,
+         preventing the 0xFF→0xFFFF white flash on reset and sleep-wakeup. */
+      if (data == 0xFF) {
+        if (lcd->vdp_addr == 0 || lcd->vdp_ff_run >= 191)
+          lcd->vdp_init_fill_done = false;
+        if (lcd->vdp_ff_run < 0xFFFFu)
+          lcd->vdp_ff_run++;
+      } else {
+        lcd->vdp_ff_run = 0;
+      }
       lcd->color_vram[lcd->vdp_addr] = data;
-      int page = (int)(lcd->vdp_addr / LCD_WIDTH) / 8;
-      if (page < LCD_PAGES) {
-        lcd->dirty = true;
-        lcd->dirty_pages[page] = true;
+      if (!lcd->vdp_init_fill_done && data != 0xFF)
+        lcd->vdp_init_fill_done = true;
+      /* Only mark dirty after the 0xFF clear phase ends. */
+      if (lcd->vdp_enabled && lcd->vdp_init_fill_done) {
+        int page = (int)(lcd->vdp_addr / LCD_WIDTH) / 8;
+        if (page < (int)lcd->active_pages) {
+          lcd->dirty = true;
+          lcd->dirty_pages[page] = true;
+        }
       }
     }
     lcd->vdp_addr = (uint16_t)((lcd->vdp_addr + 1u) & 0x3FFFu);
     break;
   case 3:
+    /* Track fg colour regardless of VDP state so the value is ready when
+       VDP auto-enables.  Propagate to color_on (used by non-VDP renderer)
+       only when VDP is active — otherwise a white fg would flash immediately. */
     lcd->current_fg_rgb332 = data;
-    lcd->color_on = lcd->rgb332_to_565_table[data];
+    if (lcd->vdp_enabled)
+      lcd->color_on = lcd->rgb332_to_565_table[data];
     break;
   case 4:
+    /* Same for bg: track current_bg_rgb332 always (needed by
+       write_vram_pixel_byte once VDP re-enables and by the staged sync in
+       case 2 above), but keep color_off at the configured value while VDP
+       is disabled so the non-VDP renderer never shows a white background. */
     lcd->current_bg_rgb332 = data;
-    lcd->color_off = lcd->rgb332_to_565_table[data];
+    if (lcd->vdp_enabled)
+      lcd->color_off = lcd->rgb332_to_565_table[data];
     break;
   default:
     break;
@@ -484,18 +610,24 @@ uint8_t lcd_vdp_read(lcd_state_t *lcd, uint32_t reg) {
 #include "hardware/dma.h"
 
 static int lcd_dma_chan = -1;
-static uint8_t dma_buffer[384 * 64 * 2]; /* 2x scale max size (192*2 x 32*2), 2 bytes/pixel */
+/* One page (8 source rows) at max scale 2.5 on ST7796 (480px wide): 20 rows x 480 x 2 */
+static uint8_t dma_buffer[480 * 20 * 2];
 
 void lcd_wait_for_idle(lcd_state_t *lcd) {
   if (lcd_dma_chan >= 0) {
     dma_channel_wait_for_finish_blocking(lcd_dma_chan);
   }
 #ifdef __arm__
-  /* Flush SPI RX FIFO to prevent garbage data from poisoning the next 
-     SD card or Virtual FDD operation. During LCD DMA (TX-only), 
-     the RX FIFO fills with meaningless bytes from the MISO line. */
   if (lcd->spi_inst) {
       spi_inst_t *spi = (spi_inst_t *)lcd->spi_inst;
+      /* dma_channel_wait_for_finish_blocking() returns when DMA has deposited all
+         bytes into the SPI TX FIFO, but the SPI may still be clocking out the last
+         1-4 bytes.  Wait for BSY to clear (TX FIFO empty AND shift register idle)
+         so that CS is never deasserted while the SPI is still transmitting. */
+      while (spi_get_hw(spi)->sr & SPI_SSPSR_BSY_BITS) {
+          tight_loop_contents();
+      }
+      /* Drain RX FIFO (fills with MISO line noise during TX-only DMA). */
       while (spi_is_readable(spi)) {
           (void)spi_get_hw(spi)->dr;
       }
@@ -506,7 +638,7 @@ void lcd_wait_for_idle(lcd_state_t *lcd) {
 
 void lcd_setup_display(lcd_state_t *lcd, void *spi_inst, uint8_t pin_cs,
                        uint8_t pin_dc, uint8_t scale, uint16_t x_offset,
-                       uint16_t y_offset) {
+                       uint16_t y_offset, uint32_t spi_baudrate) {
   lcd->spi_inst = spi_inst;
   lcd->pin_cs = pin_cs;
   lcd->pin_dc = pin_dc;
@@ -517,6 +649,8 @@ void lcd_setup_display(lcd_state_t *lcd, void *spi_inst, uint8_t pin_cs,
   }
   lcd->disp_x_offset = x_offset;
   lcd->disp_y_offset = y_offset;
+  if (spi_baudrate > 0)
+    lcd->spi_baudrate = spi_baudrate;
   lcd->spi_initialized = true;
 }
 
@@ -538,46 +672,46 @@ void lcd_set_scale_ratio(lcd_state_t *lcd, uint8_t num, uint8_t den) {
       lcd->scale = 1;
   }
   lcd->dirty = true;
-  for (int i = 0; i < LCD_PAGES; i++) {
+  for (int i = 0; i < lcd->active_pages; i++) {
     lcd->dirty_pages[i] = true;
   }
 }
 
-/* Send a single command byte to ILI9341 */
-static void ili_cmd(lcd_state_t *lcd, uint8_t cmd) {
+/* Send a single command byte to the SPI display */
+static void disp_cmd(lcd_state_t *lcd, uint8_t cmd) {
   gpio_put(lcd->pin_dc, 0); /* command mode */
   gpio_put(lcd->pin_cs, 0);
   spi_write_blocking((spi_inst_t *)lcd->spi_inst, &cmd, 1);
   gpio_put(lcd->pin_cs, 1);
 }
 
-/* Send data bytes to ILI9341 */
-static void ili_data(lcd_state_t *lcd, const uint8_t *data, size_t len) {
+/* Send data bytes to the SPI display */
+static void disp_data(lcd_state_t *lcd, const uint8_t *data, size_t len) {
   gpio_put(lcd->pin_dc, 1); /* data mode */
   gpio_put(lcd->pin_cs, 0);
   spi_write_blocking((spi_inst_t *)lcd->spi_inst, data, len);
   gpio_put(lcd->pin_cs, 1);
 }
 
-/* Set ILI9341 address window */
-static void ili_set_window(lcd_state_t *lcd, uint16_t x0, uint16_t y0,
-                           uint16_t x1, uint16_t y1) {
+/* Set SPI display address window (column + page range) then begin RAM write */
+static void disp_set_window(lcd_state_t *lcd, uint16_t x0, uint16_t y0,
+                            uint16_t x1, uint16_t y1) {
   uint8_t buf[4];
-  ili_cmd(lcd, ILI9341_CASET);
+  disp_cmd(lcd, LCD_CMD_CASET);
   buf[0] = x0 >> 8;
   buf[1] = x0 & 0xFF;
   buf[2] = x1 >> 8;
   buf[3] = x1 & 0xFF;
-  ili_data(lcd, buf, 4);
+  disp_data(lcd, buf, 4);
 
-  ili_cmd(lcd, ILI9341_PASET);
+  disp_cmd(lcd, LCD_CMD_PASET);
   buf[0] = y0 >> 8;
   buf[1] = y0 & 0xFF;
   buf[2] = y1 >> 8;
   buf[3] = y1 & 0xFF;
-  ili_data(lcd, buf, 4);
+  disp_data(lcd, buf, 4);
 
-  ili_cmd(lcd, ILI9341_RAMWR);
+  disp_cmd(lcd, LCD_CMD_RAMWR);
 }
 
 void lcd_render_to_display(lcd_state_t *lcd) {
@@ -589,7 +723,7 @@ void lcd_render_to_display(lcd_state_t *lcd) {
   gpio_put(15, 1);
   gpio_put(16, 1);
   /* Explicitly re-enforce SPI settings in case they were changed by Python */
-  spi_set_baudrate((spi_inst_t *)lcd->spi_inst, 40000000);
+  spi_set_baudrate((spi_inst_t *)lcd->spi_inst, lcd->spi_baudrate);
   spi_set_format((spi_inst_t *)lcd->spi_inst, 8, SPI_CPOL_0, SPI_CPHA_0, SPI_MSB_FIRST);
 #endif
 
@@ -598,9 +732,14 @@ void lcd_render_to_display(lcd_state_t *lcd) {
     lcd->color_lcd_off = 0x8410; /* Gray */
   }
 
-  /* Find range of dirty pages to minimize ili_set_window calls */
+  /* Find range of dirty pages to minimize disp_set_window calls.
+     Scan the full LCD_PAGES_MAX range (not just active_pages): after a
+     64→32 page-count shrink, pages 4-7 are marked dirty by
+     lcd_set_num_pages() so the vacated lower half gets physically
+     repainted (to background, via _pixel_color()'s active_pages check)
+     instead of retaining stale on-screen content. */
   int first_page = -1, last_page = -1;
-  for (int i = 0; i < LCD_PAGES; i++) {
+  for (int i = 0; i < LCD_PAGES_MAX; i++) {
     if (lcd->dirty_pages[i]) {
       if (first_page == -1)
         first_page = i;
@@ -613,101 +752,129 @@ void lcd_render_to_display(lcd_state_t *lcd) {
     return;
   }
 
-  /* Wait for previous DMA before starting new one or touching SPI */
-  lcd_wait_for_idle(lcd);
-
   uint8_t s = lcd->scale;
   uint8_t scale_num = lcd->scale_num ? lcd->scale_num : 1;
   uint8_t scale_den = lcd->scale_den ? lcd->scale_den : 1;
   uint16_t xo = lcd->disp_x_offset;
   uint16_t yo = lcd->disp_y_offset;
   bool frac_scale = (scale_den != 1);
-  uint16_t out_w = frac_scale ? (uint16_t)((LCD_WIDTH * scale_num) / scale_den)
-                               : (uint16_t)(LCD_WIDTH * s);
-  uint16_t out_h = frac_scale ? (uint16_t)((LCD_HEIGHT * scale_num) / scale_den)
-                               : (uint16_t)(LCD_HEIGHT * s);
+  uint16_t fill_h     = (uint16_t)(lcd->fill_pages * 8); /* may exceed active_pages*8 after 64→32 switch */
+  uint16_t out_w      = frac_scale ? (uint16_t)((LCD_WIDTH * scale_num) / scale_den)
+                                   : (uint16_t)(LCD_WIDTH * s);
+  uint16_t fill_out_h = frac_scale ? (uint16_t)((fill_h * scale_num) / scale_den)
+                                   : (uint16_t)(fill_h * s);
 
   /* Pre-split LCD-off color for 8-bit Big-Endian DMA */
   uint8_t lcd_off_h = (uint8_t)(lcd->color_lcd_off >> 8);
   uint8_t lcd_off_l = (uint8_t)(lcd->color_lcd_off & 0xFF);
 
-  /* LCD Power OFF: fill whole area once and exit */
+  /* Wait for previous DMA before starting new one or touching SPI */
+  lcd_wait_for_idle(lcd);
+
+  /* LCD Power OFF: fill whole area and exit.
+     Use fill_out_h instead of out_h to cover the lower half when transitioning
+     from 64-dot to 32-dot mode (fill_pages retains the old page count until
+     the first LCD-OFF fill completes). */
   if (!lcd->display_on) {
-    ili_set_window(lcd, xo, yo, xo + out_w - 1, yo + out_h - 1);
+    disp_set_window(lcd, xo, yo, xo + out_w - 1, yo + fill_out_h - 1);
     gpio_put(lcd->pin_dc, 1);
     gpio_put(lcd->pin_cs, 0);
-    uint32_t total_pixels = (uint32_t)out_w * out_h;
-    uint32_t fill_limit = (total_pixels > (384 * 64)) ? (384 * 64) : total_pixels;
-    for (uint32_t i = 0; i < fill_limit; i++) {
-        dma_buffer[i*2] = lcd_off_h;
-        dma_buffer[i*2+1] = lcd_off_l;
+    uint32_t total_pixels = (uint32_t)out_w * fill_out_h;
+    uint32_t buf_pixels   = sizeof(dma_buffer) / 2;
+    uint32_t prefill      = (total_pixels < buf_pixels) ? total_pixels : buf_pixels;
+    for (uint32_t i = 0; i < prefill; i++) {
+      dma_buffer[i*2]   = lcd_off_h;
+      dma_buffer[i*2+1] = lcd_off_l;
     }
-    
+    if (lcd_dma_chan < 0) lcd_dma_chan = dma_claim_unused_channel(true);
+    uint32_t sent = 0;
+    while (sent < total_pixels) {
+      uint32_t chunk = total_pixels - sent;
+      if (chunk > buf_pixels) chunk = buf_pixels;
+      /* Wait for the PREVIOUS DMA without deasseting CS — the display must remain
+         selected (CS=LOW) for the entire RAMWR pixel stream.  Do NOT call
+         lcd_wait_for_idle() here because that function always deasserts CS. */
+      dma_channel_wait_for_finish_blocking(lcd_dma_chan);
+      dma_channel_config cd = dma_channel_get_default_config(lcd_dma_chan);
+      channel_config_set_transfer_data_size(&cd, DMA_SIZE_8);
+      channel_config_set_dreq(&cd, spi_get_dreq((spi_inst_t *)lcd->spi_inst, true));
+      dma_channel_configure(lcd_dma_chan, &cd, &spi_get_hw((spi_inst_t *)lcd->spi_inst)->dr,
+                            dma_buffer, chunk * 2, true);
+      sent += chunk;
+    }
+    lcd_wait_for_idle(lcd); /* Final wait: drains SPI TX FIFO and deasserts CS */
+    lcd->fill_pages = lcd->active_pages; /* reset: next fill uses current page count */
+    goto clear_dirty;
+  }
+
+  /* Render each dirty page separately — keeps dma_buffer small (one page at a time) */
+  uint32_t step_fp = frac_scale
+    ? (uint32_t)(((uint32_t)scale_den << 16) / scale_num)
+    : 0;
+  for (int page = first_page; page <= last_page; page++) {
+    if (!lcd->dirty_pages[page]) continue;
+
+    uint16_t pg_dy_start, pg_dy_end;
+    if (frac_scale) {
+      pg_dy_start = (uint16_t)((page * 8 * scale_num) / scale_den);
+      pg_dy_end   = (uint16_t)(((page + 1) * 8 * scale_num) / scale_den) - 1;
+    } else {
+      pg_dy_start = (uint16_t)(page * 8 * s);
+      pg_dy_end   = (uint16_t)((page + 1) * 8 * s - 1);
+    }
+
+    lcd_wait_for_idle(lcd);
+    disp_set_window(lcd, xo, yo + pg_dy_start, xo + out_w - 1, yo + pg_dy_end);
+    gpio_put(lcd->pin_dc, 1);
+    gpio_put(lcd->pin_cs, 0);
+
+    uint32_t buf_idx = 0;
+    if (frac_scale) {
+      for (int dy = pg_dy_start; dy <= (int)pg_dy_end; dy++) {
+        uint16_t sy = (uint16_t)((dy * scale_den) / scale_num);
+        uint32_t sx_fp = 0;
+        for (int dx = 0; dx < out_w; dx++) {
+          uint16_t sx = (uint16_t)(sx_fp >> 16);
+          if (sx >= LCD_WIDTH) sx = LCD_WIDTH - 1;
+          uint16_t c = _pixel_color(lcd, (int)sx, (int)sy);
+          dma_buffer[buf_idx++] = (uint8_t)(c >> 8);
+          dma_buffer[buf_idx++] = (uint8_t)(c & 0xFF);
+          sx_fp += step_fp;
+        }
+      }
+    } else {
+      for (int sy = page * 8; sy <= page * 8 + 7; sy++) {
+        for (int col = 0; col < LCD_WIDTH; col++) {
+          uint16_t c = _pixel_color(lcd, col, sy);
+          uint8_t h = (uint8_t)(c >> 8);
+          uint8_t l = (uint8_t)(c & 0xFF);
+          for (int v = 0; v < s; v++) {
+            dma_buffer[buf_idx++] = h;
+            dma_buffer[buf_idx++] = l;
+          }
+        }
+        if (s > 1) {
+          uint8_t *line_start = &dma_buffer[buf_idx - out_w * 2];
+          for (int v = 1; v < s; v++) {
+            memcpy(&dma_buffer[buf_idx], line_start, out_w * 2);
+            buf_idx += out_w * 2;
+          }
+        }
+      }
+    }
+
     if (lcd_dma_chan < 0) lcd_dma_chan = dma_claim_unused_channel(true);
     dma_channel_config c = dma_channel_get_default_config(lcd_dma_chan);
     channel_config_set_transfer_data_size(&c, DMA_SIZE_8);
     channel_config_set_dreq(&c, spi_get_dreq((spi_inst_t *)lcd->spi_inst, true));
     dma_channel_configure(lcd_dma_chan, &c, &spi_get_hw((spi_inst_t *)lcd->spi_inst)->dr,
-                         dma_buffer, fill_limit * 2, true);
-    lcd_wait_for_idle(lcd);
-    goto clear_dirty;
+                         dma_buffer, buf_idx, true);
   }
-
-  /* Calculate Y range for the dirty window */
-  uint16_t dy_start = (uint16_t)((first_page * 8 * scale_num) / scale_den);
-  uint16_t dy_end = (uint16_t)(((last_page + 1) * 8 * scale_num) / scale_den) - 1;
-
-  ili_set_window(lcd, xo, yo + dy_start, xo + out_w - 1, yo + dy_end);
-  gpio_put(lcd->pin_dc, 1);
-  gpio_put(lcd->pin_cs, 0);
-
-  uint32_t buf_idx = 0;
-  if (frac_scale) {
-    uint32_t step_fp = (uint32_t)(((uint32_t)scale_den << 16) / scale_num);
-    for (int dy = dy_start; dy <= dy_end; dy++) {
-      uint16_t sy = (uint16_t)((dy * scale_den) / scale_num);
-      uint32_t sx_fp = 0;
-      for (int dx = 0; dx < out_w; dx++) {
-        uint16_t sx = (uint16_t)(sx_fp >> 16);
-        if (sx >= LCD_WIDTH) sx = LCD_WIDTH - 1;
-        uint16_t c = _pixel_color(lcd, (int)sx, (int)sy);
-        dma_buffer[buf_idx++] = (uint8_t)(c >> 8);
-        dma_buffer[buf_idx++] = (uint8_t)(c & 0xFF);
-        sx_fp += step_fp;
-      }
-    }
-  } else {
-    for (int sy = first_page * 8; sy <= (last_page * 8 + 7); sy++) {
-      for (int col = 0; col < LCD_WIDTH; col++) {
-        uint16_t c = _pixel_color(lcd, col, sy);
-        uint8_t h = (uint8_t)(c >> 8);
-        uint8_t l = (uint8_t)(c & 0xFF);
-        for (int v = 0; v < s; v++) {
-          dma_buffer[buf_idx++] = h;
-          dma_buffer[buf_idx++] = l;
-        }
-      }
-      if (s > 1) {
-        uint8_t *line_start = &dma_buffer[buf_idx - out_w * 2];
-        for (int v = 1; v < s; v++) {
-          memcpy(&dma_buffer[buf_idx], line_start, out_w * 2);
-          buf_idx += out_w * 2;
-        }
-      }
-    }
-  }
-
-  if (lcd_dma_chan < 0) lcd_dma_chan = dma_claim_unused_channel(true);
-  dma_channel_config c = dma_channel_get_default_config(lcd_dma_chan);
-  channel_config_set_transfer_data_size(&c, DMA_SIZE_8);
-  channel_config_set_dreq(&c, spi_get_dreq((spi_inst_t *)lcd->spi_inst, true));
-  dma_channel_configure(lcd_dma_chan, &c, &spi_get_hw((spi_inst_t *)lcd->spi_inst)->dr,
-                       dma_buffer, buf_idx, true);
 
 clear_dirty:
   lcd_wait_for_idle(lcd);
   lcd->dirty = false;
-  for (int i = 0; i < LCD_PAGES; i++) {
+  for (int i = 0; i < LCD_PAGES_MAX; i++) {
     lcd->dirty_pages[i] = false;
   }
 }
@@ -716,8 +883,8 @@ clear_dirty:
 void lcd_wait_for_idle(lcd_state_t *lcd) { (void)lcd; }
 void lcd_setup_display(lcd_state_t *lcd, void *spi_inst, uint8_t pin_cs,
                        uint8_t pin_dc, uint8_t scale, uint16_t x_offset,
-                       uint16_t y_offset) {
-  (void)lcd; (void)spi_inst; (void)pin_cs; (void)pin_dc; (void)scale; (void)x_offset; (void)y_offset;
+                       uint16_t y_offset, uint32_t spi_baudrate) {
+  (void)lcd; (void)spi_inst; (void)pin_cs; (void)pin_dc; (void)scale; (void)x_offset; (void)y_offset; (void)spi_baudrate;
 }
 void lcd_set_scale_ratio(lcd_state_t *lcd, uint8_t num, uint8_t den) {
   (void)lcd; (void)num; (void)den;

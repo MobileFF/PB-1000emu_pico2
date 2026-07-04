@@ -2024,6 +2024,11 @@ static mp_obj_t mod_get_vfdd_write_data(void) {
 static MP_DEFINE_CONST_FUN_OBJ_0(mod_get_vfdd_write_data_obj, mod_get_vfdd_write_data);
 
 
+static mp_obj_t mod_build_time(void) {
+  return mp_obj_new_str(__DATE__ " " __TIME__, sizeof(__DATE__ " " __TIME__) - 1);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(mod_build_time_obj, mod_build_time);
+
 /* ====== Module definition ====== */
 static const mp_rom_map_elem_t hd61700_module_globals_table[] = {
     {MP_ROM_QSTR(MP_QSTR___name__), MP_ROM_QSTR(MP_QSTR_hd61700)},
@@ -2139,6 +2144,7 @@ static const mp_rom_map_elem_t hd61700_module_globals_table[] = {
      MP_ROM_PTR(&mod_press_row_ki_obj)},
     {MP_ROM_QSTR(MP_QSTR_release_row_ki),
      MP_ROM_PTR(&mod_release_row_ki_obj)},
+    {MP_ROM_QSTR(MP_QSTR_build_time), MP_ROM_PTR(&mod_build_time_obj)},
 };
 static MP_DEFINE_CONST_DICT(hd61700_module_globals,
                             hd61700_module_globals_table);

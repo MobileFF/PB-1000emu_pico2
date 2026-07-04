@@ -74,6 +74,14 @@ class ST7796:
         self.write_cmd(0xF0)
         self.write_data(bytearray([0x69]))
 
+        # Clear GRAM to black before enabling display.
+        # ST7796 GRAM defaults to 0xFFFF (white) after hardware reset; without
+        # this fill the entire panel (including border areas outside the bezel
+        # that are never repainted by the emulator) stays white, making the
+        # whole 480x320 screen appear white whenever the LCD area also turns
+        # white (e.g. due to a premature VDP enable).
+        self.fill_rect(0, 0, self.width, self.height, 0x0000)
+
         self.write_cmd(DISPON)
         time.sleep_ms(20)
 

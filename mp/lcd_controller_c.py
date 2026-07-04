@@ -5,15 +5,33 @@ Thin Python wrapper around the 'lcd_c' C module.
 import lcd_c
 import machine
 
+# Detect whether the compiled lcd_c module supports the baudrate argument (7th arg).
+# Old firmware accepts at most 6 args; new firmware accepts 7.
+_LCD_C_SETUP_BAUD_OK = None
+
+def _lcd_setup_display(spi_id, cs_pin, dc_pin, scale, x_off, y_off, baud):
+    global _LCD_C_SETUP_BAUD_OK
+    if _LCD_C_SETUP_BAUD_OK is None:
+        try:
+            lcd_c.setup_display(spi_id, cs_pin, dc_pin, scale, x_off, y_off, baud)
+            _LCD_C_SETUP_BAUD_OK = True
+        except TypeError:
+            lcd_c.setup_display(spi_id, cs_pin, dc_pin, scale, x_off, y_off)
+            _LCD_C_SETUP_BAUD_OK = False
+    elif _LCD_C_SETUP_BAUD_OK:
+        lcd_c.setup_display(spi_id, cs_pin, dc_pin, scale, x_off, y_off, baud)
+    else:
+        lcd_c.setup_display(spi_id, cs_pin, dc_pin, scale, x_off, y_off)
+
 class LCDControllerC:
     """
     Drop-in replacement for LCDController backed by C module.
     VRAM management, command parsing, and character rendering run in C.
     """
 
-    # Display dimensions (mirror the Python class)
-    WIDTH = lcd_c.WIDTH
-    HEIGHT = lcd_c.HEIGHT
+    # Display dimensions
+    WIDTH = lcd_c.WIDTH   # 192 (fixed)
+    HEIGHT = 32           # default; updated as instance attribute by set_num_pages()
 
     # LCD.s command IDs
     LCDC_CMD_READ = 0x01
@@ -34,7 +52,7 @@ class LCDControllerC:
         self.debug = bool(debug)
         self._pixel_size = 1
         self._spi_rendering = False
-        self._hw_params = None  # (spi_id, cs, dc)
+        self._hw_params = None  # (spi_id, cs, dc, baudrate)
         self._current_cfg = (None, None, None)  # (x, y, scale)
         self._last_display_on = None
         self._color_fg = 0x0000
@@ -56,6 +74,7 @@ class LCDControllerC:
 
         # Initialize C module core
         lcd_c.init()
+        self.HEIGHT = lcd_c.get_num_pages() * 8  # instance attr: reflects runtime mode
         lcd_c.set_debug(self.debug)
         if hasattr(lcd_c, "set_bg_colors"):
             lcd_c.set_bg_colors(self._color_bg_on, self._color_bg_off)
@@ -98,13 +117,14 @@ class LCDControllerC:
 
             cs_pin = get_pin_num(self.display.cs)
             dc_pin = get_pin_num(self.display.dc)
-            
+
             spi_str = str(self.display.spi)
             spi_id = 1 if 'SPI(1' in spi_str else 0
-            
-            self._hw_params = (spi_id, cs_pin, dc_pin)
+
+            spi_baud = getattr(self.display, 'spi_baudrate', 0)
+            self._hw_params = (spi_id, cs_pin, dc_pin, spi_baud)
             # Apply initial setup (render_to_display will update offsets)
-            lcd_c.setup_display(spi_id, cs_pin, dc_pin, self._pixel_size, 0, 0)
+            _lcd_setup_display(spi_id, cs_pin, dc_pin, self._pixel_size, 0, 0, spi_baud)
             self._current_cfg = (0, 0, self._pixel_size)
             self._spi_rendering = True
             return True
@@ -128,14 +148,16 @@ class LCDControllerC:
         # Synchronize offsets to C module if we have hardware control
         if self.display and self._hw_params:
             if (x_offset, y_offset, self._pixel_size) != self._current_cfg:
-                sid, cs, dc = self._hw_params
-                lcd_c.setup_display(sid, cs, dc, self._pixel_size, x_offset, y_offset)
+                sid, cs, dc, baud = self._hw_params
+                _lcd_setup_display(sid, cs, dc, self._pixel_size, x_offset, y_offset, baud)
+                #print(f"_lcd_setup_display(baud={baud})")
                 self._current_cfg = (x_offset, y_offset, self._pixel_size)
                 self._spi_rendering = True
 
         # Optimized C-side rendering
         if self._spi_rendering:
             lcd_c.render()
+            #print("self._spi_rendering = True. lcd_c.render() called")
             return
 
         # Fallback path (headless / fractional scaling)
@@ -152,6 +174,7 @@ class LCDControllerC:
                 self._color_bg_off,
             )
             lcd_c.clear_dirty()
+            #print("not disp_on. lcd_c.clear_dirty() called")
             return
         vram = lcd_c.get_vram()
         for dy in range(out_h):
@@ -165,6 +188,7 @@ class LCDControllerC:
                 color = self._color_fg if (byte & (1 << bit)) else self._color_bg_on
                 self.display.fill_rect(x_offset + dx, y_offset + dy, 1, 1, color)
         lcd_c.clear_dirty()
+        #print("end of render_display(). lcd_c.clear_dirty() called")
 
     def set_display_scale(self, scale):
         """Set display scale. Supported: 1.0 and 1.5."""
@@ -203,10 +227,42 @@ class LCDControllerC:
         if hasattr(lcd_c, "set_colors"):
             lcd_c.set_colors(self._color_fg, self._color_bg_on)
 
+    def set_num_pages(self, pages):
+        """Set active page count: 4 = 32-dot mode (default), 8 = 64-dot extended."""
+        if hasattr(lcd_c, "set_num_pages"):
+            lcd_c.set_num_pages(int(pages))
+            self.HEIGHT = int(pages) * 8
+
     def set_vdp_enable(self, enabled):
         """Enable (True) or disable (False) per-pixel color VRAM rendering."""
         if hasattr(lcd_c, "set_vdp_enable"):
             lcd_c.set_vdp_enable(bool(enabled))
+
+    def vdp_sync_enable(self):
+        """Sync vram→color_vram pages 0-3 using configured reset colours
+        (color_on/color_off), then enable VDP rendering."""
+        if hasattr(lcd_c, "vdp_sync_enable"):
+            lcd_c.vdp_sync_enable()
+
+    def vdp_init_done(self):
+        """True after the first non-0xFF byte arrives at VDP reg2 following a
+        VDP disable (reset).  Legacy signal; prefer vdp_write_count() polling."""
+        if hasattr(lcd_c, "vdp_init_done"):
+            return bool(lcd_c.vdp_init_done())
+        return False
+
+    def vdp_any_write(self):
+        """True if any VDP reg2 write has occurred since VDP was disabled (reset)."""
+        if hasattr(lcd_c, "vdp_any_write"):
+            return bool(lcd_c.vdp_any_write())
+        return False
+
+    def vdp_write_count(self):
+        """Monotone counter of VDP reg2 writes since VDP disabled.
+        Python polls this; 300 ms of no change → ROM finished VDP init."""
+        if hasattr(lcd_c, "vdp_write_count"):
+            return int(lcd_c.vdp_write_count())
+        return 0
 
     @property
     def vdp_enabled(self):
@@ -241,7 +297,7 @@ class LCDControllerC:
                 self._active_chip_tracked = chip
                 self._chip_mode[chip] = cmd_id
                 if cmd_id == self.LCDC_CMD_DRAW_CHAR and self._char_out_cb is not None:
-                    row = self._lcd_cmd_buf[2] & 0x03
+                    row = self._lcd_cmd_buf[2]
                     if self._char_display_line is not None and row != self._char_display_line:
                         self._char_line_changed = True
                     self._char_display_line = row
@@ -275,11 +331,11 @@ class LCDControllerC:
     def scale(self):
         return self._scale_num / self._scale_den
 
-    def setup_display(self, spi_id, cs_pin, dc_pin, scale=1, x_offset=0, y_offset=0):
+    def setup_display(self, spi_id, cs_pin, dc_pin, scale=1, x_offset=0, y_offset=0, baudrate=0):
         """Manual/Override configuration."""
-        self._hw_params = (spi_id, cs_pin, dc_pin)
+        self._hw_params = (spi_id, cs_pin, dc_pin, baudrate)
         self._pixel_size = scale
-        lcd_c.setup_display(spi_id, cs_pin, dc_pin, scale, x_offset, y_offset)
+        _lcd_setup_display(spi_id, cs_pin, dc_pin, scale, x_offset, y_offset, baudrate)
         self._current_cfg = (x_offset, y_offset, scale)
         self._spi_rendering = True
 

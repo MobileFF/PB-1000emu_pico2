@@ -47,6 +47,11 @@ def main():
         print("Warning: ROM buffer reservation failed (very low memory)")
 
     print("PB-1000 Emulator Starting...")
+    try:
+        _bt = hd61700.build_time()
+        print(f"Firmware built: {_bt}")
+    except Exception as _e:
+        print(f"build_time() unavailable: {_e}")
 
     # Step 1: Display init (no CPU core required)
     display_ret = init_display_only()
@@ -63,6 +68,7 @@ def main():
             print("REPL UART disabled.")
         except Exception as _e:
             print(f"REPL UART disable failed: {_e}")
+            sys.print_exception(_e)
 
     # Step 3: Early USB keyboard init — must precede profile UI so keys are accepted
     init_usb_keyboard_early(enable_usb_kbd=get_bool(global_cfg, "keyboard", "enable_usb_kbd"))
@@ -155,6 +161,43 @@ def main():
     gc.collect()
     print("[MEM] after  load_state: free=%d alloc=%d" %
           (gc.mem_free(), gc.mem_alloc()))
+
+    # WiFi & NTP Synchronization
+    if get_bool(cfg, "ntp", "enable"):
+        ssid = get_str(cfg, "wifi", "ssid")
+        password = get_str(cfg, "wifi", "password")
+        if ssid:
+            # Check if WiFi hardware/firmware is supported first to avoid unnecessary display clear
+            has_wifi = False
+            try:
+                import ntp_sync
+                has_wifi = ntp_sync.is_wifi_supported()
+            except Exception as e:
+                print(f"[NTP] Failed to check WiFi support: {e}")
+                sys.print_exception(e)
+
+            if has_wifi:
+                print(f"[NTP] Sync initiating for SSID: {ssid}")
+                try:
+                    ntp_server = get_str(cfg, "ntp", "server") or "pool.ntp.org"
+                    tz_offset = get_int(cfg, "ntp", "tz_offset_h")
+                    timeout_ms = get_int(cfg, "ntp", "timeout_ms") or 15000
+                    success = ntp_sync.ntp_sync_and_set(
+                        ssid=ssid,
+                        password=password,
+                        ntp_server=ntp_server,
+                        tz_offset_h=tz_offset,
+                        timeout_ms=timeout_ms,
+                    )
+                    if success:
+                        print("[NTP] Sync succeeded.")
+                    else:
+                        print("[NTP] Sync failed.")
+                except Exception as e:
+                    print(f"[NTP] Error during sync: {e}")
+                    sys.print_exception(e)
+            else:
+                print("[NTP] WiFi hardware not supported on this board. Skipping NTP sync.")
     pio_uart_baudrate = get_int(cfg, "pio_uart", "baudrate")
     initialize_usb_host_and_pio(system, enable_usb_kbd=enable_usb_kbd,
                                  pio_uart_baudrate=pio_uart_baudrate)
@@ -168,12 +211,13 @@ def main():
     fkbar = None
     try:
         from funckey_bar import FuncKeyBar
-        _fkbar_y = system._disp_y + int(32 * system.lcd.scale) + 24
+        _fkbar_y = system._disp_y + int(system._lcd_height * system.lcd.scale) + 24
         fkbar = FuncKeyBar(display, _fkbar_y, x_offset=system._disp_x)
         fkbar.draw()
         print(f"FuncKeyBar drawn at x={system._disp_x} y={_fkbar_y}.")
     except Exception as _e:
         print(f"FuncKeyBar init failed: {_e}")
+        sys.print_exception(_e)
 
     # Step 11: Main loop constants from config
     frame_interval_ms     = get_int(cfg, "emulator", "frame_interval_ms")
@@ -198,11 +242,13 @@ def main():
 
             if (not startup_recovery_done
                     and system.is_sleeping
+                    and not system.is_key_input_enabled()
                     and time.ticks_diff(startup_guard_until, time.ticks_ms()) >= 0):
                 startup_recovery_done = True
-                print("Startup sleep detected; forcing cold boot recovery.")
+                print("Startup sleep detected (KEY_INT disabled); forcing cold boot recovery.")
                 system.reset_emulator()
                 system.power_on(force_reset=True)
+                system.force_full_redraw()
 
             tick_step_accum += run_cpu_slice(
                 system,
@@ -212,6 +258,7 @@ def main():
             )
 
             now = time.ticks_ms()
+
             sc = hd61700.get_last_key()
             if sc == 0xE3 or sc == 0xE7:  # LGUI or RGUI
                 gui_active_until = time.ticks_add(now, 500)
@@ -227,11 +274,15 @@ def main():
             elif sc == 0x40:  # F7 → emulator menu
                 if time.ticks_diff(gui_active_until, now) > 0:
                     gui_active_until = 0
+                    gc.collect()
                     from emulator_menu import show_emulator_menu
                     result = show_emulator_menu(system, display, fkbar, joystick_input, cfg)
                     joystick_input = result['joystick_input']
             elif sc == 0x53:  # NumLock → RESET
                 system.reset_emulator()
+                #system.force_full_redraw()
+                #print("[reset] don't call system.reset_emulator() and system.force_full_redraw()")
+
             if getattr(system, '_pio_uart_eof_pending', False):
                 system._pio_uart_eof_pending = False
                 keyboard_input.enqueue_key((1, 1), "BRK")

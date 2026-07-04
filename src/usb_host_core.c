@@ -1,14 +1,22 @@
 #include "usb_host_core.h"
 #include "py/mpprint.h"
-#include "py/gc.h"
 #include "tusb.h"
 #include "host/hcd.h"
 #include "pico/stdlib.h"
 #include "hardware/clocks.h"
 #include <string.h>
 
+// Helpers for logging to MicroPython REPL
+#define TRACE(str) mp_printf(&mp_plat_print, str "\n")
+#define DEBUG_PRINTF(...) mp_printf(&mp_plat_print, __VA_ARGS__)
+
 /* External: C keyboard event processing from modhd61700.c */
 extern void c_kb_process_usb_key_extern(uint8_t scancode, bool pressed);
+
+// Custom allocator for TinyUSB (isolates it from SDK heap limits)
+#define USB_HOST_HEAP_SIZE (64 * 1024)
+static uint8_t usb_host_heap[USB_HOST_HEAP_SIZE] __attribute__((aligned(8)));
+static size_t usb_host_heap_pos = 0;
 
 /* Background timer for tuh_task() */
 static struct repeating_timer usb_bg_timer;
@@ -42,15 +50,6 @@ void tu_print_mem(void const *buf, uint32_t count, uint8_t indent) {
   mp_printf(&mp_plat_print, "\n");
 }
 
-// Helpers for logging to MicroPython REPL
-#define TRACE(str) mp_printf(&mp_plat_print, str "\n")
-#define DEBUG_PRINTF(...) mp_printf(&mp_plat_print, __VA_ARGS__)
-
-// Custom allocator for TinyUSB (isolates it from SDK heap limits)
-#define USB_HOST_HEAP_SIZE (64 * 1024)
-static uint8_t usb_host_heap[USB_HOST_HEAP_SIZE] __attribute__((aligned(8)));
-static size_t usb_host_heap_pos = 0;
-
 static void *tu_malloc(size_t size) {
   size = (size + 7) & ~7;
   if (usb_host_heap_pos + size > USB_HOST_HEAP_SIZE) return NULL;
@@ -77,25 +76,20 @@ static void tu_free(void *ptr) { (void)ptr; }
 
 
 // TinyUSB Event Hooks
+// NOTE: These callbacks run from the bg_timer alarm ISR context.
+//       Do NOT call mp_printf here — it is not ISR-safe on Pico 2W
+//       and causes intermittent hangs due to stdout conflicts.
 void tuh_event_hook_cb(uint8_t rhport, uint32_t eventid, bool in_isr) {
-  const char *name = "?";
-  switch (eventid) {
-    case HCD_EVENT_DEVICE_ATTACH: name = "ATTACH"; break;
-    case HCD_EVENT_DEVICE_REMOVE: name = "REMOVE"; break;
-    case HCD_EVENT_XFER_COMPLETE: name = "XFER_COMPLETE"; break;
-  }
-//  DEBUG_PRINTF("[USB Host] event rhport=%u id=%u(%s) in_isr=%d\n",
-//               rhport, (unsigned)eventid, name, (int)in_isr);
+  (void)rhport; (void)eventid; (void)in_isr;
 }
 
 void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const *desc_report, uint16_t desc_len) {
   (void)desc_report; (void)desc_len;
-//  DEBUG_PRINTF("[USB Host] HID mount: dev=%u inst=%u\n", dev_addr, instance);
   tuh_hid_receive_report(dev_addr, instance);
 }
 
 void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
-//  DEBUG_PRINTF("[USB Host] HID unmount: dev=%u inst=%u\n", dev_addr, instance);
+  (void)dev_addr; (void)instance;
 }
 
 static hid_keyboard_report_t prev_report = {0};
@@ -104,7 +98,7 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
   if (tuh_hid_interface_protocol(dev_addr, instance) == HID_ITF_PROTOCOL_KEYBOARD &&
       len == sizeof(hid_keyboard_report_t)) {
     hid_keyboard_report_t const *kbd_report = (hid_keyboard_report_t const *)report;
-    
+
     // Process Modifiers
     uint8_t changed_mod = kbd_report->modifier ^ prev_report.modifier;
     for (int i = 0; i < 8; i++) {
@@ -140,12 +134,6 @@ void usb_host_core_init(void) {
   sleep_ms(10);
   stdio_uart_init();
 
-  gc_info_t gcstate;
-  gc_info(&gcstate);
-//  DEBUG_PRINTF("[USB Host] Native Init: free=%u used=%u sysclk=%u MHz\n",
-//               (unsigned)gcstate.free, (unsigned)gcstate.used,
-//               (unsigned)(clock_get_hz(clk_sys) / 1000000));
-
   if (!tuh_init(0)) {
     DEBUG_PRINTF("[USB Host] ERROR: tuh_init failed!\n");
     return;
@@ -159,7 +147,10 @@ void usb_host_core_task(void) {
 void usb_host_core_start_bg_timer(int interval_ms) {
   if (usb_bg_timer_active) return;
   if (interval_ms < 1) interval_ms = 8;
-  add_repeating_timer_ms(-interval_ms, usb_bg_timer_callback, NULL, &usb_bg_timer);
+  if (!add_repeating_timer_ms(-interval_ms, usb_bg_timer_callback, NULL, &usb_bg_timer)) {
+    DEBUG_PRINTF("[USB Host] start_bg_timer FAILED (alarm pool full?)\n");
+    return;
+  }
   usb_bg_timer_active = true;
 }
 

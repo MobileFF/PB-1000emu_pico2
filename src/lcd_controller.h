@@ -19,13 +19,14 @@
 #define LCD_COLOR_OFF 0xB5E6 /* Olive-green background */
 #define LCD_COLOR_LCD_OFF 0x8410 /* Gray tint when LCD is powered off */
 
-/* ILI9341 commands */
-#define ILI9341_CASET 0x2A
-#define ILI9341_PASET 0x2B
-#define ILI9341_RAMWR 0x2C
+/* SPI display commands (standard across ILI9341, ST7796, etc.) */
+#define LCD_CMD_CASET 0x2A
+#define LCD_CMD_PASET 0x2B
+#define LCD_CMD_RAMWR 0x2C
 #define LCD_PAGES 4
-#define LCD_VRAM_SIZE (LCD_WIDTH * LCD_PAGES) /* 768 bytes */
-#define LCD_COLOR_VRAM_SIZE (LCD_WIDTH * 64)  /* 192 x 64 = 12,288 bytes */
+#define LCD_PAGES_MAX 8                            /* max for 64-dot extended mode */
+#define LCD_VRAM_SIZE (LCD_WIDTH * LCD_PAGES_MAX)  /* 1536 bytes (supports 4 or 8 pages) */
+#define LCD_COLOR_VRAM_SIZE (LCD_WIDTH * 64)       /* 192 x 64 = 12,288 bytes */
 #define LCD_CHARSET_SIZE 2048
 
 /* LCD.s command IDs (mode low nibble) */
@@ -52,7 +53,7 @@ typedef struct {
 
 /* LCD controller state */
 typedef struct {
-  /* VRAM: 192 columns x 4 pages = 768 bytes */
+  /* VRAM: 192 columns x 8 pages max = 1536 bytes; active_pages selects 4 or 8 */
   uint8_t vram[LCD_VRAM_SIZE];
 
   uint8_t start_line;
@@ -60,7 +61,10 @@ typedef struct {
   /* Display state */
   bool display_on;
   bool dirty;
-  bool dirty_pages[LCD_PAGES];
+  bool dirty_pages[LCD_PAGES_MAX];
+  uint8_t active_pages; /* 4 = 32-dot mode, 8 = 64-dot extended mode */
+  uint8_t fill_pages;   /* LCD-OFF fill height; retains old value when pages decrease so the
+                           full previous area is grayed out at least once after a mode switch */
   /* Configurable RGB565 colors */
   uint16_t color_on;
   uint16_t color_off;
@@ -111,6 +115,15 @@ typedef struct {
      When false, rendering uses global color_on / color_off from the mono VRAM bits. */
   bool vdp_enabled;
 
+  /* VDP write-activity tracking (all reset when lcd_set_vdp_enable(false) called).
+     Python polls vdp_write_count every frame; when the count stops changing
+     for >= 300 ms, the ROM has finished its VDP init and vdp_sync_enable()
+     can safely be called.  No C-side time tracking needed — Python does it. */
+  bool     vdp_init_fill_done; /* first non-0xFF reg2 write seen since last clear */
+  bool     vdp_any_write;      /* any reg2 write since VDP disabled */
+  uint32_t vdp_write_count;    /* monotone counter, incremented on each reg2 write */
+  uint16_t vdp_ff_run;         /* consecutive 0xFF writes — resets vdp_init_fill_done at >= 192 */
+
   /* Debug flag */
   bool debug;
 
@@ -119,6 +132,7 @@ typedef struct {
   void *spi_inst; /* hardware_spi_inst_t* (SPI1 on RP2350) */
   uint8_t pin_cs;
   uint8_t pin_dc;
+  uint32_t spi_baudrate;
   /* Pixel scale factor */
   uint8_t scale;
   uint8_t scale_num;
@@ -148,12 +162,21 @@ uint8_t lcd_vdp_read(lcd_state_t *lcd, uint32_t reg);
 /* VDP enable/disable toggle */
 void lcd_set_vdp_enable(lcd_state_t *lcd, bool enabled);
 bool lcd_get_vdp_enable(const lcd_state_t *lcd);
+void lcd_vdp_sync_enable(lcd_state_t *lcd);
+void     lcd_set_vdp_init_done(lcd_state_t *lcd, bool done);
+bool     lcd_get_vdp_init_done(const lcd_state_t *lcd);
+bool     lcd_get_vdp_any_write(const lcd_state_t *lcd);
+uint32_t lcd_get_vdp_write_count(const lcd_state_t *lcd);
+
+/* Active page count: 4 = 32-dot (default), 8 = 64-dot extended */
+uint8_t lcd_get_num_pages(const lcd_state_t *lcd);
+void    lcd_set_num_pages(lcd_state_t *lcd, uint8_t pages);
 
 
 /* SPI display rendering (direct hardware access) */
 void lcd_setup_display(lcd_state_t *lcd, void *spi_inst, uint8_t pin_cs,
                        uint8_t pin_dc, uint8_t scale, uint16_t x_offset,
-                       uint16_t y_offset);
+                       uint16_t y_offset, uint32_t spi_baudrate);
 void lcd_set_scale_ratio(lcd_state_t *lcd, uint8_t num, uint8_t den);
 void lcd_render_to_display(lcd_state_t *lcd);
 void lcd_wait_for_idle(lcd_state_t *lcd);

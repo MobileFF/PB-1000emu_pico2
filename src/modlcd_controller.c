@@ -98,11 +98,25 @@ static MP_DEFINE_CONST_FUN_OBJ_0(mod_lcd_clear_dirty_obj, mod_lcd_clear_dirty);
 /* lcd_c.mark_dirty() — mark all pages dirty so next render repaints the display */
 static mp_obj_t mod_lcd_mark_dirty(void) {
   lcd_state.dirty = true;
-  for (int i = 0; i < LCD_PAGES; i++)
+  for (int i = 0; i < lcd_state.active_pages; i++)
     lcd_state.dirty_pages[i] = true;
   return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(mod_lcd_mark_dirty_obj, mod_lcd_mark_dirty);
+
+/* lcd_c.get_num_pages() -> int — returns active page count (4=32-dot, 8=64-dot) */
+static mp_obj_t mod_lcd_get_num_pages(void) {
+  return MP_OBJ_NEW_SMALL_INT(lcd_get_num_pages(&lcd_state));
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(mod_lcd_get_num_pages_obj, mod_lcd_get_num_pages);
+
+/* lcd_c.set_num_pages(pages) — set active page count (4 or 8) */
+static mp_obj_t mod_lcd_set_num_pages(mp_obj_t pages_obj) {
+  uint8_t pages = (uint8_t)mp_obj_get_int(pages_obj);
+  lcd_set_num_pages(&lcd_state, pages);
+  return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(mod_lcd_set_num_pages_obj, mod_lcd_set_num_pages);
 
 /* lcd_c.is_display_on() -> bool */
 static mp_obj_t mod_lcd_is_display_on(void) {
@@ -175,7 +189,7 @@ static mp_obj_t mod_lcd_set_scale(size_t n_args, const mp_obj_t *args) {
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(mod_lcd_set_scale_obj, 1, 2,
                                            mod_lcd_set_scale);
 
-/* lcd_c.setup_display(spi_id, cs_pin, dc_pin, scale, x_offset, y_offset) */
+/* lcd_c.setup_display(spi_id, cs_pin, dc_pin, scale, x_offset, y_offset, baudrate=0) */
 static mp_obj_t mod_lcd_setup_display(size_t n_args, const mp_obj_t *args) {
   int spi_id = mp_obj_get_int(args[0]);
   uint8_t cs_pin = (uint8_t)mp_obj_get_int(args[1]);
@@ -183,6 +197,7 @@ static mp_obj_t mod_lcd_setup_display(size_t n_args, const mp_obj_t *args) {
   uint8_t scale = (n_args > 3) ? (uint8_t)mp_obj_get_int(args[3]) : 1;
   uint16_t x_off = (n_args > 4) ? (uint16_t)mp_obj_get_int(args[4]) : 0;
   uint16_t y_off = (n_args > 5) ? (uint16_t)mp_obj_get_int(args[5]) : 0;
+  uint32_t baud  = (n_args > 6) ? (uint32_t)mp_obj_get_int(args[6]) : 0;
 
   void *spi_inst_ptr = NULL;
 #ifdef __arm__
@@ -190,10 +205,10 @@ static mp_obj_t mod_lcd_setup_display(size_t n_args, const mp_obj_t *args) {
 #endif
 
   lcd_setup_display(&lcd_state, spi_inst_ptr, cs_pin, dc_pin, scale, x_off,
-                    y_off);
+                    y_off, baud);
   return mp_const_none;
 }
-static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(mod_lcd_setup_display_obj, 3, 6,
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(mod_lcd_setup_display_obj, 3, 7,
                                            mod_lcd_setup_display);
 
 /* lcd_c.render() */
@@ -238,6 +253,46 @@ static mp_obj_t mod_lcd_get_vdp_enable(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(mod_lcd_get_vdp_enable_obj, mod_lcd_get_vdp_enable);
 
+/* lcd_c.vdp_sync_enable() — sync vram→color_vram pages 0-3 then enable VDP. */
+static mp_obj_t mod_lcd_vdp_sync_enable(void) {
+  lcd_vdp_sync_enable(&lcd_state);
+  return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(mod_lcd_vdp_sync_enable_obj, mod_lcd_vdp_sync_enable);
+
+/* lcd_c.vdp_init_done() -> bool  (legacy; kept for compatibility) */
+static mp_obj_t mod_lcd_vdp_init_done(void) {
+  return mp_obj_new_bool(lcd_get_vdp_init_done(&lcd_state));
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(mod_lcd_vdp_init_done_obj, mod_lcd_vdp_init_done);
+
+/* lcd_c.set_vdp_init_done(bool) — force the "VDP has real color data" flag.
+   Needed after writing color_vram directly via get_color_vram() (bypassing
+   vdp_write()), e.g. vram_loader, so _pixel_color() renders from color_vram
+   immediately instead of falling back to the mono vram bitmap. */
+static mp_obj_t mod_lcd_set_vdp_init_done(mp_obj_t done_obj) {
+  lcd_set_vdp_init_done(&lcd_state, mp_obj_is_true(done_obj));
+  return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(mod_lcd_set_vdp_init_done_obj, mod_lcd_set_vdp_init_done);
+
+/* lcd_c.vdp_any_write() -> bool
+   True if any VDP reg2 write has occurred since the last VDP disable (reset).
+   Python uses this together with vdp_write_count() to detect write activity. */
+static mp_obj_t mod_lcd_vdp_any_write(void) {
+  return mp_obj_new_bool(lcd_get_vdp_any_write(&lcd_state));
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(mod_lcd_vdp_any_write_obj, mod_lcd_vdp_any_write);
+
+/* lcd_c.vdp_write_count() -> int
+   Monotone counter incremented on every VDP reg2 write since the last VDP
+   disable (reset).  Python polls this; when the count stops changing for
+   >= 300 ms, the ROM has finished its VDP init and vdp_sync_enable() is safe. */
+static mp_obj_t mod_lcd_vdp_write_count(void) {
+  return mp_obj_new_int_from_uint(lcd_get_vdp_write_count(&lcd_state));
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(mod_lcd_vdp_write_count_obj, mod_lcd_vdp_write_count);
+
 /* lcd_c.wait_for_idle() */
 static mp_obj_t mod_lcd_wait_for_idle(void) {
 #ifdef __arm__
@@ -279,10 +334,17 @@ static const mp_rom_map_elem_t lcd_c_module_globals_table[] = {
     {MP_ROM_QSTR(MP_QSTR_get_color_vram), MP_ROM_PTR(&mod_lcd_get_color_vram_obj)},
     {MP_ROM_QSTR(MP_QSTR_set_vdp_enable), MP_ROM_PTR(&mod_lcd_set_vdp_enable_obj)},
     {MP_ROM_QSTR(MP_QSTR_get_vdp_enable), MP_ROM_PTR(&mod_lcd_get_vdp_enable_obj)},
+    {MP_ROM_QSTR(MP_QSTR_vdp_sync_enable), MP_ROM_PTR(&mod_lcd_vdp_sync_enable_obj)},
+    {MP_ROM_QSTR(MP_QSTR_vdp_init_done), MP_ROM_PTR(&mod_lcd_vdp_init_done_obj)},
+    {MP_ROM_QSTR(MP_QSTR_set_vdp_init_done), MP_ROM_PTR(&mod_lcd_set_vdp_init_done_obj)},
+    {MP_ROM_QSTR(MP_QSTR_vdp_any_write), MP_ROM_PTR(&mod_lcd_vdp_any_write_obj)},
+    {MP_ROM_QSTR(MP_QSTR_vdp_write_count), MP_ROM_PTR(&mod_lcd_vdp_write_count_obj)},
     {MP_ROM_QSTR(MP_QSTR_render), MP_ROM_PTR(&mod_lcd_render_obj)},
     {MP_ROM_QSTR(MP_QSTR_wait_for_idle), MP_ROM_PTR(&mod_lcd_wait_for_idle_obj)},
     {MP_ROM_QSTR(MP_QSTR_vdp_write), MP_ROM_PTR(&mod_lcd_vdp_write_obj)},
     {MP_ROM_QSTR(MP_QSTR_vdp_read),  MP_ROM_PTR(&mod_lcd_vdp_read_obj)},
+    {MP_ROM_QSTR(MP_QSTR_get_num_pages), MP_ROM_PTR(&mod_lcd_get_num_pages_obj)},
+    {MP_ROM_QSTR(MP_QSTR_set_num_pages), MP_ROM_PTR(&mod_lcd_set_num_pages_obj)},
     /* Constants */
     {MP_ROM_QSTR(MP_QSTR_WIDTH), MP_ROM_INT(LCD_WIDTH)},
     {MP_ROM_QSTR(MP_QSTR_HEIGHT), MP_ROM_INT(LCD_HEIGHT)},

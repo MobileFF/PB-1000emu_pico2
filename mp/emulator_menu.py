@@ -107,7 +107,7 @@ def _build_items(system, state):
     # Storage
     items.append({'id': 'fd_swap',  'label': 'FD Swap'})
     items.append({'id': 'ram_save', 'label': 'RAM Save'})
-    items.append({'id': 'ram_load', 'label': 'RAM Load  [!!]'})
+    items.append({'id': 'ram_load', 'label': 'RAM Load'})
     items.append({'id': 'vram_save','label': 'VRAM Save'})
 
     items.append({'type': 'separator'})
@@ -407,13 +407,19 @@ def _pick_save_dir(display, dirs, current_dir):
         sc = hd61700.get_last_key()
         if sc != prev_sc:
             prev_sc = sc
-            if sc == 0x52 and cursor > 0:
-                cursor -= 1
-                if cursor < scroll: scroll = cursor
+            if sc == 0x52:                                        # UP (wraps to bottom)
+                cursor = cursor - 1 if cursor > 0 else len(all_items) - 1
+                if cursor < scroll:
+                    scroll = cursor
+                elif cursor >= scroll + max_vis:
+                    scroll = max(0, cursor - max_vis + 1)
                 _redraw()
-            elif sc == 0x51 and cursor < len(all_items) - 1:
-                cursor += 1
-                if cursor >= scroll + max_vis: scroll = cursor - max_vis + 1
+            elif sc == 0x51:                                      # DOWN (wraps to top)
+                cursor = cursor + 1 if cursor < len(all_items) - 1 else 0
+                if cursor >= scroll + max_vis:
+                    scroll = cursor - max_vis + 1
+                elif cursor < scroll:
+                    scroll = 0
                 _redraw()
             elif sc == 0x28:
                 if all_items[cursor] is None:
@@ -688,15 +694,19 @@ def _pick_ram_dir(display, dirs, current_dir):
         sc = hd61700.get_last_key()
         if sc != prev_sc:
             prev_sc = sc
-            if sc == 0x52 and cursor > 0:              # UP
-                cursor -= 1
+            if sc == 0x52 and dirs:                     # UP (wraps to bottom)
+                cursor = cursor - 1 if cursor > 0 else len(dirs) - 1
                 if cursor < scroll:
                     scroll = cursor
+                elif cursor >= scroll + max_vis:
+                    scroll = max(0, cursor - max_vis + 1)
                 _redraw()
-            elif sc == 0x51 and cursor < len(dirs) - 1: # DOWN
-                cursor += 1
+            elif sc == 0x51 and dirs:                   # DOWN (wraps to top)
+                cursor = cursor + 1 if cursor < len(dirs) - 1 else 0
                 if cursor >= scroll + max_vis:
                     scroll = cursor - max_vis + 1
+                elif cursor < scroll:
+                    scroll = 0
                 _redraw()
             elif sc == 0x28:                            # EXE
                 return _RAM_BASE + "/" + dirs[cursor]
@@ -739,9 +749,16 @@ def _do_vram_save(system):
     import lcd_c as _lc
     import os as _os
     import utime as _utime
+    import gc as _gc
     W = 192
 
-    vram  = bytes(system.lcd.vram)                           # 768 B mono (copy)
+    # Free heap before allocating VRAM snapshots
+    _gc.collect()
+
+    num_pages = _lc.get_num_pages()  # 4 (32-dot) or 8 (64-dot)
+    H = num_pages * 8                # 32 or 64 pixel rows
+
+    vram_active = system.lcd.vram[:num_pages * W]            # active mono VRAM bytes only
     cvram = _lc.get_color_vram() if hasattr(_lc, 'get_color_vram') else None  # 12288 B ref
     edtop = bytes(system.ram[0x0100:0x0200])                 # 256 B EDTOP VRAM (0x6100-0x61FF)
 
@@ -774,19 +791,19 @@ def _do_vram_save(system):
         except Exception:
             errors.append(name)
 
-    # ── 1. Mono VRAM — raw binary (768 bytes) ───────────────────────────────
-    _try("vram_%s.bin" % ts, lambda f: f.write(vram))
+    # ── 1. Mono VRAM — raw binary (num_pages * W bytes) ─────────────────────
+    _try("vram_%s.bin" % ts, lambda f: f.write(vram_active))
 
-    # ── 2. Mono VRAM — PBM image (P4 binary, 192×32) ────────────────────────
+    # ── 2. Mono VRAM — PBM image (P4 binary, 192 × H) ───────────────────────
     def _pbm(f):
-        f.write(("P4\n%d %d\n" % (W, 32)).encode())
+        f.write(("P4\n%d %d\n" % (W, H)).encode())
         row = bytearray(W // 8)   # 24 bytes per row
-        for y in range(32):
+        for y in range(H):
             page, bit = y >> 3, y & 7
             for i in range(W // 8):
                 p = 0
                 for j in range(8):
-                    p = (p << 1) | ((vram[page * W + i * 8 + j] >> bit) & 1)
+                    p = (p << 1) | ((vram_active[page * W + i * 8 + j] >> bit) & 1)
                 row[i] = p
             f.write(row)
     _try("vram_%s.pbm" % ts, _pbm)

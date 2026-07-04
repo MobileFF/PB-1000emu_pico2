@@ -67,9 +67,11 @@ def handle_key_status_and_capture(system, sc=-1, mod=0):
         try:
             from emulator_menu import _do_vram_save
             msg = _do_vram_save(system)
+            import gc; gc.collect()
             print(f"PrtScr: {msg}")
             system.set_status(msg, 2000)
         except Exception as ex:
+            import gc; gc.collect()
             print(f"Capture failed: {ex}")
             system.set_status("CAP ERROR!", 2000)
     except Exception:

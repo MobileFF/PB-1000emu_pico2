@@ -64,6 +64,16 @@ _DEFAULTS = {
         "driver":   "ILI9341",
         "scale":    "1.5",
     },
+    "wifi": {
+        "ssid": "",
+        "password": "",
+    },
+    "ntp": {
+        "enable": "true",
+        "server": "pool.ntp.org",
+        "tz_offset_h": "9",
+        "timeout_ms": "15000",
+    },
 }
 
 
