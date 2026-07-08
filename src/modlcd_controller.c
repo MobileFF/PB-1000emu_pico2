@@ -82,6 +82,44 @@ static mp_obj_t mod_lcd_get_vram_byte(mp_obj_t off_obj) {
 static MP_DEFINE_CONST_FUN_OBJ_1(mod_lcd_get_vram_byte_obj,
                                  mod_lcd_get_vram_byte);
 
+/* lcd_c.get_vram_view() -> bytearray (direct writable reference to C static
+   array, mirrors get_color_vram()). Lets Python bulk-write the mono LCD
+   framebuffer (e.g. via memoryview slice assignment) without per-byte
+   write()/ctrl() protocol calls — needed for high-frequency callers like a
+   DOTDS call_hook override. Remember to call mark_dirty() after writing. */
+static mp_obj_t mod_lcd_get_vram_view(void) {
+  return mp_obj_new_bytearray_by_ref(LCD_VRAM_SIZE, lcd_state.vram);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(mod_lcd_get_vram_view_obj,
+                                  mod_lcd_get_vram_view);
+
+/* lcd_c.blit_reversed(src, dst_offset) — bulk-copy src (any buffer-protocol
+   object, e.g. a memoryview slice) into lcd_state.vram starting at
+   dst_offset, bit-reversing every byte on the way in.
+   Data written via the real LCD protocol (lcd_write(), mode
+   LCDC_CMD_DRAW_BITIMAGE) is bit-reversed before landing in vram — see
+   lcd_write()'s `reverse_bits8(data)` call. A raw memcpy from a
+   ROM-format source buffer (e.g. LEDTP) into vram skips that step and
+   renders each 8-pixel column upside down. This gives callers that bypass
+   the per-byte protocol (for speed) a bulk equivalent.
+   Remember to call mark_dirty() after writing. */
+static mp_obj_t mod_lcd_blit_reversed(mp_obj_t src_obj, mp_obj_t dst_off_obj) {
+  mp_buffer_info_t bufinfo;
+  mp_get_buffer_raise(src_obj, &bufinfo, MP_BUFFER_READ);
+  mp_int_t dst_off = mp_obj_get_int(dst_off_obj);
+  mp_int_t len = (mp_int_t)bufinfo.len;
+  if (dst_off < 0 || len < 0 || dst_off + len > LCD_VRAM_SIZE) {
+    mp_raise_ValueError(MP_ERROR_TEXT("blit_reversed: out of range"));
+  }
+  const uint8_t *src = (const uint8_t *)bufinfo.buf;
+  for (mp_int_t i = 0; i < len; i++) {
+    lcd_state.vram[dst_off + i] = lcd_reverse_bits8(src[i]);
+  }
+  return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(mod_lcd_blit_reversed_obj,
+                                  mod_lcd_blit_reversed);
+
 /* lcd_c.is_dirty() -> bool */
 static mp_obj_t mod_lcd_is_dirty(void) {
   return mp_obj_new_bool(lcd_state.dirty);
@@ -312,6 +350,8 @@ static const mp_rom_map_elem_t lcd_c_module_globals_table[] = {
     {MP_ROM_QSTR(MP_QSTR_read), MP_ROM_PTR(&mod_lcd_read_obj)},
     {MP_ROM_QSTR(MP_QSTR_get_pixel), MP_ROM_PTR(&mod_lcd_get_pixel_obj)},
     {MP_ROM_QSTR(MP_QSTR_get_vram), MP_ROM_PTR(&mod_lcd_get_vram_obj)},
+    {MP_ROM_QSTR(MP_QSTR_get_vram_view), MP_ROM_PTR(&mod_lcd_get_vram_view_obj)},
+    {MP_ROM_QSTR(MP_QSTR_blit_reversed), MP_ROM_PTR(&mod_lcd_blit_reversed_obj)},
     {MP_ROM_QSTR(MP_QSTR_get_vram_byte),
      MP_ROM_PTR(&mod_lcd_get_vram_byte_obj)},
     {MP_ROM_QSTR(MP_QSTR_is_dirty), MP_ROM_PTR(&mod_lcd_is_dirty_obj)},

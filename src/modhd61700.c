@@ -147,6 +147,37 @@ static bool      call_hook_enabled[CALL_HOOK_MAX];
 static int       call_hook_count = 0;
 static bool c_call_hook_dispatcher(void *ctx, uint16_t addr); /* forward decl */
 
+/* Memory write hook table (address range → Python/native callable).
+   single-address registration uses start == end. */
+#define MEM_WRITE_HOOK_MAX 16
+static uint16_t mem_write_hook_start[MEM_WRITE_HOOK_MAX];
+static uint16_t mem_write_hook_end[MEM_WRITE_HOOK_MAX];
+static mp_obj_t  mem_write_hook_fns[MEM_WRITE_HOOK_MAX];  /* static = scanned by conservative GC */
+static bool      mem_write_hook_enabled[MEM_WRITE_HOOK_MAX];
+static int       mem_write_hook_count = 0;
+
+/* Recompute cpu_state.mem_write_hook_active/min_addr/max_addr from the
+   current hook table. mem_writebyte()/_iz()/_stack() (hd61700.c) use these
+   to skip their ram_ptr/bank_ptr fast path only for addresses inside this
+   range, so unrelated RAM (e.g. VRAM writes far from a single watched
+   byte) keeps full native-pointer speed. Call after any change to the
+   hook table (add/remove) or after hd61700_init() zeroes the struct. */
+static void sync_mem_write_hook_range(void) {
+  if (mem_write_hook_count == 0) {
+    cpu_state.mem_write_hook_active = false;
+    return;
+  }
+  uint16_t lo = mem_write_hook_start[0];
+  uint16_t hi = mem_write_hook_end[0];
+  for (int i = 1; i < mem_write_hook_count; i++) {
+    if (mem_write_hook_start[i] < lo) lo = mem_write_hook_start[i];
+    if (mem_write_hook_end[i]   > hi) hi = mem_write_hook_end[i];
+  }
+  cpu_state.mem_write_hook_min_addr = lo;
+  cpu_state.mem_write_hook_max_addr = hi;
+  cpu_state.mem_write_hook_active   = true;
+}
+
 /* UART RX/TX FIFO (Internal) */
 #define UART_RX_FIFO_SIZE 256
 static uint8_t uart_rx_fifo[UART_RX_FIFO_SIZE];
@@ -931,11 +962,34 @@ static uint8_t c_mem_direct_read(void *ctx, uint8_t segment, uint32_t offset) {
   return 0xFF;
 }
 
+/* Returns true if the write should be cancelled (a hook returned True). */
+static bool c_mem_write_hook_dispatcher(uint16_t addr, uint8_t data, uint8_t bank) {
+  bool cancel = false;
+  for (int i = 0; i < mem_write_hook_count; i++) {
+    if (mem_write_hook_enabled[i]
+            && addr >= mem_write_hook_start[i]
+            && addr <= mem_write_hook_end[i]) {
+      mp_obj_t args[3] = {
+          MP_OBJ_NEW_SMALL_INT(addr),
+          MP_OBJ_NEW_SMALL_INT(data),
+          MP_OBJ_NEW_SMALL_INT(bank)
+      };
+      mp_obj_t ret = mp_call_function_n_kw(mem_write_hook_fns[i], 3, 0, args);
+      if (ret == mp_const_true) cancel = true;
+    }
+  }
+  return cancel;
+}
+
 static void c_mem_direct_write(void *ctx, uint8_t segment, uint32_t offset,
                                uint8_t data) {
   (void)ctx;
   uint8_t bank = normalize_bank(segment);
   uint32_t logical_addr = offset & 0xFFFF;
+
+  if (mem_write_hook_count > 0) {
+    if (c_mem_write_hook_dispatcher((uint16_t)logical_addr, data, bank)) return;
+  }
 
   /* Priority 1: MMIO Trap for Writes (0x0C00-0x0C0F) */
   if (logical_addr >= 0x0C00 && logical_addr <= 0x0C0F) {
@@ -1189,6 +1243,8 @@ static mp_obj_t mod_reset(size_t n_args, const mp_obj_t *args) {
     cpu_state.call_hook = c_call_hook_dispatcher;
     cpu_state.cb_ctx    = NULL;
   }
+  /* Restore mem_write_hook_active — same reason (hd61700_init() zeroed it) */
+  sync_mem_write_hook_range();
 
   /* Connect direct memory pointers for high-performance path */
   {
@@ -1649,6 +1705,84 @@ static mp_obj_t mod_set_call_hook_enabled(mp_obj_t addr_obj, mp_obj_t enabled_ob
 }
 static MP_DEFINE_CONST_FUN_OBJ_2(mod_set_call_hook_enabled_obj, mod_set_call_hook_enabled);
 
+/* hd61700.set_mem_write_hook(addr, fn)              — watch a single address
+ * hd61700.set_mem_write_hook(addr_start, addr_end, fn) — watch a range
+ * fn(addr, data, bank) is called before the byte is written; returning True
+ * cancels the write. Overwrites any existing entry with the same start. */
+static mp_obj_t mod_set_mem_write_hook(size_t n_args, const mp_obj_t *args) {
+  uint16_t start, end;
+  mp_obj_t fn_obj;
+  if (n_args == 2) {
+    start = end = (uint16_t)mp_obj_get_int(args[0]);
+    fn_obj = args[1];
+  } else {
+    start = (uint16_t)mp_obj_get_int(args[0]);
+    end   = (uint16_t)mp_obj_get_int(args[1]);
+    fn_obj = args[2];
+  }
+  /* Overwrite existing entry */
+  for (int i = 0; i < mem_write_hook_count; i++) {
+    if (mem_write_hook_start[i] == start) {
+      mem_write_hook_end[i] = end;
+      mem_write_hook_fns[i] = fn_obj;
+      return mp_const_none;
+    }
+  }
+  /* New entry */
+  if (mem_write_hook_count < MEM_WRITE_HOOK_MAX) {
+    mem_write_hook_start[mem_write_hook_count]   = start;
+    mem_write_hook_end[mem_write_hook_count]     = end;
+    mem_write_hook_fns[mem_write_hook_count]     = fn_obj;
+    mem_write_hook_enabled[mem_write_hook_count] = true;
+    mem_write_hook_count++;
+  }
+  /* mem_writebyte()/_iz()/_stack() (hd61700.c) take a ram_ptr/bank_ptr direct-
+     pointer fast path for RAM writes that bypasses mem_write() entirely —
+     and therefore bypasses c_mem_write_hook_dispatcher() too. Disable that
+     fast path whenever at least one hook is registered so writes are
+     actually seen. */
+  sync_mem_write_hook_range();
+  return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(mod_set_mem_write_hook_obj, 2, 3,
+                                            mod_set_mem_write_hook);
+
+/* hd61700.clear_mem_write_hook(addr_start)
+ * Unregister the hook registered with the given start address. */
+static mp_obj_t mod_clear_mem_write_hook(mp_obj_t addr_start_obj) {
+  uint16_t start = (uint16_t)mp_obj_get_int(addr_start_obj);
+  for (int i = 0; i < mem_write_hook_count; i++) {
+    if (mem_write_hook_start[i] == start) {
+      /* Fill hole with last entry */
+      mem_write_hook_count--;
+      mem_write_hook_start[i]   = mem_write_hook_start[mem_write_hook_count];
+      mem_write_hook_end[i]     = mem_write_hook_end[mem_write_hook_count];
+      mem_write_hook_fns[i]     = mem_write_hook_fns[mem_write_hook_count];
+      mem_write_hook_enabled[i] = mem_write_hook_enabled[mem_write_hook_count];
+      mem_write_hook_fns[mem_write_hook_count] = MP_OBJ_NULL; /* release GC ref */
+      break;
+    }
+  }
+  sync_mem_write_hook_range();
+  return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(mod_clear_mem_write_hook_obj, mod_clear_mem_write_hook);
+
+/* hd61700.set_mem_write_hook_enabled(addr_start, enabled)
+ * Enable or disable a registered hook without unregistering it. */
+static mp_obj_t mod_set_mem_write_hook_enabled(mp_obj_t addr_start_obj, mp_obj_t enabled_obj) {
+  uint16_t start = (uint16_t)mp_obj_get_int(addr_start_obj);
+  bool enabled = mp_obj_is_true(enabled_obj);
+  for (int i = 0; i < mem_write_hook_count; i++) {
+    if (mem_write_hook_start[i] == start) {
+      mem_write_hook_enabled[i] = enabled;
+      return mp_const_none;
+    }
+  }
+  return mp_const_none;  /* address not registered — silently ignore */
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(mod_set_mem_write_hook_enabled_obj, mod_set_mem_write_hook_enabled);
+
 /* hd61700.read_mem(addr, [segment]) */
 static mp_obj_t mod_read_mem(size_t n_args, const mp_obj_t *args) {
   uint32_t addr = (uint32_t)mp_obj_get_int(args[0]);
@@ -2099,6 +2233,12 @@ static const mp_rom_map_elem_t hd61700_module_globals_table[] = {
      MP_ROM_PTR(&mod_clear_call_hook_obj)},
     {MP_ROM_QSTR(MP_QSTR_set_call_hook_enabled),
      MP_ROM_PTR(&mod_set_call_hook_enabled_obj)},
+    {MP_ROM_QSTR(MP_QSTR_set_mem_write_hook),
+     MP_ROM_PTR(&mod_set_mem_write_hook_obj)},
+    {MP_ROM_QSTR(MP_QSTR_clear_mem_write_hook),
+     MP_ROM_PTR(&mod_clear_mem_write_hook_obj)},
+    {MP_ROM_QSTR(MP_QSTR_set_mem_write_hook_enabled),
+     MP_ROM_PTR(&mod_set_mem_write_hook_enabled_obj)},
     {MP_ROM_QSTR(MP_QSTR_read_mem), MP_ROM_PTR(&mod_read_mem_obj)},
     {MP_ROM_QSTR(MP_QSTR_write_mem), MP_ROM_PTR(&mod_write_mem_obj)},
     {MP_ROM_QSTR(MP_QSTR__anchor_callbacks),

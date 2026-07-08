@@ -147,9 +147,12 @@ typedef void (*hd61700_kb_write_cb)(void *ctx, uint8_t data);
 typedef uint8_t (*hd61700_port_read_cb)(void *ctx);
 typedef void (*hd61700_port_write_cb)(void *ctx, uint8_t data);
 typedef void (*hd61700_log_write_cb)(void *ctx, const char *msg);
-/* CAL hook: called when CAL targets a registered address.
- * Returns true  = intercept (skip normal push/set_pc).
- * Returns false = not registered (execute normal CAL). */
+/* CAL hook: called when CAL, JP, or JR targets a registered address (some
+ * ROM routines reach a given entry point via a plain jump rather than a
+ * call, so all three must be checked for a hook to reliably intercept
+ * every path in).
+ * Returns true  = intercept (skip the normal push+jump / plain jump).
+ * Returns false = not registered (execute normally). */
 typedef bool (*hd61700_call_hook_cb)(void *ctx, uint16_t address);
 
 /* CPU State */
@@ -199,8 +202,23 @@ typedef struct {
   hd61700_read_byte_cb io_read;
   hd61700_write_byte_cb io_write;
 
-  /* CAL hook: intercepts CAL instructions targeting registered addresses */
+  /* CAL hook: intercepts CAL/JP/JR instructions targeting registered addresses */
   hd61700_call_hook_cb call_hook;
+
+  /* When true, mem_writebyte()/_iz()/_stack() skip the ram_ptr/bank_ptr
+     direct-pointer fast path for addresses within
+     [mem_write_hook_min_addr, mem_write_hook_max_addr] (the union of all
+     registered mem_write_hook ranges) and fall through to mem_write()
+     instead, so a registered hook actually sees every write to its range.
+     Addresses outside that narrow range still take the fast path — with
+     potentially many registered hooks scattered across a small number of
+     bytes each, this keeps the (likely much larger, e.g. VRAM) rest of RAM
+     at full native-pointer speed. Kept false (fast path always taken
+     everywhere) when no hooks are registered — set by the host
+     (modhd61700.c) whenever its hook set changes. */
+  bool mem_write_hook_active;
+  uint16_t mem_write_hook_min_addr;
+  uint16_t mem_write_hook_max_addr;
 
   /* Direct memory access pointers for C-side performance optimization */
   const uint8_t *rom0_ptr;

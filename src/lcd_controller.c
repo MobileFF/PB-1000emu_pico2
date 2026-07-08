@@ -18,6 +18,11 @@ static uint8_t reverse_bits8(uint8_t v) {
   return r;
 }
 
+/* Public wrapper so other C modules (e.g. modlcd_controller.c's bulk blit
+   helper) can reuse the same bit order lcd_write() applies for
+   LCDC_CMD_DRAW_BITIMAGE data, without duplicating the loop. */
+uint8_t lcd_reverse_bits8(uint8_t v) { return reverse_bits8(v); }
+
 static int command_length(uint8_t mode_byte) {
   uint8_t cmd = mode_byte & 0x0F;
   switch (cmd) {

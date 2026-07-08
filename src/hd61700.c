@@ -94,15 +94,19 @@ static void mem_writebyte(hd61700_state_t *cpu, uint8_t segment,
     }
   }
 
-  if (offset >= 0x6000 && offset < 0x8000) {
-    if (cpu->ram_ptr) {
-      cpu->ram_ptr[offset - 0x6000] = data;
-      return;
-    }
-  } else if (offset >= 0x8000) {
-    if (bank < 4 && cpu->bank_is_ram[bank] && cpu->bank_ptr[bank]) {
-      cpu->bank_ptr[bank][offset - 0x8000] = data;
-      return;
+  if (!cpu->mem_write_hook_active ||
+      offset < cpu->mem_write_hook_min_addr ||
+      offset > cpu->mem_write_hook_max_addr) {
+    if (offset >= 0x6000 && offset < 0x8000) {
+      if (cpu->ram_ptr) {
+        cpu->ram_ptr[offset - 0x6000] = data;
+        return;
+      }
+    } else if (offset >= 0x8000) {
+      if (bank < 4 && cpu->bank_is_ram[bank] && cpu->bank_ptr[bank]) {
+        cpu->bank_ptr[bank][offset - 0x8000] = data;
+        return;
+      }
     }
   }
 
@@ -144,15 +148,19 @@ static void mem_writebyte_iz(hd61700_state_t *cpu, uint8_t segment,
     }
   }
 
-  if (offset >= 0x6000 && offset < 0x8000) {
-    if (cpu->ram_ptr) {
-      cpu->ram_ptr[offset - 0x6000] = data;
-      return;
-    }
-  } else if (offset >= 0x8000) {
-    if (bank < 4 && cpu->bank_is_ram[bank] && cpu->bank_ptr[bank]) {
-      cpu->bank_ptr[bank][offset - 0x8000] = data;
-      return;
+  if (!cpu->mem_write_hook_active ||
+      offset < cpu->mem_write_hook_min_addr ||
+      offset > cpu->mem_write_hook_max_addr) {
+    if (offset >= 0x6000 && offset < 0x8000) {
+      if (cpu->ram_ptr) {
+        cpu->ram_ptr[offset - 0x6000] = data;
+        return;
+      }
+    } else if (offset >= 0x8000) {
+      if (bank < 4 && cpu->bank_is_ram[bank] && cpu->bank_ptr[bank]) {
+        cpu->bank_ptr[bank][offset - 0x8000] = data;
+        return;
+      }
     }
   }
 
@@ -194,15 +202,19 @@ static void mem_writebyte_stack(hd61700_state_t *cpu, uint8_t segment,
     }
   }
 
-  if (offset >= 0x6000 && offset < 0x8000) {
-    if (cpu->ram_ptr) {
-      cpu->ram_ptr[offset - 0x6000] = data;
-      return;
-    }
-  } else if (offset >= 0x8000) {
-    if (bank < 4 && cpu->bank_is_ram[bank] && cpu->bank_ptr[bank]) {
-      cpu->bank_ptr[bank][offset - 0x8000] = data;
-      return;
+  if (!cpu->mem_write_hook_active ||
+      offset < cpu->mem_write_hook_min_addr ||
+      offset > cpu->mem_write_hook_max_addr) {
+    if (offset >= 0x6000 && offset < 0x8000) {
+      if (cpu->ram_ptr) {
+        cpu->ram_ptr[offset - 0x6000] = data;
+        return;
+      }
+    } else if (offset >= 0x8000) {
+      if (bank < 4 && cpu->bank_is_ram[bank] && cpu->bank_ptr[bank]) {
+        cpu->bank_ptr[bank][offset - 0x8000] = data;
+        return;
+      }
     }
   }
 
@@ -1059,8 +1071,19 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
         uint16_t addr = read_imm16_aligned(cpu);
         if (cpu->debug_log)
           cpu_log(cpu, "JP 0x%04X executed at 0x%04X", addr, instr_pc);
-        if (check_cond(cpu, op))
-          set_pc(cpu, addr);
+        if (check_cond(cpu, op)) {
+          /* CAL hook: JP (unlike CAL) never pushes a return address, so on
+             interception we must NOT touch the stack — just let PC continue
+             past this instruction's own operand (already advanced by
+             read_imm16_aligned()), exactly like the real-CAL interception
+             path above (case 0x70-0x77) does. Needed because some ROM
+             routines reach a hooked address (e.g. DOTDS at 0x022C) via a
+             plain JP rather than CAL, which the call_hook mechanism
+             otherwise can't see. */
+          if (!(cpu->call_hook && cpu->call_hook(cpu->cb_ctx, addr))) {
+            set_pc(cpu, addr);
+          }
+        }
         cpu->icount -= 3;
       } break;
       case 0x38:    /* ADC (IX+),$ */
@@ -1961,7 +1984,11 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
         uint8_t arg = read_op(cpu);
         if (check_cond(cpu, op)) {
           uint32_t npc = (cpu->pc - 1) + get_im_7(arg);
-          set_pc(cpu, (int32_t)npc);
+          /* CAL hook: same reasoning as the JP IM16 case above — JR pushes
+             no return address, so on interception just skip the jump. */
+          if (!(cpu->call_hook && cpu->call_hook(cpu->cb_ctx, (uint16_t)npc))) {
+            set_pc(cpu, (int32_t)npc);
+          }
         }
         cpu->icount -= 3;
       } break;

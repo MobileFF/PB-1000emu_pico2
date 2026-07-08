@@ -1132,10 +1132,15 @@ class PB1000System:
         self.save_state()
 
     def register_call_hook(self, address, fn):
-        """Register a callable for the given CAL destination address.
+        """Register a callable for the given destination address.
         fn may be a Python function or a native C MicroPython function.
-        Only CAL instructions targeting this address will invoke fn;
-        JP/JR to the same address will not fire.
+        Fires when CAL, JP, or JR targets this exact address — some ROM
+        routines reach a given entry point via a plain JP/JR (a tail-call
+        style jump) rather than CAL, so all three must be caught for the
+        hook to reliably intercept every path in. CAL pushes a return
+        address before jumping (interception pops it and returns as if
+        RTN had executed); JP/JR push nothing, so interception simply
+        skips the jump and continues at the next instruction instead.
         """
         if not hasattr(self, "_call_hook_refs"):
             self._call_hook_refs = {}
@@ -1159,6 +1164,37 @@ class PB1000System:
         """Disable a registered hook without unregistering it."""
         if hasattr(cpu_core, "set_call_hook_enabled"):
             cpu_core.set_call_hook_enabled(address, False)
+
+    def register_mem_write_hook(self, addr_start, fn, addr_end=None):
+        """Call fn(addr, data, bank) before a byte is written to memory.
+        Omit addr_end to watch a single address; pass addr_end to watch a
+        range (addr_start..addr_end inclusive). fn returning True cancels
+        the write. Registering again with the same addr_start overwrites
+        the previous entry (range and callable included)."""
+        if addr_end is None:
+            addr_end = addr_start
+        if not hasattr(self, "_mem_write_hook_refs"):
+            self._mem_write_hook_refs = {}
+        self._mem_write_hook_refs[addr_start] = fn  # Python-side GC anchor
+        if hasattr(cpu_core, "set_mem_write_hook"):
+            cpu_core.set_mem_write_hook(addr_start, addr_end, fn)
+
+    def unregister_mem_write_hook(self, addr_start):
+        """Unregister the hook registered with the given start address."""
+        if hasattr(self, "_mem_write_hook_refs"):
+            self._mem_write_hook_refs.pop(addr_start, None)
+        if hasattr(cpu_core, "clear_mem_write_hook"):
+            cpu_core.clear_mem_write_hook(addr_start)
+
+    def enable_mem_write_hook(self, addr_start):
+        """Enable a previously registered hook. No-op if not registered."""
+        if hasattr(cpu_core, "set_mem_write_hook_enabled"):
+            cpu_core.set_mem_write_hook_enabled(addr_start, True)
+
+    def disable_mem_write_hook(self, addr_start):
+        """Disable a registered hook without unregistering it."""
+        if hasattr(cpu_core, "set_mem_write_hook_enabled"):
+            cpu_core.set_mem_write_hook_enabled(addr_start, False)
 
     def load_state(self, path=None):
         import json
