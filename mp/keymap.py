@@ -14,9 +14,11 @@ def _load_json_keymap():
     except ImportError:
         return None, None
     for path in ('/sd/roms/keymap.json', '/sd/keymap.json', '/roms/keymap.json'):
+        print(f"[DEBUG boot] keymap: trying open({path})")
         try:
             with open(path) as f:
                 data = _json.load(f)
+            print(f"[DEBUG boot] keymap: open({path}) succeeded")
             usb_map = {}
             for sc_str, v in data.get('usb_map', {}).items():
                 sc = int(sc_str, 16)

@@ -5,6 +5,11 @@
 ハードウェア専用フック（DHT20 温湿度センサー等）は本書の対象外。  
 フックの仕組みや独自フックの作り方は [extension_api.md](extension_api.md) を参照。
 
+> **注意**: `bank_loader.py`（`mp/ext/`）は標準搭載され自動ロードされるが、
+> `ram_test.py` は `sample/mp/ext/ram_test.py` に置かれたサンプルであり、
+> `mp/ext/` へコピーしない限り実機では自動ロードされない（未搭載）。
+> 以下の CALL &H5E41/51/61/71 を使うには先にコピーが必要。
+
 ---
 
 ## 共通ルール
@@ -152,10 +157,13 @@ MD-100 DOS のディレクトリエントリと同じ 11バイト固定長形式
 
 ---
 
-## ram_test.py
+## ram_test.py（sample、未搭載）
 
 BANK2/3 のバンク切替フックとRAMテストを提供する。  
 バンク切替フックは POKE/PEEK で直接バンクRAMにアクセスする際に使用する。
+
+`sample/mp/ext/ram_test.py` に置かれたサンプルモジュールであり、`mp/ext/` に標準搭載されているわけ
+ではない。使用するには `mp/ext/`（または `/sd/ext/`）へコピーする必要がある。
 
 ### CALL &H5E41 — データバンクを BANK2 に切替
 
@@ -235,9 +243,9 @@ CALL &H5E61     ' バンクを元に戻す
 
 | アドレス | モジュール | 機能 |
 |---|---|---|
-| `&H5E41` | ram_test | データバンク → BANK2 |
-| `&H5E51` | ram_test | データバンク → BANK3 |
-| `&H5E61` | ram_test | データバンク → 元に戻す |
-| `&H5E71` | ram_test | BANK2/3 RAM 全テスト |
+| `&H5E41` | ram_test（sample、未搭載） | データバンク → BANK2 |
+| `&H5E51` | ram_test（sample、未搭載） | データバンク → BANK3 |
+| `&H5E61` | ram_test（sample、未搭載） | データバンク → 元に戻す |
+| `&H5E71` | ram_test（sample、未搭載） | BANK2/3 RAM 全テスト |
 | `&H5E81` | bank_loader | SDカードファイル → バンクRAM |
 | `&H5E91` | bank_loader | FDDファイル → バンクRAM |

@@ -90,7 +90,8 @@
 - `service_pio_uart_bridge()`
 - `run_cpu_slice()`
 - `update_frame_if_due()`
-- `service_timer_ticks()`
+- `service_timer_realtime(system, last_tick_ms, *, ms_per_tick)`: 実時間 (`time.ticks_ms()`) ベースのタイマ tick 処理。`timer_tick_ms > 0`（デフォルト）の場合に使用されるメインのタイマ経路。CPU が SLP（スリープ）状態でもステップ数に依存せず進むため、TIME$ が停止しない。
+- `service_timer_ticks()`: ステップ数ベースの旧タイマ処理。`timer_tick_ms == 0` の場合のみ使われるレガシーなフォールバック（デバッグトレース等向け）。
 
 ---
 

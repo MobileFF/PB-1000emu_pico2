@@ -12,6 +12,7 @@ The emulator requires the original Casio PB-1000 ROM images to function. These a
 
 - `rom0.bin`: Internal ROM (6 KB, addresses 0x0000–0x17FF)
 - `rom1.bin`: System ROM (32 KB, addresses 0x8000–0xFFFF, Bank 0)
+- `charset.bin` (placed under `/roms/`, optional): used by the Serial Console feature (§6) for character recognition. If missing, no error occurs — character detection simply does not run
 
 ### Directory Structure (SD Card / Flash)
 
@@ -31,6 +32,8 @@ The emulator requires the original Casio PB-1000 ROM images to function. These a
 │   │   ├── rom0.bin       # Profile-specific ROM (optional)
 │   │   ├── ram0.bin       # Saved standard RAM
 │   │   ├── ram1.bin       # Saved expanded RAM1 (optional)
+│   │   ├── ram2.bin       # Saved expanded RAM2 (Bank2, optional)
+│   │   ├── ram3.bin       # Saved expanded RAM3 (Bank3, optional)
 │   │   └── regs.json      # Saved CPU registers
 │   └── bench/             # Additional profile example
 ├── disks/                 # Virtual FDD disk images
@@ -71,7 +74,7 @@ Configuration priority (low → high): flash `/pb1000.ini` → `/sd/pb1000.ini` 
 | **Insert** | INS | Toggle insert mode |
 | **Arrow keys** | Cursor move | ↑↓←→ (auto-repeat when held) |
 | **Alt (L/R)** | Shift | PB-1000 Shift key |
-| **F1 – F4** | T1 – T4 | Function keys |
+| **F1 – F4** | T13 – T16 | Function keys |
 
 ### Key Mapping
 
@@ -79,7 +82,7 @@ The emulator maps USB HID scancodes to the PB-1000 13×12 key matrix.
 
 - Letters and digits: direct mapping
 - Symbols: mapped to PB-1000 equivalents (e.g. PC `Shift+2` → PB-1000 `"`)
-- **MENU / CAL / LCKEY**: mapped to F5 / F6 / F7 respectively
+- **LCKEY / MENU / CAL**: mapped to F5 / F6 / F7 respectively
 - Full mapping tables are in `mp/keymap.py` and `mp/keymap.json`
 
 ### Cursor Key Auto-Repeat
@@ -174,6 +177,7 @@ Press **F11** to save the current session state to the active profile directory.
 
 - `ram0.bin`: Standard RAM (8 KB)
 - `ram1.bin`: Expanded RAM1 (when enabled)
+- `ram2.bin` / `ram3.bin`: Expanded RAM2 / RAM3 (Bank2 / Bank3, when enabled)
 - `regs.json`: CPU registers (PC, flags, general-purpose registers)
 
 ### RAM Save / Load (Emulator Menu)

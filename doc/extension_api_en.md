@@ -76,10 +76,14 @@ mp/
 └── ext/
     ├── __init__.py       # empty file (package declaration)
     ├── bank_loader.py    # bank RAM loader (included)
-    ├── dht20.py          # DHT20 temperature/humidity sensor (included)
     ├── vram_loader.py    # colour VRAM image loader (included)
+    ├── dotds_64dot.py    # DOTDS / single-char display SCTOP-independence fix (included, internal)
     └── myext.py          # add your own extensions here
 ```
+
+`sample/mp/ext/` contains ready-to-use sample extensions (`dht20.py` — DHT20 temperature/humidity
+sensor, `ram_test.py`, etc.), but these are **not** auto-loaded unless copied into `mp/ext/`
+(`_ext_load_modules()` only scans `/ext/` and `/sd/ext/`; `sample/` is never scanned).
 
 On the Pico 2, place files under `/ext/` or `/sd/ext/` (SD card takes priority).
 
@@ -147,7 +151,12 @@ system._ext_work[1:N]   # parameter / result data
 
 ### Behaviour in C-Direct Mode
 
-The C core does not assign 0x5F00–0x5FFF to any static buffer, so accesses to this range automatically fall through to the Python callbacks (`_mem_read_impl` / `_mem_write`).
+The C core maps `ext_work_buf` (a 256-byte static buffer, `src/modhd61700.c`) to `0x5F00–0x5FFF` and
+handles both reads and writes entirely in C (there is no Python-callback fallthrough).
+`hd61700.get_ext_work_view()` returns a zero-copy `bytearray` view onto this buffer, and
+`PB1000System._ext_init()` (`mp/pb1000.py`) uses that view directly as `self._ext_work` when available,
+so there is no copy between the C core and Python. A plain `bytearray(256)` not backed by the C buffer
+is used only as a fallback for compatibility with older core builds that lack `get_ext_work_view()`.
 
 ---
 
@@ -183,11 +192,19 @@ hd61700.set_call_hook_enabled(CALL_ADDR, True)   # enable
 
 | Address | Module | Function |
 | --- | --- | --- |
-| `0x5E10` | `dht20.py` | Read DHT20 temperature/humidity sensor |
+| `0x5E10` | `dht20.py` (sample, not shipped) | Read DHT20 temperature/humidity sensor |
 | `0x5E20` | `vram_loader.py` | SD/flash file → bank RAM → colour VRAM transfer |
 | `0x5E21` | `vram_loader.py` | Virtual FDD image file → bank RAM → colour VRAM transfer |
+| `0x5E41`/`0x5E51`/`0x5E61`/`0x5E71` | `ram_test.py` (sample, not shipped) | Various RAM tests |
 | `0x5E81` | `bank_loader.py` | Load SD/flash file into bank RAM |
 | `0x5E91` | `bank_loader.py` | Load virtual FDD image file into bank RAM |
+| `0x022C` | `dotds_64dot.py` (internal fix) | DOTDS: bulk LEDTP → monochrome VRAM transfer (SCTOP-independent) |
+| `0x02BD` | `dotds_64dot.py` (internal fix) | Single-char quick display: direct EDCSR write (SCTOP-independent) |
+
+`dht20.py` / `ram_test.py` live under `sample/mp/ext/` and do not run on a stock device unless
+copied into `mp/ext/` (marked "sample, not shipped" above). `dotds_64dot.py` is not a general-purpose
+BASIC extension but an internal fix module for 64-dot display mode, and it always ships as part of
+`mp/ext/`. When adding your own extensions, avoid colliding with its `0x022C`/`0x02BD` call addresses.
 
 ---
 
@@ -257,6 +274,24 @@ Loads binary data into bank RAM (1/2/3) without writing to colour VRAM. Combine 
 
 ---
 
+### `dotds_64dot.py` — 64-Dot Display Fix (Internal Module)
+
+Not a BASIC-facing CALL extension, but an internal fix so DOTDS (`&H022C`) and single-char quick
+display (`&H02BD`) render all 8 rows correctly in 64-dot display mode.
+
+- **call_hook `&H022C` (DOTDS override)**: bulk-transfers `lcd_c.get_num_pages() * 192` bytes from the
+  LEDTP buffer (`&H6201`~) into monochrome VRAM (4 rows in 32-dot mode, 8 rows in 64-dot mode).
+- **call_hook `&H02BD` (single-char quick display override)**: computes row/column from the raw EDCSR
+  (ignoring SCTOP) and writes the 6 bytes pushed by the caller in registers `$2`/`$3` directly to VRAM.
+- **mem_write_hook `&H68D0` (DSPMD watch)**: watches writes to DSPMD and enables the two call_hooks
+  above only in normal display mode (`DSPMD == 0`), disabling them (e.g. in MENU mode, `DSPMD == 3`)
+  so the ROM's original behaviour is restored.
+
+`register(system)` calls `system.register_mem_write_hook(0x68D0, ...)`, making this a real-world
+usage example of the memory write hook API described in dev_guide.md §6.1.
+
+---
+
 ## Revision History
 
 | Date | Change |
@@ -266,3 +301,4 @@ Loads binary data into bank RAM (1/2/3) without writing to colour VRAM. Combine 
 | 2026-05-28 | Added `enable_call_hook` / `disable_call_hook` API |
 | 2026-06-11 | Added `vram_loader.py` and `bank_loader.py` |
 | 2026-07-04 | `vram_loader.py`: now calls `set_vdp_init_done(True)` after transfer so a direct colour-VRAM write is picked up by the renderer immediately |
+| 2026-07-09 | Corrected discrepancies vs. implementation: noted `dht20.py`/`ram_test.py` are unshipped samples, documented `dotds_64dot.py` (a real mem_write_hook usage example), and updated the ext work area's C-direct description (`get_ext_work_view()`) |

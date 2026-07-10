@@ -50,26 +50,52 @@ make submodules
 ```
 
 ### 4. Build with PB-1000 Module
-You need to point `USER_C_MODULES` to the `src/micropython.cmake` file in this repository.
 
 > [!IMPORTANT]
-> Use an **absolute path** for `USER_C_MODULES`.
+> The real hardware is a **Raspberry Pi Pico 2 W**, so the board target must always be
+> **`RPI_PICO2_W`**. Building for plain `RPI_PICO2` uses different CFLAGS for TinyUSB's PIO-USB
+> host configuration, and firmware built that way will not work correctly (e.g. USB keyboard input)
+> even though it flashes without error.
+
+Rather than pointing `USER_C_MODULES` directly at this repository's `src/micropython.cmake`, this
+project's standard workflow syncs the C sources to a separate build-copy directory first (e.g.
+`~/projects/hd61700/src/`) and points `USER_C_MODULES` at the **absolute path** of the
+`micropython.cmake` inside that copy (see `.claude/rules/firmware-source-location.md` in this
+repository for why — the copy exists so the master source in this repo is never accidentally
+overwritten by the build).
+
+```bash
+# 1. Sync src/ from this repo into the build copy
+cp -r /path/to/PB-1000_emu_AG2/src/* ~/projects/hd61700/src/
+```
+
+Then build with the CFLAGS required for TinyUSB PIO-USB host mode:
 
 **Example (Linux/WSL2):**
 ```bash
-export USER_C_MODULES="/path/to/PB-1000_emu_AG2/src/micropython.cmake"
-make BOARD=RPI_PICO2 USER_C_MODULES="$USER_C_MODULES" clean
-make BOARD=RPI_PICO2 USER_C_MODULES="$USER_C_MODULES" -j$(nproc)
+cd ports/rp2
+export USER_C_MODULES="/home/<user>/projects/hd61700/src/micropython.cmake"
+export CFLAGS='-Wno-error=unused-parameter -Wno-error=unused-variable
+  -DCFG_TUSB_MCU=OPT_MCU_RP2350
+  -DCFG_TUSB_OS=OPT_OS_PICO
+  -DCFG_TUH_ENABLED=1
+  -DCFG_TUD_ENABLED=0
+  -DCFG_TUSB_RHPORT1_MODE=(OPT_MODE_HOST|0x0100)
+  -DMICROPY_HW_USB_CDC=0
+  -DMICROPY_HW_USB_MSC=0
+  -DMICROPY_HW_USB_HID=0
+  -DDEBUG_SKIP_CORE_INIT
+  -DMICROPY_PY_PIO_USB=1
+  -I/home/<user>/projects/hd61700/src'
+make BOARD=RPI_PICO2_W USER_C_MODULES="$USER_C_MODULES" clean
+make BOARD=RPI_PICO2_W USER_C_MODULES="$USER_C_MODULES" WERROR=0 -j$(nproc)
 ```
 
-**Example (PowerShell):**
-```powershell
-$USER_C_MODULES = "G:/path/to/PB-1000_emu_AG2/src/micropython.cmake"
-make BOARD=RPI_PICO2 USER_C_MODULES=$USER_C_MODULES clean
-make BOARD=RPI_PICO2 USER_C_MODULES=$USER_C_MODULES -j4
-```
+Native Windows builds are not recommended given the CFLAGS above — use WSL2 with the commands shown.
 
-The output firmware will be located at `build-RPI_PICO2/firmware.uf2`.
+The output firmware will be located at `build-RPI_PICO2_W/firmware.uf2`.
+
+> See `/home/flex/projects/micropython/ports/rp2/bldfrm.sh` for this project's actual (environment-specific) build script.
 
 ## Flashing
 

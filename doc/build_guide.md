@@ -50,26 +50,52 @@ make submodules
 ```
 
 ### 4. PB-1000 モジュールを含めたビルド
-`USER_C_MODULES` に、このリポジトリの `src/micropython.cmake` ファイルを指定します。
 
 > [!IMPORTANT]
-> `USER_C_MODULES` には**絶対パス**を使用してください。
+> 実機は **Raspberry Pi Pico 2 W** であり、ボードターゲットは必ず **`RPI_PICO2_W`** を指定してください。
+> 無印 `RPI_PICO2` でビルドすると TinyUSB の PIO-USB ホスト設定に必要な CFLAGS が異なるため、
+> 転送しても USB キーボード等が正常動作しません。
+
+`src/` の C ソースはこのリポジトリ（Google Drive）の `src/micropython.cmake` を直接指すのではなく、
+まずビルド用の作業コピー（例: `~/projects/hd61700/src/`）へ同期してから `USER_C_MODULES` に
+そのコピー内の `micropython.cmake` の**絶対パス**を指定するのがこのプロジェクトの標準的な手順です
+（`src/` を直接編集した場合は必ずこの同期を行ってください。詳細は本リポジトリの
+`.claude/rules/firmware-source-location.md` を参照）。
+
+```bash
+# 1. GD の src/ をビルド用コピーへ同期
+cp -r /path/to/PB-1000_emu_AG2/src/* ~/projects/hd61700/src/
+```
+
+TinyUSB の PIO-USB ホストモードに必要な CFLAGS を設定してビルドします。
 
 **例 (Linux/WSL2):**
 ```bash
-export USER_C_MODULES="/path/to/PB-1000_emu_AG2/src/micropython.cmake"
-make BOARD=RPI_PICO2 USER_C_MODULES="$USER_C_MODULES" clean
-make BOARD=RPI_PICO2 USER_C_MODULES="$USER_C_MODULES" -j$(nproc)
+cd ports/rp2
+export USER_C_MODULES="/home/<user>/projects/hd61700/src/micropython.cmake"
+export CFLAGS='-Wno-error=unused-parameter -Wno-error=unused-variable
+  -DCFG_TUSB_MCU=OPT_MCU_RP2350
+  -DCFG_TUSB_OS=OPT_OS_PICO
+  -DCFG_TUH_ENABLED=1
+  -DCFG_TUD_ENABLED=0
+  -DCFG_TUSB_RHPORT1_MODE=(OPT_MODE_HOST|0x0100)
+  -DMICROPY_HW_USB_CDC=0
+  -DMICROPY_HW_USB_MSC=0
+  -DMICROPY_HW_USB_HID=0
+  -DDEBUG_SKIP_CORE_INIT
+  -DMICROPY_PY_PIO_USB=1
+  -I/home/<user>/projects/hd61700/src'
+make BOARD=RPI_PICO2_W USER_C_MODULES="$USER_C_MODULES" clean
+make BOARD=RPI_PICO2_W USER_C_MODULES="$USER_C_MODULES" WERROR=0 -j$(nproc)
 ```
 
-**例 (PowerShell):**
-```powershell
-$USER_C_MODULES = "G:/path/to/PB-1000_emu_AG2/src/micropython.cmake"
-make BOARD=RPI_PICO2 USER_C_MODULES=$USER_C_MODULES clean
-make BOARD=RPI_PICO2 USER_C_MODULES=$USER_C_MODULES -j4
-```
+Windows ネイティブビルドは上記 CFLAGS の関係で非推奨です。WSL2 上で上記コマンドを実行してください。
 
-出力されるファームウェアは `build-RPI_PICO2/firmware.uf2` に配置されます。
+出力されるファームウェアは `build-RPI_PICO2_W/firmware.uf2` に配置されます。これをそのまま
+`RPI-RP2` ドライブへコピーするか、`firmware/firmware.uf2` へコピーしておきます。
+
+> 実際のビルドスクリプトの例は `/home/flex/projects/micropython/ports/rp2/bldfrm.sh`
+>（このプロジェクト固有の作業環境向け）を参照してください。
 
 ## 書き込み
 

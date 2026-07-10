@@ -221,25 +221,34 @@ def configure_c_keyboard(system, *, enable_usb_kbd):
     import gc
     if not enable_usb_kbd:
         return None
+    print("[DEBUG boot] configure_c_keyboard: before gc.collect()")
     gc.collect()
+    print("[DEBUG boot] configure_c_keyboard: after gc.collect()")
     try:
         import hd61700 as cpu_core
+        print("[DEBUG boot] configure_c_keyboard: hd61700 imported")
         if hasattr(cpu_core, 'set_f11_callback'):
             def _on_f11(_):
                 print("F11 pressed (Callback)")
                 system._save_requested = True
             system._f11_handler = _on_f11
             cpu_core.set_f11_callback(system._f11_handler)
+        print("[DEBUG boot] configure_c_keyboard: before import keymap")
         import keymap
+        print("[DEBUG boot] configure_c_keyboard: keymap imported")
         if hasattr(cpu_core, 'keyboard_config_adv'):
             adv = keymap.get_adv_map_list()
+            print("[DEBUG boot] configure_c_keyboard: got adv map list")
             cpu_core.keyboard_config_adv(adv)
+            print("[DEBUG boot] configure_c_keyboard: keyboard_config_adv done")
             del adv
             gc.collect()
             print("C advanced keyboard map synchronized.")
         if hasattr(cpu_core, 'keyboard_config_base'):
             base = keymap.get_base_map_list()
+            print("[DEBUG boot] configure_c_keyboard: got base map list")
             cpu_core.keyboard_config_base(base)
+            print("[DEBUG boot] configure_c_keyboard: keyboard_config_base done")
             del base
             gc.collect()
             print("C base keyboard map synchronized.")

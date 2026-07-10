@@ -6,6 +6,10 @@ with BASIC usage examples.
 Hardware-specific hooks (DHT20 temperature sensor, etc.) are not covered here.  
 For the hook framework and how to write your own hooks, see [extension_api_en.md](extension_api_en.md).
 
+> **Note**: `bank_loader.py` (`mp/ext/`) ships by default and is auto-loaded, but `ram_test.py`
+> lives under `sample/mp/ext/ram_test.py` and is a sample — it is **not** auto-loaded on a stock
+> device unless copied into `mp/ext/`. CALL &H5E41/51/61/71 below require that copy first.
+
 ---
 
 ## Common Rules
@@ -153,10 +157,13 @@ The virtual FDD must be enabled and a disk image must be mounted.
 
 ---
 
-## ram_test.py
+## ram_test.py (sample, not shipped)
 
 Provides bank-switching hooks and a RAM self-test for BANK2/3.  
 The bank-switching hooks are used when directly reading/writing bank RAM with POKE/PEEK.
+
+This is a sample module under `sample/mp/ext/ram_test.py`, not a module shipped by default in
+`mp/ext/`. To use it, copy it into `mp/ext/` (or `/sd/ext/`) first.
 
 ### CALL &H5E41 — Switch Data Bank to BANK2
 
@@ -236,9 +243,9 @@ Test suite:
 
 | Address | Module | Function |
 |---|---|---|
-| `&H5E41` | ram_test | Switch data bank → BANK2 |
-| `&H5E51` | ram_test | Switch data bank → BANK3 |
-| `&H5E61` | ram_test | Restore data bank |
-| `&H5E71` | ram_test | Run BANK2/3 RAM self-test |
+| `&H5E41` | ram_test (sample, not shipped) | Switch data bank → BANK2 |
+| `&H5E51` | ram_test (sample, not shipped) | Switch data bank → BANK3 |
+| `&H5E61` | ram_test (sample, not shipped) | Restore data bank |
+| `&H5E71` | ram_test (sample, not shipped) | Run BANK2/3 RAM self-test |
 | `&H5E81` | bank_loader | SD card file → bank RAM |
 | `&H5E91` | bank_loader | FDD file → bank RAM |

@@ -61,22 +61,34 @@ The central module for CPU control and all peripheral I/O.
 | `reset(debug)` | Reset the CPU (optionally enable debug flags) |
 | `execute(cycles, stop_pc)` | Execute up to `cycles` CPU cycles |
 | `get_pc()` / `set_pc(addr)` | Read/write the program counter |
-| `get_reg(idx)` / `set_reg(idx, val)` | Read/write a 16-bit register |
-| `get_reg8(idx)` / `set_reg8(idx, val)` | Read/write an 8-bit status register |
-| `load_rom(data, slot)` | Load a ROM binary into the specified slot |
-| `load_ram(data, slot)` | Load a RAM binary into the specified slot |
+| `get_reg(idx)` / `set_reg(idx, val)` | Read/write a general-purpose register (integer index) |
+| `get_reg8(idx)` / `set_reg8(idx, val)` | Read/write an 8-bit special register. idx: 0=PE, 1=PD, 2=IB, 3=UA, 4=IA, 5=IE, 6=TM, 7=reserved |
+| `get_reg16(idx)` / `set_reg16(idx, val)` | Read/write a 16-bit register. idx: 0=IX, 1=IY, 2=IZ, 3=US, 4=SS, 5=KY |
+| `get_sreg(idx)` / `set_sreg(idx, val)` | Read/write a status register |
+| `set_registers(bytes)` | Restore the full register set at once (used for save-state) |
+| `load_rom(slot, data)` | Load a ROM binary into the specified slot (0=internal ROM, 1=expansion ROM) |
+| `load_ram(slot, data)` | Load a RAM binary into the specified slot (0=main RAM, 1..3=expansion RAM banks) |
+| `read_mem(addr)` / `write_mem(addr, val)` | Single-shot memory access at any address (debugging) |
+| `get_ram_view()` / `get_bank_view(n)` / `get_exp_ram_view()` / `get_ext_work_view()` | Zero-copy `bytearray` views onto the corresponding static buffers |
+| `set_has_exp_ram(bool)` | Tell the CPU core whether expansion RAM is present |
+| `is_sleeping()` | Return whether the CPU is currently in SLP (sleep) state |
 | `set_port_callbacks(read_fn, write_fn)` | Register port I/O callbacks |
 | `set_mem_callbacks(read_fn, write_fn)` | Register memory access callbacks |
 | `set_lcd_char_callback(fn)` | Register LCD character detection callback |
 | `set_call_hook(addr, fn)` | Register a subroutine hook at an address |
 | `clear_call_hook(addr)` | Remove a subroutine hook |
 | `set_call_hook_enabled(addr, bool)` | Enable or disable a hook without removing it |
+| `set_mem_write_hook(addr, fn)` | Register a memory write hook (see §6.1) |
+| `clear_mem_write_hook(addr)` | Remove a memory write hook |
+| `set_mem_write_hook_enabled(addr, bool)` | Enable or disable a memory write hook |
 | `set_port_direct(tx, rx, beep, freq, duty)` | Initialise C-direct UART and beep PWM |
 | `press_row_ki(row, ki)` | Assert a key in the keyboard matrix |
 | `release_row_ki(row, ki)` | Release a key from the matrix (also sets post-release KEY_INT pulses) |
 | `get_last_key()` | Return the last received HID scancode (read-and-clear) |
 | `get_held_cursor_key()` | Return the physically-held cursor key scancode (0 = none) |
 | `steer_next_key_int(row)` | Steer the next KEY_INT to a specific row and fire it immediately |
+| `process_usb_key(scancode, pressed)` | Manual test hook to inject a single key event into the C core. Actual USB HID report parsing happens entirely inside `usb_host_core.c` and never goes through this module |
+| `build_time()` | Return the firmware build date/time string |
 | `set_debug(bool)` | Enable/disable CPU instruction trace |
 | `set_key_debug(bool)` | Enable/disable key input trace |
 | `set_lcd_debug(bool)` | Enable/disable LCD write trace |
@@ -89,12 +101,26 @@ Emulates the HD61830 LCD controller and drives the SPI display.
 | --- | --- |
 | `setup_display(spi, cs, dc, scale, x, y)` | Attach a physical SPI display |
 | `render()` | Render to SPI if the dirty flag is set |
+| `wait_for_idle()` | Wait for an in-flight SPI transfer to finish |
 | `is_dirty()` / `mark_dirty()` / `clear_dirty()` | Manage the dirty flag |
-| `get_vram()` | Return the current VRAM as bytes |
-| `set_colors(fg, bg)` | Set lit/unlit pixel colours in RGB565 |
-| `set_vdp_enable(bool)` | Enable/disable per-pixel colour VRAM (VDP) |
+| `get_vram()` / `get_vram_view()` / `get_vram_byte(offset)` | Return the current VRAM as bytes / as a zero-copy view / a single byte |
+| `get_color_vram()` | Return the per-pixel colour VRAM (VDP) bytes |
+| `get_pixel(x, y)` | Return whether a given pixel is lit |
+| `blit_reversed(...)` | Mirror-blit the VRAM |
+| `is_display_on()` | Return the HD61830 display on/off state |
+| `set_x_mirror(bool)` | Toggle X-axis mirroring |
+| `set_draw_bitimage_reverse(bool)` | Toggle reversed bit-image drawing |
+| `load_charset(data)` | Load the `charset.bin` used for character detection |
+| `set_colors(fg, bg)` / `set_bg_colors(...)` | Set lit/unlit pixel colours in RGB565 |
+| `set_vdp_enable(bool)` / `get_vdp_enable()` | Enable/disable per-pixel colour VRAM (VDP) |
 | `set_vdp_init_done(bool)` / `vdp_init_done()` | Force-set / read the VDP "initial fill done" flag (see §8) |
+| `vdp_sync_enable(bool)` | Enable/disable VDP sync mode |
+| `vdp_any_write()` / `vdp_write_count()` | Query whether/how many times VDP has been written |
+| `vdp_write(reg, data)` / `vdp_read(reg)` | Directly read/write a VDP register |
+| `get_num_pages()` / `set_num_pages(n)` | Get/set the number of display pages (64-dot row support) |
+| `set_debug(bool)` | Enable/disable LCD write trace |
 | `set_scale(num, den)` | Set the display scale factor |
+| `WIDTH` / `HEIGHT` / `VRAM_SIZE` / `COLOR_VRAM_SIZE` | Screen and VRAM size constants |
 
 Use the `LCDControllerC` wrapper class in `lcd_controller_c.py` in normal code.
 
@@ -102,8 +128,11 @@ Use the `LCDControllerC` wrapper class in `lcd_controller_c.py` in normal code.
 
 Exposes RP2350 USB host (TinyUSB HID) to MicroPython.
 
-- `process_usb_key(hid_report)`: parse an HID report and inject key events into the C core.
-- Used together with `hd61700.keyboard_config_adv()` / `keyboard_config_base()`.
+- `init()` / `probe()` / `task()`: initialise the USB host stack, probe devices, and service the host task.
+- `start_bg_timer()` / `stop_bg_timer()`: start/stop the background task timer.
+- Actual HID report parsing (press/release detection) happens entirely in C: `tuh_hid_report_received_cb()` in `src/usb_host_core.c` calls `c_kb_process_usb_key_extern()` directly and never goes through Python.
+- Used together with `hd61700.keyboard_config_adv()` / `keyboard_config_base()` for keymap configuration.
+- `hd61700.process_usb_key(scancode, pressed)` is a manual test-injection hook and belongs to the `hd61700` module, not `usb_host`.
 
 ---
 
@@ -198,6 +227,29 @@ MP_DEFINE_CONST_FUN_OBJ_0(hook_my_func_obj, hook_my_func);
 ```
 
 See `doc/extension_api.md` for further details.
+
+### 6.1 Memory Write Hook
+
+Separately from call hooks, this mechanism intercepts **memory writes** to any address range.
+`c_mem_direct_write()` calls `c_mem_write_hook_dispatcher()` before performing the write; for each
+registered range it invokes a Python function as `fn(addr, data, bank)`. If the function returns `True`,
+the write itself is cancelled.
+
+```python
+# Register a hook over an address range (addr_start..addr_end; a single byte if omitted)
+system.register_mem_write_hook(0x68D0, my_write_handler, addr_end=0x68D0)
+
+# Remove a hook
+system.unregister_mem_write_hook(0x68D0)
+
+# Temporarily disable / re-enable without removing
+system.disable_mem_write_hook(0x68D0)
+system.enable_mem_write_hook(0x68D0)
+```
+
+`mp/ext/dotds_64dot.py` is a real-world example: it registers a memory write hook on the DSPMD register
+(0x68D0) and toggles call hooks on or off depending on the value written (64-dot display row support).
+See `doc/plan_mem_write_hook.md` for the design background (now implemented).
 
 ---
 

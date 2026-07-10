@@ -91,7 +91,8 @@ Exported functions:
 - `service_pio_uart_bridge()`
 - `run_cpu_slice()`
 - `update_frame_if_due()`
-- `service_timer_ticks()`
+- `service_timer_realtime(system, last_tick_ms, *, ms_per_tick)`: wall-clock (`time.ticks_ms()`) based timer tick. This is the main timer path used whenever `timer_tick_ms > 0` (the default). Unlike the step-based timer, it keeps advancing even while the CPU is in SLP (sleep) state, so TIME$ no longer stalls.
+- `service_timer_ticks()`: legacy step-count based timer. Only used as a fallback when `timer_tick_ms == 0` (e.g. debug trace scripts).
 
 ---
 
