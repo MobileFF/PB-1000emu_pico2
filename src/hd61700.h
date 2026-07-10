@@ -1,7 +1,8 @@
 /*
  * HD61700 CPU Emulator - Header
- * Based on MAME hd61700.cpp by Sandro Ronco (BSD-3-Clause license)
- * Ported to standalone C for MicroPython integration
+ * Based on MAME hd61700.cpp, Copyright (c) Sandro Ronco, BSD-3-Clause license.
+ * Ported to standalone C for MicroPython integration.
+ * Full BSD-3-Clause notice: see THIRD-PARTY-NOTICES.md in the repository root.
  */
 #ifndef HD61700_H
 #define HD61700_H

@@ -1,7 +1,8 @@
 /*
  * HD61700 CPU Emulator - Complete Implementation
- * Based on MAME hd61700.cpp by Sandro Ronco (BSD-3-Clause license)
- * Ported to standalone C for MicroPython integration on RP2350
+ * Based on MAME hd61700.cpp, Copyright (c) Sandro Ronco, BSD-3-Clause license.
+ * Ported to standalone C for MicroPython integration on RP2350.
+ * Full BSD-3-Clause notice: see THIRD-PARTY-NOTICES.md in the repository root.
  */
 #include "hd61700.h"
 #include <stdarg.h>

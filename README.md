@@ -50,7 +50,32 @@ PB-1000_emu_AG2/
 
 ## ライセンス
 
-*ライセンス情報は現在保留中です。*
+本プロジェクト（`src/`・`mp/` 以下の独自コード、ドキュメント一式）は **GNU General Public License v3.0 (GPL-3.0)** の下で公開されています。全文は [LICENSE](LICENSE) を参照してください。
+
+```
+PB-1000 emulator for Raspberry Pi Pico 2
+Copyright (C) 2026  MobileFF
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+```
+
+### 対象範囲・注意事項
+
+- **PB-1000 の ROM イメージは含まれません**。ROM は CASIO 社に著作権があり、本リポジトリでは配布していません。実機から吸い出したご自身の ROM イメージをお使いください（詳細は [Usage Guide](doc/usage_guide.md) 参照）。
+- **HD61700 CPU コア（`src/hd61700.c`/`.h`）は MAME プロジェクトの `hd61700.cpp`（Sandro Ronco 氏作、BSD-3-Clause license）の C言語移植です。** パーミッシブライセンスのため GPL-3.0 への組み込みに問題はありませんが、著作権表示・条件・免責事項の全文を [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) に記載しています。
+- 「謝辞」に記載の Piotr Piatek 氏の PB-1000 エミュレータについては、ソースコード（`pb1000es/`、参考資料として同梱・ビルド対象外）を本プロジェクトの実装と比較した結果、直接転用は確認されませんでした。詳細は [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) を参照してください。
+- 本プロジェクトは **MicroPython**（MIT License）、**Raspberry Pi Pico SDK**（BSD-3-Clause）、**TinyUSB**（MIT License）をビルド時にリンクしています。これらの詳細も [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) に記載しています。
 
 ## 謝辞
 

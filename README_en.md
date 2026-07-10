@@ -50,7 +50,32 @@ PB-1000_emu_AG2/
 
 ## License
 
-*License information is currently pending.*
+This project (the original code under `src/` and `mp/`, and the documentation) is released under the **GNU General Public License v3.0 (GPL-3.0)**. See [LICENSE](LICENSE) for the full text.
+
+```
+PB-1000 emulator for Raspberry Pi Pico 2
+Copyright (C) 2026  MobileFF
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+```
+
+### Scope and Notes
+
+- **PB-1000 ROM images are not included.** The ROM is copyrighted by CASIO and is not distributed in this repository. Use a ROM image you have dumped from your own hardware (see the [Usage Guide](doc/usage_guide_en.md)).
+- **The HD61700 CPU core (`src/hd61700.c`/`.h`) is a C port of the MAME project's `hd61700.cpp`** (by Sandro Ronco, BSD-3-Clause license). Being a permissive license, incorporating it into this GPL-3.0 project is not a problem; the full copyright notice, conditions, and disclaimer are reproduced in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+- Regarding Piotr Piatek's PB-1000 emulator mentioned in "Acknowledgments": its source (`pb1000es/`, bundled purely as reference material and not part of the build) was compared against this project's implementation, and no direct code reuse was found. See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) for details.
+- This project links **MicroPython** (MIT License), the **Raspberry Pi Pico SDK** (BSD-3-Clause), and **TinyUSB** (MIT License) at build time; details are also in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
 ## Acknowledgments
 
