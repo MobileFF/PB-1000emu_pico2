@@ -13,18 +13,20 @@ MADCTL  = 0x36
 PIXFMT  = 0x3A
 
 class ILI9341:
-    def __init__(self, spi, cs, dc, rst, width=320, height=240, r=0):
+    def __init__(self, spi, cs, dc, rst, width=320, height=240, r=0, rotation=0):
         self.spi = spi
         self.cs = cs
         self.dc = dc
         self.rst = rst
         self.width = width
         self.height = height
-        
+        # 0 = normal landscape, 180 = physically flipped (board mounted upside down)
+        self.rotation = 180 if rotation == 180 else 0
+
         self.cs.init(self.cs.OUT, value=1)
         self.dc.init(self.dc.OUT, value=0)
         self.rst.init(self.rst.OUT, value=1)
-        
+
         self.reset()
         self.init_display()
 
@@ -57,7 +59,10 @@ class ILI9341:
         
         self.write_cmd(MADCTL)
         # 0x28 = Landscape (Column/Row swap), BGR color
-        self.write_data(bytearray([0x28])) 
+        # 0xE8 = same landscape orientation with MX+MY also set -> physically
+        #        rotated 180 degrees (matches a board mounted upside down).
+        madctl = 0xE8 if self.rotation == 180 else 0x28
+        self.write_data(bytearray([madctl]))
         self.width, self.height = 320, 240
         
         self.write_cmd(DISPON)

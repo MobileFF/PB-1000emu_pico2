@@ -138,6 +138,7 @@ def _callback(system, cs):
 - **SPI Sharing**: The CS (Chip Select) pins must be independent for the LCD, SD, and Touch. Ensure all CS pins are pulled HIGH initially in code to avoid bus contention.
 - **Power Consumption**: The ILI9341 backlight can draw significant current. If the Pico reboots or the screen flickers, use an external 3.3V regulator or power the backlight from the VBUS (5V) pin (if the module supports it).
 - **Logic Level**: All pins are 3.3V logic. Do not connect 5V signals directly to the Pico pins.
+- **Board Mounting Orientation**: If the board (including the LCD/touch panel) has to be mounted upside down for enclosure reasons, set `[display] rotation = 180` in `pb1000.ini` instead of rewiring anything. Both the on-screen display and touch panel coordinates are flipped automatically (see the [Usage Guide](usage_guide_en.md)).
 
 ## Schematic
 

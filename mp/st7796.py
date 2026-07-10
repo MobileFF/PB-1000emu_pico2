@@ -12,13 +12,15 @@ MADCTL  = 0x36
 COLMOD  = 0x3A
 
 class ST7796:
-    def __init__(self, spi, cs, dc, rst, width=480, height=320, r=0):
+    def __init__(self, spi, cs, dc, rst, width=480, height=320, r=0, rotation=0):
         self.spi = spi
         self.cs = cs
         self.dc = dc
         self.rst = rst
         self.width = width
         self.height = height
+        # 0 = normal landscape, 180 = physically flipped (board mounted upside down)
+        self.rotation = 180 if rotation == 180 else 0
 
         self.cs.init(self.cs.OUT, value=1)
         self.dc.init(self.dc.OUT, value=0)
@@ -61,8 +63,11 @@ class ST7796:
         self.write_data(bytearray([0x55]))  # 16-bit RGB565
 
         self.write_cmd(MADCTL)
-        # 0x28: MX=1, MV=1, BGR=1 → landscape, BGR color (same as ILI9341)
-        self.write_data(bytearray([0x28]))
+        # 0x28: MV=1, BGR=1 -> landscape, BGR color (same as ILI9341)
+        # 0xE8: same landscape orientation with MX+MY also set -> physically
+        #       rotated 180 degrees (matches a board mounted upside down).
+        madctl = 0xE8 if self.rotation == 180 else 0x28
+        self.write_data(bytearray([madctl]))
 
         # Display function control
         self.write_cmd(0xB6)

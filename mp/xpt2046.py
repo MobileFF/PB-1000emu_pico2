@@ -4,7 +4,8 @@ from machine import Pin, SPI
 class XPT2046:
     def __init__(self, spi, cs_pin, irq_pin=None, width=320, height=240,
                  x_min=200, y_min=200, x_max=3900, y_max=3900, baudrate=1000000,
-                 swap_xy=False, x_inv=False, y_inv=False, lcd_baudrate=40000000):
+                 swap_xy=False, x_inv=False, y_inv=False, lcd_baudrate=40000000,
+                 rotate180=False):
         self.spi = spi
         self.cs = Pin(cs_pin, Pin.OUT)
         self.cs.value(1)
@@ -27,6 +28,10 @@ class XPT2046:
         self.swap_xy = swap_xy
         self.baudrate = baudrate
         self.lcd_baudrate = lcd_baudrate  # Must match the display SPI baudrate
+        # When the display content is rendered rotated 180 degrees (MADCTL),
+        # touch coordinates must undergo the same 180-degree flip so they keep
+        # lining up with what's on screen.
+        self.rotate180 = rotate180
 
     def is_pressed(self):
         """Check if the screen is currently being touched."""
@@ -86,11 +91,15 @@ class XPT2046:
             x_c = self.width - x_c
         if self.y_inv:
             y_c = self.height - y_c
-            
+
+        if self.rotate180:
+            x_c = self.width - x_c
+            y_c = self.height - y_c
+
         # Clamp coordinates
         x_c = max(0, min(self.width, x_c))
         y_c = max(0, min(self.height, y_c))
-        
+
         return x_c, y_c
 
     def _map_val(self, val, in_min, in_max, out_min, out_max):

@@ -242,12 +242,21 @@ baudrate = 9600
 [display]
 fg_color = 0               ; foreground (lit pixel) colour, RGB332 format 0–255
 bg_color = 180             ; background (unlit pixel) colour, RGB332 format 0–255
+rotation = 0                ; 0=normal / 180=upside down (match how the board is mounted)
 ```
 
 **RGB332 Colour Format (`[display]` section)**
 
 `fg_color` / `bg_color` use the same **RGB332 (8-bit)** format as the colour VRAM.
 Values can be changed interactively from **Foreground Color** / **Background Color** in the emulator menu and are written back to `pb1000.ini` automatically.
+
+**Display Rotation (`[display]` section)**
+
+Setting `rotation` to `180` renders the entire screen (LCD, bezel, and function key bar)
+rotated 180 degrees. Use this when the board has to be mounted upside down for physical
+reasons. Touch panel coordinates are automatically flipped to match, so no extra
+calibration is needed. This setting is only read once at boot, so a restart is required
+after changing it.
 
 | Bits | 7–5 | 4–2 | 1–0 |
 | --- | --- | --- | --- |

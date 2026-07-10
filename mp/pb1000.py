@@ -101,6 +101,14 @@ def init_display():
     default_baud = 40_000_000 if driver == "ST7796" else 26_000_000
     spi_baud = int(disp_cfg.get("spi_baudrate", str(default_baud)))
 
+    # 0 = normal, 180 = physically flipped (board mounted upside down).
+    try:
+        rotation = int(disp_cfg.get("rotation", "0"))
+    except (ValueError, TypeError):
+        rotation = 0
+    if rotation not in (0, 180):
+        rotation = 0
+
     spi = machine.SPI(
         SPI_ID,
         baudrate=spi_baud,
@@ -121,14 +129,14 @@ def init_display():
 
     if driver == "ST7796":
         from st7796 import ST7796
-        display = ST7796(spi, cs, dc, rst, width=480, height=320)
+        display = ST7796(spi, cs, dc, rst, width=480, height=320, rotation=rotation)
         display.fill_rect(0, 0, 480, 320, 0x0000)
-        print("Display: ST7796 480x320")
+        print(f"Display: ST7796 480x320 (rotation={rotation})")
     else:
         from ili9341 import ILI9341
-        display = ILI9341(spi, cs, dc, rst, width=320, height=240)
+        display = ILI9341(spi, cs, dc, rst, width=320, height=240, rotation=rotation)
         display.fill_rect(0, 0, 320, 240, 0x0000)
-        print("Display: ILI9341 320x240")
+        print(f"Display: ILI9341 320x240 (rotation={rotation})")
     display.spi_baudrate = spi_baud
 
     # Try mounting SD card; pass actual SPI baudrate so it's restored correctly
@@ -141,7 +149,8 @@ def init_display():
                         width=display.width, height=display.height,
                         swap_xy=True, x_inv=True, y_inv=True,
                         y_min=325, y_max=3850,
-                        lcd_baudrate=spi_baud)
+                        lcd_baudrate=spi_baud,
+                        rotate180=(rotation == 180))
     except Exception as e:
         print("Touch panel init failed:", e)
         sys.print_exception(e)
