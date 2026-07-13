@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(python3 -c ' *)",
-      "Bash(python3 *)",
-      "Bash(pkill -f keymap_editor.py)"
-    ]
-  }
-}
