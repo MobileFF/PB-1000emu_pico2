@@ -67,7 +67,7 @@ Configuration priority (low → high): flash `/pb1000.ini` → `/sd/pb1000.ini` 
 | **PrintScreen** | Screenshot | Save LCD content to `/sd/screenshots/` as `.pbm` |
 | **Win (GUI) + F7** | Emulator Menu | Open the runtime settings menu |
 | **Win (GUI) + F6** | Disk Swap | Switch the virtual FDD disk image |
-| **Win (GUI) + Esc** | Quit Emulator | Return to MicroPython REPL |
+| **Win (GUI) + Esc** | Quit Emulator | Return to MicroPython REPL (via the UART REPL wired to GP0/GP1 — see the [Hardware Guide](hardware_guide_en.md)) |
 | **Esc** | BREAK | Stop a BASIC program / clear error |
 | **Enter** | EXE | Execute command |
 | **Backspace** | BS | Erase character |
@@ -122,10 +122,13 @@ Opens a settings menu that pauses the main loop. Changes take effect immediately
 | **RAM Save** | Snapshot current RAM to `/sd/rams/` |
 | **RAM Load** | Restore a RAM snapshot from `/sd/rams/` |
 | **VRAM Save** | Save current LCD VRAM to files (PBM + binary) |
+| **Full Capture** | Save the entire physical screen (bezel + function key bar included) as a single PPM image |
 | **Foreground Color** | Change the colour of lit LCD pixels (RGB332) |
 | **Background Color** | Change the colour of unlit LCD pixels (RGB332) |
+| **Hook Status** | List every registered subroutine hook (call_hook) and memory write hook (mem_write_hook): address, owning module, and enabled/disabled state |
 
 Use Up/Down keys to navigate, Enter/EXE to activate, BREAK to close.
+(Inside the **Hook Status** screen, Up/Down scrolls the list and BREAK closes it and returns to the menu.)
 
 ---
 
@@ -195,12 +198,28 @@ On startup, the emulator loads the state files from the selected profile directo
 
 ## 9. Screenshots
 
-Press **PrintScreen** to capture the current LCD content.
+Press **PrintScreen**, or use **VRAM Save** in the emulator menu, to capture the emulated
+PB-1000 screen (192×32 or 192×64, monochrome VRAM + colour VRAM). Both trigger the same
+underlying routine (`_do_vram_save()`), so the result is identical either way.
 
-- Format: PBM (Portable BitMap, 1-bit monochrome)
-- Location: `/sd/screenshots/screenshot_YYYYMMDD_HHMMSS.pbm`
-  - Falls back to `/roms/` if the SD card is not mounted
-- A raw VRAM dump (`vram_dump_....bin`) is saved at the same time
+- Location: `/sd/screenshots/` (falls back to `/screenshots/` if the SD card is not mounted)
+- Files saved (each with a `YYYYMMDD_HHMMSS` timestamp suffix):
+  - `vram_<timestamp>.bin` / `.pbm`: raw monochrome VRAM data / PBM image
+  - `edtop_<timestamp>.bin`: raw EDTOP buffer data
+  - `color_vram_<timestamp>.bin` / `.ppm`: colour VRAM (VDP) data / PPM image, only when VDP is enabled
+
+To capture the **entire physical screen**, including the bezel and function key bar, use
+**Full Capture** in the emulator menu instead (see below).
+
+### Full-Screen Capture (Full Capture)
+
+**Full Capture** in the emulator menu saves the entire physical display (e.g. 320×240 or
+480×320) — bezel, PB-1000 screen, and function key bar included — as a single PPM image.
+
+- Location: `/sd/screenshots/full_<timestamp>.ppm` (same directory as VRAM Save)
+- This does not read the screen back over SPI; it recomposes the full image in software
+  from the emulator's own VRAM, bezel layout, and function key bar image. As a result, any
+  transient status message shown briefly after a keypress is not captured.
 
 ---
 

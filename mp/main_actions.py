@@ -1,5 +1,13 @@
 import hd61700
-import keymap
+# NOTE: keymap is intentionally NOT imported here at module level.
+# It's used only inside handle_key_status_and_capture() below, and this
+# file is itself imported at main.py's module load time (before main()
+# runs). Importing keymap here would force its module-level
+# keymap.json search/load to happen that early too. Deferring to a
+# local import means the first real `import keymap` in the whole boot
+# sequence happens in main_boot.py's configure_c_keyboard(), right
+# where the "before import keymap" debug log is — matching where the
+# keymap data is actually first needed.
 
 
 def handle_disk_swap(system, display, fkbar=None):
@@ -57,6 +65,7 @@ def handle_key_status_and_capture(system, sc=-1, mod=0):
         if sc < 0:
             return
 
+        import keymap
         system.set_status(keymap.get_label(sc, mod))
 
         if sc != 0x46:
@@ -76,35 +85,3 @@ def handle_key_status_and_capture(system, sc=-1, mod=0):
             system.set_status("CAP ERROR!", 2000)
     except Exception:
         pass
-
-
-def handle_save_state_request(system, *, enable_usb_kbd):
-    if not getattr(system, '_save_requested', False):
-        return
-
-    system._save_requested = False
-    system.set_status("SAVING STATE...")
-    system.update_display()
-    if hasattr(system.lcd, 'lcd_sync'):
-        system.lcd.lcd_sync()
-
-    if enable_usb_kbd:
-        try:
-            import usb_host
-            usb_host.stop_bg_timer()
-        except Exception:
-            pass
-
-    try:
-        system.save_state()
-        system.set_status("STATE SAVED!", 2000)
-    except Exception as e:
-        system.set_status("SAVE ERROR!", 3000)
-        print(f"Save state failed: {e}")
-    finally:
-        if enable_usb_kbd:
-            try:
-                import usb_host
-                usb_host.start_bg_timer(8)
-            except Exception:
-                pass

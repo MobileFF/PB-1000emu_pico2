@@ -26,7 +26,6 @@ class KeyboardInputManager:
         key_hold_ms=120,
         key_release_hard_timeout_ms=1200,
         inter_key_gap_ms=80,
-        on_int_pulse_ms=30,
     ):
         self._uart_kbd = uart_kbd
         self._enable_uart_kbd = enable_uart_kbd
@@ -34,7 +33,6 @@ class KeyboardInputManager:
         self._key_hold_ms = key_hold_ms
         self._key_release_hard_timeout_ms = key_release_hard_timeout_ms
         self._inter_key_gap_ms = inter_key_gap_ms
-        self._on_int_pulse_ms = on_int_pulse_ms
 
         self._key_candidates = {
             "EXE": [KEY_EXE],
@@ -53,10 +51,14 @@ class KeyboardInputManager:
         self._next_press_at_ms = 0
         self._typed_since_enter = False
         self._last_was_cr = False
-        self._on_int_active = False
-        self._on_int_release_at_ms = 0
         self._input_blocked_log_at_ms = 0
-        self._uart_char_map = self._build_uart_char_map()
+        # Only built when UART keyboard input is actually enabled: it's the
+        # sole consumer (_poll_uart_input() below), and building it forces
+        # keymap.py's module-level keymap.json load, which we want to defer
+        # until it's actually needed rather than at KeyboardInputManager
+        # construction time (main.py Step 8, well before
+        # main_boot.configure_c_keyboard()).
+        self._uart_char_map = self._build_uart_char_map() if enable_uart_kbd else {}
 
     def _resolve_key_candidates(self, key, label):
         if label in self._key_candidates:
@@ -94,16 +96,6 @@ class KeyboardInputManager:
                 result[label] = (primary, label, chord)
         return result
 
-    def _pulse_on_int(self, system, now_ms):
-        if self._on_int_active:
-            return
-        try:
-            system.set_on_int(True)
-        except Exception:
-            return
-        self._on_int_active = True
-        self._on_int_release_at_ms = time.ticks_add(now_ms, self._on_int_pulse_ms)
-
     def _poll_uart_input(self, system):
         if not self._enable_uart_kbd or self._uart_kbd is None:
             return
@@ -113,7 +105,10 @@ class KeyboardInputManager:
             except Exception:
                 char = None
             if not char:
-                break
+                # Bad/undecodable byte: drop just this one and keep draining
+                # the rest of the RX buffer (a single glitched byte must not
+                # stall reading everything queued behind it).
+                continue
             if char == "\x03":
                 print("\n[UART] Break received")
                 self._key_queue.append(((1, 1), "BRK", []))
@@ -252,14 +247,16 @@ class KeyboardInputManager:
         """Inject a key press from an external event (e.g. auto-BREAK on EOF)."""
         self._key_queue.append((key, label, []))
 
-    def poll(self, system):
-        now = time.ticks_ms()
-        if self._on_int_active and time.ticks_diff(now, self._on_int_release_at_ms) >= 0:
-            try:
-                system.set_on_int(False)
-            finally:
-                self._on_int_active = False
+    def drain_uart(self, system):
+        """Drain the UART keyboard RX buffer into _key_queue only.
 
+        Unlike poll(), this touches no press/release timing state, so it's
+        safe to call much more often than the main loop's own cadence (e.g.
+        once per CPU step chunk) to keep up with incoming bytes and avoid
+        UART RX buffer overflow between outer-loop iterations."""
+        self._poll_uart_input(system)
+
+    def poll(self, system):
         self._poll_uart_input(system)
 
         now = time.ticks_ms()

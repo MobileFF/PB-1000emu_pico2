@@ -90,6 +90,16 @@ static void write_vram_pixel_byte(lcd_state_t *lcd, int chip, int x_local,
           lcd->color_vram[row_base + bit * LCD_WIDTH] =
               (data & (1 << bit)) ? fg : bg;
         }
+        /* A real character/bitimage pixel was just stamped with per-pixel
+           color, so _pixel_color() can safely start reading color_vram now —
+           even if the program never touched the raw color-VRAM registers
+           (0x0C20-0x0C22) to open this gate itself.  Without this, programs
+           that only use the simple fg/bg registers (0x0C23/0x0C24) plus
+           normal PRINT would render every dirtied page with the flat
+           color_on/color_off fallback, so any later color change would
+           visibly recolor previously-drawn characters sharing that page. */
+        if (!lcd->vdp_init_fill_done)
+          lcd->vdp_init_fill_done = true;
       }
     }
   }
@@ -222,7 +232,9 @@ void lcd_init(lcd_state_t *lcd) {
   lcd->active_pages = LCD_PAGES;
   lcd->fill_pages   = LCD_PAGES;
   lcd->dirty = true;
-  for (int i = 0; i < LCD_PAGES_MAX; i++) {
+  /* Only mark up to fill_pages dirty, not LCD_PAGES_MAX — see the comment
+     in lcd_set_num_pages() for why marking beyond that is wrong. */
+  for (int i = 0; i < lcd->fill_pages; i++) {
     lcd->dirty_pages[i] = true;
   }
   lcd->x_mirror = false;
@@ -265,6 +277,14 @@ void lcd_init(lcd_state_t *lcd) {
   memset(lcd->color_vram, lcd->current_bg_rgb332, LCD_COLOR_VRAM_SIZE);
 
   lcd->vdp_addr = 0;
+  /* Default ON at boot. A cold boot's very first ROM-drawn character
+     auto-latches vdp_init_fill_done (see write_vram_pixel_byte()), pinning
+     the session onto the color_vram render path immediately — this used to
+     expose two real bugs: _pixel_color() not clamping out-of-range pages in
+     the VDP branch, and the 64-dot DOTDS/char fast paths (moddotds64.c)
+     writing straight to vram without also stamping color_vram. Both are
+     fixed now, so color_vram tracks vram consistently regardless of when
+     VDP turns on, and there's no reason to delay it past power-on. */
   lcd->vdp_enabled = true;
 
   /* Clear VRAM */
@@ -359,11 +379,29 @@ void lcd_set_num_pages(lcd_state_t *lcd, uint8_t pages) {
   lcd->fill_pages   = (lcd->active_pages > pages) ? lcd->active_pages : pages;
   lcd->active_pages = pages;
   lcd->dirty = true;
-  for (int i = 0; i < LCD_PAGES_MAX; i++) lcd->dirty_pages[i] = true;
+  /* Only mark pages up to fill_pages dirty (not the full LCD_PAGES_MAX):
+     fill_pages already equals max(old active_pages, new pages), so this
+     still clears the vacated lower half on a real 64→32 shrink, but does
+     NOT spuriously dirty pages 4-7 on a fresh 32-dot-only session (where
+     there was never a wider mode to clean up) — that spurious dirtying
+     caused render_to_display() to paint those out-of-range pages with
+     color_off (matching the bezel's background color) on the very first
+     frame, making the bezel look permanently twice as tall until some
+     unrelated full-screen redraw (e.g. opening/closing the emulator menu)
+     happened to paint over it. */
+  for (int i = 0; i < lcd->fill_pages; i++) lcd->dirty_pages[i] = true;
 }
 
 /* Inline helper used by both render paths */
 static inline uint16_t _pixel_color(const lcd_state_t *lcd, int col, int sy) {
+  /* Pages beyond the current active_pages must always render as background,
+     regardless of which branch below is taken.  Without this clamp applied
+     BEFORE the VDP branch, a page-count shrink (e.g. 64-dot menu -> 32-dot
+     BASIC/CAL) leaves the vacated pages' stale color_vram content on screen
+     forever, since write_vram_pixel_byte() never writes there again once
+     they're out of range. */
+  int page = sy >> 3;
+  if (page >= (int)lcd->active_pages) return lcd->color_off;
   /* Use VDP color_vram only after the ROM has finished its initial 0xFF clear
      and written at least one real color value (vdp_init_fill_done).  During
      the clear phase color_vram[addr]==0xFF maps to white (0xFFFF) which would
@@ -371,8 +409,6 @@ static inline uint16_t _pixel_color(const lcd_state_t *lcd, int col, int sy) {
   if (lcd->vdp_enabled && lcd->vdp_init_fill_done) {
     return lcd->rgb332_to_565_table[lcd->color_vram[sy * LCD_WIDTH + col]];
   }
-  int page = sy >> 3;
-  if (page >= (int)lcd->active_pages) return lcd->color_off;
   int bit  = sy & 7;
   bool on  = (lcd->vram[page * LCD_WIDTH + col] >> bit) & 1;
   return on ? lcd->color_on : lcd->color_off;

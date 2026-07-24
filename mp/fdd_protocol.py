@@ -523,15 +523,3 @@ class FDDProtocol:
         self._count = self._dos.get_free_disk_space()
         return self._opstatus
 
-    # ------------------------------------------------------------------
-    # Compatibility shim for pb1000.py status string
-    # ------------------------------------------------------------------
-
-    @property
-    def status_str(self):
-        if self._index < len(self._cmdtab):
-            name = getattr(self._cmdtab[self._index], "__name__", "?")
-        else:
-            name = "?"
-        return "cmd=%02x idx=%d hnd=%s cnt=%d" % (
-            self._cmdcode, self._index, name, self._count)

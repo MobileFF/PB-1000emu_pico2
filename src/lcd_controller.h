@@ -14,7 +14,7 @@
 #define LCD_WIDTH 192
 #define LCD_HEIGHT 32
 
-/* ILI9341 display colors (RGB565) */
+/* LCD display colors (RGB565, common to ILI9341 / ST7796) */
 #define LCD_COLOR_ON 0x0000  /* Black pixel */
 #define LCD_COLOR_OFF 0xB5E6 /* Olive-green background */
 #define LCD_COLOR_LCD_OFF 0x8410 /* Gray tint when LCD is powered off */

@@ -16,6 +16,11 @@ static hd61700_state_t cpu_state;
 static bool cpu_debug_enabled = false;
 static bool cpu_key_debug_enabled = false;
 static bool cpu_lcd_debug_enabled = false;
+/* Narrow, independent trace: only USB scancode 0x45 (F12) press/release
+ * events in c_kb_process_usb_key. Deliberately decoupled from
+ * cpu_debug_enabled/cpu_key_debug_enabled so it can be used without the
+ * high-volume ROM key-scan-path traces gated by those flags. */
+static bool cpu_newall_debug_enabled = false;
 
 extern lcd_state_t *lcd_c_get_state(void);
 
@@ -134,8 +139,6 @@ static int      c_kb_deferred_combo_n_coords = 0;
 #define C_KB_DEFERRED_COMBO_HOLD_MS 60u
 
 /* Python callbacks (set from Python) */
-static mp_obj_t py_f11_callback = MP_OBJ_NULL;
-static mp_obj_t py_f9_callback = MP_OBJ_NULL;
 static mp_obj_t py_io_read_callback = MP_OBJ_NULL;
 static mp_obj_t py_io_write_callback = MP_OBJ_NULL;
 
@@ -427,6 +430,9 @@ static void c_kb_process_usb_key(uint8_t scancode, bool pressed) {
 
   /* 3. Handle key release */
   if (!pressed) {
+    if (cpu_newall_debug_enabled && scancode == 0x45) {
+      mp_printf(&mp_plat_print, "[NEWALL-DBG] release sc=0x45\n");
+    }
     for (int i = 0; i < c_kb_active_usb_count; i++) {
       if (c_kb_active_usb[i].scancode == scancode) {
         /* SFT combo fire-and-hold: if coords[0]==(11,2) with targets, ensure all keys
@@ -491,6 +497,10 @@ static void c_kb_process_usb_key(uint8_t scancode, bool pressed) {
 
   /* Debounce: Skip press if it happens too soon after previous release (e.g. 50ms) */
   if (mp_hal_ticks_ms() - last_release_ms[scancode] < 50) {
+    if (cpu_newall_debug_enabled && scancode == 0x45) {
+      mp_printf(&mp_plat_print,
+                "[NEWALL-DBG] press sc=0x45 DEBOUNCED (skipped)\n");
+    }
     return;
   }
 
@@ -558,6 +568,19 @@ static void c_kb_process_usb_key(uint8_t scancode, bool pressed) {
         found = true;
         break;
       }
+    }
+  }
+
+  if (cpu_newall_debug_enabled && scancode == 0x45) {
+    if (found) {
+      mp_printf(&mp_plat_print,
+                "[NEWALL-DBG] press sc=0x45 mod=0x%02X found=1 n_coords=%d "
+                "coord0=(%d,%d)\n",
+                current_mod, ak->n_coords, ak->coords[0][0], ak->coords[0][1]);
+    } else {
+      mp_printf(&mp_plat_print,
+                "[NEWALL-DBG] press sc=0x45 mod=0x%02X found=0 (no map match)\n",
+                current_mod);
     }
   }
 
@@ -1193,6 +1216,44 @@ static uint8_t c_lcd_direct_read(void *ctx) {
   return lcd_read(lcd_c_get_state());
 }
 
+/* ======================================================================
+ * Minimal public C accessors for out-of-core native call-hook modules
+ * (e.g. src/moddotds64.c). These exist so hot-path call_hook modules can
+ * read CPU registers/memory without per-call MicroPython object overhead,
+ * while keeping cpu_state's internal layout and c_mem_direct_read()'s
+ * bank-normalization logic private to this file — mirrors the existing
+ * lcd_c_get_state() cross-module accessor pattern (modlcd_controller.c).
+ * ====================================================================== */
+
+/* Read main register $<idx> (0..31), e.g. $2/$3 hold call-time arguments
+   for several ROM subroutines. Same semantics as hd61700.get_reg(idx). */
+uint8_t hd61700_get_reg(int idx) {
+  return cpu_state.regmain[idx & 0x1f];
+}
+
+/* Read one byte from CPU-visible memory (bank 0 / segment 0 — main RAM,
+   internal/system ROM, and MMIO — the same address space plain BASIC
+   PEEK/CALL code sees). Same semantics as hd61700.read_mem(addr).
+
+   NOTE: this goes through the full CPU bus-read path, which includes
+   side effects meant to run once per real memory access (e.g. the
+   level-triggered UART-RX interrupt/sleep-wake check below). Do not use
+   this in a tight loop for a bulk buffer copy — use hd61700_ram_read()
+   for that instead. */
+uint8_t hd61700_mem_read(uint16_t addr) {
+  return c_mem_direct_read(NULL, normalize_bank(0), (uint32_t)addr);
+}
+
+/* Direct read from the main RAM buffer (0x6000-0x7FFF), addressed by
+   RAM-relative offset (0x0000-0x1FFF) rather than an absolute CPU address.
+   Bypasses c_mem_direct_read() entirely — no MMIO trapping, no UART-RX
+   interrupt/sleep-wake side effect — for bulk operations (e.g. a VRAM
+   refresh blit) that must not behave like hundreds/thousands of individual
+   "CPU reads memory" bus accesses. */
+uint8_t hd61700_ram_read(uint16_t ram_offset) {
+  return (ram_offset < sizeof(ram_buf)) ? ram_buf[ram_offset] : 0xFF;
+}
+
 /* ====== Module functions exposed to Python ====== */
 
 /* hd61700.reset([debug]) */
@@ -1289,6 +1350,32 @@ static mp_obj_t mod_set_lcd_debug(mp_obj_t enabled_obj) {
   return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(mod_set_lcd_debug_obj, mod_set_lcd_debug);
+
+/* hd61700.set_newall_debug(enabled): narrow trace, USB scancode 0x45 (F12)
+ * press/release only, plus the ROM's dispatched key code at PC=0x94A6.
+ * Independent of set_debug/set_key_debug. */
+static mp_obj_t mod_set_newall_debug(mp_obj_t enabled_obj) {
+  cpu_newall_debug_enabled = mp_obj_is_true(enabled_obj);
+  hd61700_set_rom_newall_debug(&cpu_state, cpu_newall_debug_enabled);
+  return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(mod_set_newall_debug_obj, mod_set_newall_debug);
+
+/* hd61700.set_key_pulse_interval_ms(ms): interval between synthetic KEY_INT
+ * pulses while a key is held (default C_KB_PULSE_INTERVAL_MS=25). Real
+ * hardware's Key/Pulse ISR runs every 3.9ms (256Hz); this is a software
+ * approximation. Lowering it shortens how long the ROM's ~2-cycle debounce
+ * (see rom0.src 060C) takes in wall-clock time, at the cost of servicing
+ * c_kb_service_input_lines() more often. Exposed live (not just at boot via
+ * [keyboard] key_pulse_interval_ms in pb1000.ini) so it can be tuned from
+ * the REPL without a rebuild. */
+static mp_obj_t mod_set_key_pulse_interval_ms(mp_obj_t ms_obj) {
+  int ms = mp_obj_get_int(ms_obj);
+  if (ms < 1) ms = 1;
+  c_kb_pulse_interval_ms = (uint32_t)ms;
+  return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(mod_set_key_pulse_interval_ms_obj, mod_set_key_pulse_interval_ms);
 
 /* hd61700.execute(cycles, stop_pc=-1) -> int (cycles consumed) */
 static mp_obj_t mod_execute(size_t n_args, const mp_obj_t *args) {
@@ -1806,14 +1893,6 @@ static mp_obj_t mod_write_mem(size_t n_args, const mp_obj_t *args) {
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(mod_write_mem_obj, 2, 3,
                                            mod_write_mem);
 
-/* hd61700._anchor_callbacks(obj) - internal use to prevent GC */
-static mp_obj_t mod_anchor_callbacks(mp_obj_t obj) {
-  anchor_callbacks(obj);
-  return mp_const_none;
-}
-static MP_DEFINE_CONST_FUN_OBJ_1(mod_anchor_callbacks_obj,
-                                 mod_anchor_callbacks);
-
 // Internal function to ensure anchor list is known to GC
 static mp_obj_t mod_init_anchor(void) {
   if (py_callback_anchor_list == mp_const_none) {
@@ -1823,22 +1902,6 @@ static mp_obj_t mod_init_anchor(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(mod_init_anchor_obj, mod_init_anchor);
 
-/* hd61700.set_f11_callback(fn) */
-static mp_obj_t mod_set_f11_callback(mp_obj_t fn_obj) {
-  py_f11_callback = fn_obj;
-  anchor_callbacks(fn_obj);
-  return mp_const_none;
-}
-static MP_DEFINE_CONST_FUN_OBJ_1(mod_set_f11_callback_obj, mod_set_f11_callback);
-
-/* hd61700.set_f9_callback(fn) */
-static mp_obj_t mod_set_f9_callback(mp_obj_t fn_obj) {
-  py_f9_callback = fn_obj;
-  anchor_callbacks(fn_obj);
-  return mp_const_none;
-}
-static MP_DEFINE_CONST_FUN_OBJ_1(mod_set_f9_callback_obj, mod_set_f9_callback);
-
 /* hd61700.uart_tx_get() -> int or None */
 static mp_obj_t mod_uart_tx_get(void) {
   if (uart_tx_head != uart_tx_tail) {
@@ -1847,31 +1910,6 @@ static mp_obj_t mod_uart_tx_get(void) {
   return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(mod_uart_tx_get_obj, mod_uart_tx_get);
-
-/* hd61700.set_uart_tx_callback(fn) - Kept for compatibility */
-static mp_obj_t mod_set_uart_tx_callback(mp_obj_t fn_obj) {
-  (void)fn_obj;
-  return mp_const_none;
-}
-static MP_DEFINE_CONST_FUN_OBJ_1(mod_set_uart_tx_callback_obj, mod_set_uart_tx_callback);
-
-/* hd61700.uart_rx_put(byte) */
-static mp_obj_t mod_uart_rx_put(mp_obj_t byte_obj) {
-  uint8_t b = (uint8_t)mp_obj_get_int(byte_obj);
-  uart_rx_fifo[uart_rx_head++] = b;
-  /* Assert INT1 to notify BIOS of incoming data */
-  hd61700_set_input(&cpu_state, HD61700_INT1, 1);
-  cpu_state.reg8bit[2] |= (1 << HD61700_INT1); /* Force REG_IB for robustness */
-  cpu_state.state &= ~CPU_SLP;
-  return mp_const_none;
-}
-static MP_DEFINE_CONST_FUN_OBJ_1(mod_uart_rx_put_obj, mod_uart_rx_put);
-
-/* hd61700.uart_rx_any() -> int: bytes pending in C UART RX FIFO */
-static mp_obj_t mod_uart_rx_any(void) {
-  return MP_OBJ_NEW_SMALL_INT((uint8_t)(uart_rx_head - uart_rx_tail));
-}
-static MP_DEFINE_CONST_FUN_OBJ_0(mod_uart_rx_any_obj, mod_uart_rx_any);
 
 /* hd61700.uart_signal_rx(): Assert INT1 to wake CPU when Python PIO buffer
    has data. Does NOT store data in C FIFO — bytes remain in Python buffer
@@ -1894,26 +1932,6 @@ static mp_obj_t mod_uart_clear_rx_signal(void) {
   return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(mod_uart_clear_rx_signal_obj, mod_uart_clear_rx_signal);
-
-/* hd61700.set_kb_pulse_interval_ms(ms) */
-static mp_obj_t mod_set_kb_pulse_interval_ms(mp_obj_t ms_obj) {
-  int ms = mp_obj_get_int(ms_obj);
-  if (ms < 1) ms = 1;
-  if (ms > 2000) ms = 2000;
-  c_kb_pulse_interval_ms = (uint32_t)ms;
-  return mp_const_none;
-}
-static MP_DEFINE_CONST_FUN_OBJ_1(mod_set_kb_pulse_interval_ms_obj,
-                                 mod_set_kb_pulse_interval_ms);
-
-/* hd61700.process_usb_key(scancode, pressed) - manual C keyboard event injection */
-static mp_obj_t mod_process_usb_key(mp_obj_t sc_obj, mp_obj_t pressed_obj) {
-  uint8_t scancode = (uint8_t)mp_obj_get_int(sc_obj);
-  bool pressed = mp_obj_is_true(pressed_obj);
-  c_kb_process_usb_key(scancode, pressed);
-  return mp_const_none;
-}
-static MP_DEFINE_CONST_FUN_OBJ_2(mod_process_usb_key_obj, mod_process_usb_key);
 
 /* hd61700.keyboard_config_adv([(scancode, mod, [(row,ki), ...]), ...]) */
 static mp_obj_t mod_keyboard_config_adv(mp_obj_t list_obj) {
@@ -2137,12 +2155,6 @@ static mp_obj_t mod_set_port_direct(size_t n_args, const mp_obj_t *args) {
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(mod_set_port_direct_obj, 3, 5,
                                            mod_set_port_direct);
 
-/* hd61700.get_port_data() -> int — last port byte written by the emulated CPU */
-static mp_obj_t mod_get_port_data(void) {
-  return MP_OBJ_NEW_SMALL_INT(c_port_data);
-}
-static MP_DEFINE_CONST_FUN_OBJ_0(mod_get_port_data_obj, mod_get_port_data);
-
 /* hd61700.set_vfdd_data(val) */
 static mp_obj_t mod_set_vfdd_data(mp_obj_t val_obj) {
     vfdd_data_reg = (uint8_t)mp_obj_get_int(val_obj);
@@ -2173,6 +2185,8 @@ static const mp_rom_map_elem_t hd61700_module_globals_table[] = {
     {MP_ROM_QSTR(MP_QSTR_set_debug), MP_ROM_PTR(&mod_set_debug_obj)},
     {MP_ROM_QSTR(MP_QSTR_set_key_debug), MP_ROM_PTR(&mod_set_key_debug_obj)},
     {MP_ROM_QSTR(MP_QSTR_set_lcd_debug), MP_ROM_PTR(&mod_set_lcd_debug_obj)},
+    {MP_ROM_QSTR(MP_QSTR_set_newall_debug), MP_ROM_PTR(&mod_set_newall_debug_obj)},
+    {MP_ROM_QSTR(MP_QSTR_set_key_pulse_interval_ms), MP_ROM_PTR(&mod_set_key_pulse_interval_ms_obj)},
     {MP_ROM_QSTR(MP_QSTR_set_mem_callbacks),
      MP_ROM_PTR(&mod_set_mem_callbacks_obj)},
     {MP_ROM_QSTR(MP_QSTR_set_lcd_char_callback),
@@ -2217,7 +2231,6 @@ static const mp_rom_map_elem_t hd61700_module_globals_table[] = {
      MP_ROM_PTR(&mod_lcd_clear_read_queue_obj)},
     /* C Port APIs */
     {MP_ROM_QSTR(MP_QSTR_set_port_direct), MP_ROM_PTR(&mod_set_port_direct_obj)},
-    {MP_ROM_QSTR(MP_QSTR_get_port_data), MP_ROM_PTR(&mod_get_port_data_obj)},
     {MP_ROM_QSTR(MP_QSTR_get_ram_view), MP_ROM_PTR(&mod_get_ram_view_obj)},
     {MP_ROM_QSTR(MP_QSTR_get_exp_ram_view),
      MP_ROM_PTR(&mod_get_exp_ram_view_obj)},
@@ -2241,35 +2254,19 @@ static const mp_rom_map_elem_t hd61700_module_globals_table[] = {
      MP_ROM_PTR(&mod_set_mem_write_hook_enabled_obj)},
     {MP_ROM_QSTR(MP_QSTR_read_mem), MP_ROM_PTR(&mod_read_mem_obj)},
     {MP_ROM_QSTR(MP_QSTR_write_mem), MP_ROM_PTR(&mod_write_mem_obj)},
-    {MP_ROM_QSTR(MP_QSTR__anchor_callbacks),
-     MP_ROM_PTR(&mod_anchor_callbacks_obj)},
     /* Constants */
     {MP_ROM_QSTR(MP_QSTR_ON_INT), MP_ROM_INT(HD61700_ON_INT)},
     {MP_ROM_QSTR(MP_QSTR_TIMER_INT), MP_ROM_INT(HD61700_TIMER_INT)},
-    {MP_ROM_QSTR(MP_QSTR_INT2), MP_ROM_INT(HD61700_INT2)},
     {MP_ROM_QSTR(MP_QSTR_KEY_INT), MP_ROM_INT(HD61700_KEY_INT)},
     {MP_ROM_QSTR(MP_QSTR_INT1), MP_ROM_INT(HD61700_INT1)},
     {MP_ROM_QSTR(MP_QSTR_SW), MP_ROM_INT(HD61700_SW)},
     {MP_ROM_QSTR(MP_QSTR__init_anchor), MP_ROM_PTR(&mod_init_anchor_obj)},
     /* C Keyboard APIs */
-    {MP_ROM_QSTR(MP_QSTR_set_f11_callback),
-     MP_ROM_PTR(&mod_set_f11_callback_obj)},
-    {MP_ROM_QSTR(MP_QSTR_set_f9_callback),
-     MP_ROM_PTR(&mod_set_f9_callback_obj)},
     {MP_ROM_QSTR(MP_QSTR_uart_tx_get), MP_ROM_PTR(&mod_uart_tx_get_obj)},
-    {MP_ROM_QSTR(MP_QSTR_set_uart_tx_callback), MP_ROM_PTR(&mod_set_uart_tx_callback_obj)},
-    {MP_ROM_QSTR(MP_QSTR_uart_rx_put),
-     MP_ROM_PTR(&mod_uart_rx_put_obj)},
-    {MP_ROM_QSTR(MP_QSTR_uart_rx_any),
-     MP_ROM_PTR(&mod_uart_rx_any_obj)},
     {MP_ROM_QSTR(MP_QSTR_uart_signal_rx),
      MP_ROM_PTR(&mod_uart_signal_rx_obj)},
     {MP_ROM_QSTR(MP_QSTR_uart_clear_rx_signal),
      MP_ROM_PTR(&mod_uart_clear_rx_signal_obj)},
-    {MP_ROM_QSTR(MP_QSTR_set_kb_pulse_interval_ms),
-     MP_ROM_PTR(&mod_set_kb_pulse_interval_ms_obj)},
-    {MP_ROM_QSTR(MP_QSTR_process_usb_key),
-     MP_ROM_PTR(&mod_process_usb_key_obj)},
     {MP_ROM_QSTR(MP_QSTR_keyboard_config_adv),
      MP_ROM_PTR(&mod_keyboard_config_adv_obj)},
     {MP_ROM_QSTR(MP_QSTR_keyboard_config_base),

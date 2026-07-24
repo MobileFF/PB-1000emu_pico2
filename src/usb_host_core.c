@@ -38,18 +38,6 @@ char const *const tu_str_std_request[] = {
     "SET_CONFIGURATION", "GET_INTERFACE",  "SET_INTERFACE",
     "SYNCH_FRAME"};
 
-void tu_print_mem(void const *buf, uint32_t count, uint8_t indent) {
-  uint8_t const *p = (uint8_t const *)buf;
-  for (uint32_t i = 0; i < count; i++) {
-    if (i % 16 == 0) {
-      if (i > 0) mp_printf(&mp_plat_print, "\n");
-      for (uint8_t j = 0; j < indent; j++) mp_printf(&mp_plat_print, " ");
-    }
-    mp_printf(&mp_plat_print, "%02X ", p[i]);
-  }
-  mp_printf(&mp_plat_print, "\n");
-}
-
 static void *tu_malloc(size_t size) {
   size = (size + 7) & ~7;
   if (usb_host_heap_pos + size > USB_HOST_HEAP_SIZE) return NULL;
@@ -138,10 +126,6 @@ void usb_host_core_init(void) {
     DEBUG_PRINTF("[USB Host] ERROR: tuh_init failed!\n");
     return;
   }
-}
-
-void usb_host_core_task(void) {
-  tuh_task();
 }
 
 void usb_host_core_start_bg_timer(int interval_ms) {

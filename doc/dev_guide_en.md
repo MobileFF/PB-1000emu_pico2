@@ -24,6 +24,7 @@ src/
   modlcd_controller.c     # lcd_c MicroPython module
   usb_host_core.c / .h    # USB host driver core
   modusb_host.c           # usb_host MicroPython module
+  moddotds64.c            # dotds64 MicroPython module (64-dot display fix fast path)
   micropython.cmake       # Build system configuration
 
 mp/
@@ -41,7 +42,8 @@ mp/
   config.py               # pb1000.ini loading
   pio_uart.py             # PIO software UART (RS-232C)
   keymap.py / keymap.json # Keyboard mapping tables
-  ili9341.py              # ILI9341 TFT driver
+  ili9341.py              # ILI9341 TFT driver (320x240)
+  st7796.py               # ST7796 TFT driver (480x320)
   ext/                    # Extension API modules (auto-loaded)
 
 hardware/
@@ -134,6 +136,37 @@ Exposes RP2350 USB host (TinyUSB HID) to MicroPython.
 - Used together with `hd61700.keyboard_config_adv()` / `keyboard_config_base()` for keymap configuration.
 - `hd61700.process_usb_key(scancode, pressed)` is a manual test-injection hook and belongs to the `hd61700` module, not `usb_host`.
 
+### `dotds64` module (`src/moddotds64.c`)
+
+A small standalone module providing the native call_hook implementation for
+`mp/ext/dotds_64dot.py` (the 64-dot display mode internal fix; see §9 and
+`extension_api.md`). The DOTDS (`&H022C`) and single-char quick display
+(`&H02BD`) overrides are hot paths (fired on every screen redraw and on
+every character printed via PRINT, respectively), so they are implemented
+in C to avoid MicroPython call overhead.
+
+| Function | Description |
+| --- | --- |
+| `dotds_hook()` | DOTDS override. Identical logic to `_dotds_override()` in `mp/ext/dotds_64dot.py` |
+| `char_hook()` | Single-char quick display override. Identical logic to `_char_display_override()` |
+
+**Design rationale**: this functionality is deliberately kept out of the `hd61700` CPU core itself
+(subroutine hook implementations are factored into their own module rather than folded into the
+core). `hd61700` only exposes small, generic C functions for other modules to read CPU state —
+none of the 64-dot-specific logic lives in the core. LCD state access reuses the existing
+`lcd_c_get_state()` accessor (`modlcd_controller.c`).
+
+| Function (all plain file-to-file `extern`, not exposed to Python) | Description |
+| --- | --- |
+| `uint8_t hd61700_get_reg(int idx)` | Read general register `$idx` (equivalent to `hd61700.get_reg()`) |
+| `uint8_t hd61700_mem_read(uint16_t addr)` | One-byte read via the CPU bus path (equivalent to `hd61700.read_mem()`). Includes side effects such as MMIO trapping and the UART-RX interrupt/sleep-wake check, so only use this where a real "CPU reads memory" access is actually intended |
+| `uint8_t hd61700_ram_read(uint16_t ram_offset)` | Side-effect-free direct read from main RAM (`0x6000`–`0x7FFF`, addressed by RAM-relative offset). Use this for bulk copies (e.g. DOTDS's LEDTP transfer) — calling `hd61700_mem_read()` in a loop there would re-trigger its UART side effect hundreds of times |
+
+`mp/ext/dotds_64dot.py`'s `register()` tries `import dotds64` and, if it succeeds, registers
+`dotds64.dotds_hook`/`char_hook` as call hooks. On older firmware where the module doesn't exist,
+it catches the `ImportError` and falls back automatically to the Python implementations
+(`_dotds_override()`/`_char_display_override()`).
+
 ---
 
 ## 4. CPU Core Details
@@ -204,7 +237,9 @@ A PC check is inserted at the top of the `hd61700_execute()` loop (before instru
 
 ```python
 # Register a hook (enabled by default)
-system.register_call_hook(0x5E20, my_handler)
+# owner is an arbitrary label string. If omitted, fn.__name__ is used instead
+# (often unhelpful for lambdas, so extension modules should pass it explicitly).
+system.register_call_hook(0x5E20, my_handler, owner="myext")
 
 # Remove a hook
 system.unregister_call_hook(0x5E20)
@@ -212,6 +247,10 @@ system.unregister_call_hook(0x5E20)
 # Temporarily disable / re-enable without removing
 system.disable_call_hook(0x5E20)
 system.enable_call_hook(0x5E20)
+
+# List all registered hooks as (address, owner, enabled) tuples — this is
+# what the emulator menu's "Hook Status" screen uses to render its list.
+system.list_call_hooks()
 ```
 
 ### C-Native Hooks
@@ -237,7 +276,8 @@ the write itself is cancelled.
 
 ```python
 # Register a hook over an address range (addr_start..addr_end; a single byte if omitted)
-system.register_mem_write_hook(0x68D0, my_write_handler, addr_end=0x68D0)
+# owner works the same way as for call hooks (an arbitrary label; defaults to fn.__name__).
+system.register_mem_write_hook(0x68D0, my_write_handler, addr_end=0x68D0, owner="myext")
 
 # Remove a hook
 system.unregister_mem_write_hook(0x68D0)
@@ -245,10 +285,25 @@ system.unregister_mem_write_hook(0x68D0)
 # Temporarily disable / re-enable without removing
 system.disable_mem_write_hook(0x68D0)
 system.enable_mem_write_hook(0x68D0)
+
+# List all registered hooks as (addr_start, addr_end, owner, enabled) tuples
+system.list_mem_write_hooks()
 ```
+
+### 6.2 Hook Status (Emulator Menu)
+
+A menu entry that lists every currently registered call_hook and mem_write_hook — address,
+owning module (owner), and enabled/disabled state — using `system.list_call_hooks()` /
+`system.list_mem_write_hooks()`. Available from the Win+F7 emulator menu as **Hook Status**
+(`_do_hook_status()` in `emulator_menu.py`). Use Up/Down to scroll, BREAK to close. Handy when
+debugging which extension owns a given address, or confirming a hook was correctly
+disabled/enabled (e.g. in MENU display mode).
 
 `mp/ext/dotds_64dot.py` is a real-world example: it registers a memory write hook on the DSPMD register
 (0x68D0) and toggles call hooks on or off depending on the value written (64-dot display row support).
+This whole mechanism is unconditionally disabled when `[display] lcd_height = 32` (the default) —
+the ROM's native implementation runs untouched — since the fix is unnecessary (and actually harmful)
+in 32-dot mode.
 See `doc/plan_mem_write_hook.md` for the design background (now implemented).
 
 ---
@@ -352,6 +407,11 @@ Allows BASIC programs to call Pico 2 peripherals (I2C, SPI, WiFi, etc.) via the 
 - Place a module in `mp/ext/` (on the device: `/ext/` or `/sd/ext/`).
 - If the module defines `register(system)`, it is called automatically on startup.
 - Parameters and results are exchanged via the extension work area (0x5F00–0x5FFF).
+- Every module under `ext/` (`bank_loader.py`, `vram_loader.py`, etc.) is **optional** — it only
+  does anything once a BASIC program explicitly `CALL`s it, and has no effect on the emulator's
+  core operation otherwise (the exception is `dotds_64dot.py`, an internal fix for 64-dot display
+  mode — it automatically enables/disables itself based on `[display] lcd_height`, and is always
+  inactive in 32-dot mode).
 
 See `doc/extension_api.md` for the full specification.
 

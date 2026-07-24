@@ -181,6 +181,11 @@ typedef struct {
   bool debug_log;
   bool key_debug_log;
   bool lcd_debug_log;
+  /* Narrow, independent trace: prints R0 (the CRTKY-returned key code) once
+   * per accepted keypress at ROM1 PC=0x94A6 ("wait for a key, handle the
+   * function keys", right after `cal CRTKY` returns). Decoupled from
+   * debug_log/key_debug_log so it stays low-volume regardless of those. */
+  bool rom_newall_debug_log;
 
   /* Cycle counter (decremented) */
   int icount;
@@ -245,6 +250,7 @@ int hd61700_step(hd61700_state_t *cpu);
 void hd61700_set_debug(hd61700_state_t *cpu, bool enable);
 void hd61700_set_key_debug(hd61700_state_t *cpu, bool enable);
 void hd61700_set_lcd_debug(hd61700_state_t *cpu, bool enable);
+void hd61700_set_rom_newall_debug(hd61700_state_t *cpu, bool enable);
 void hd61700_set_pc(hd61700_state_t *cpu, uint16_t pc);
 
 #endif /* HD61700_H */

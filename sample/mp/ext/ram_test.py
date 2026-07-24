@@ -45,13 +45,13 @@ _PATTERNS = [0x00, 0xFF, 0xAA, 0x55, 0xA5, 0x5A]
 def register(system):
     try:
         system.register_call_hook(CALL_ADDR,
-                                  lambda: _run_test(system))
+                                  lambda: _run_test(system), owner="ram_test")
         system.register_call_hook(BANK_SEL2_ADDR,
-                                  lambda: _select_bank(system, 2))
+                                  lambda: _select_bank(system, 2), owner="ram_test")
         system.register_call_hook(BANK_SEL3_ADDR,
-                                  lambda: _select_bank(system, 3))
+                                  lambda: _select_bank(system, 3), owner="ram_test")
         system.register_call_hook(BANK_RESTORE_ADDR,
-                                  lambda: _restore_bank(system))
+                                  lambda: _restore_bank(system), owner="ram_test")
         print(f"ram_test: CALL &H{CALL_ADDR:04X}  -> run all tests")
         print(f"ram_test: CALL &H{BANK_SEL2_ADDR:04X}  -> select BANK2 data")
         print(f"ram_test: CALL &H{BANK_SEL3_ADDR:04X}  -> select BANK3 data")

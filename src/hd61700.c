@@ -508,6 +508,10 @@ void hd61700_set_lcd_debug(hd61700_state_t *cpu, bool enable) {
   cpu->lcd_debug_log = enable;
 }
 
+void hd61700_set_rom_newall_debug(hd61700_state_t *cpu, bool enable) {
+  cpu->rom_newall_debug_log = enable;
+}
+
 void hd61700_set_pc(hd61700_state_t *cpu, uint16_t pc) { set_pc(cpu, pc); }
 
 void hd61700_timer_tick(hd61700_state_t *cpu) {
@@ -590,6 +594,52 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
         continue;
       }
       uint8_t op = read_op(cpu);
+      /* Narrow, independent trace: fires once per accepted keypress whose
+       * dispatched code is in the membrane/function-key range (>=0x90),
+       * which covers NEW ALL/CALC/MENU/etc but excludes ordinary character
+       * keys — keeps this quiet during normal typing. R0 holds the ROM's
+       * dispatched key code. */
+      if (cpu->rom_newall_debug_log && instr_pc == 0x94A6 && cpu->log_write &&
+          READ_REG(0) >= 0x90) {
+        char nabuf[96];
+        int nan = snprintf(nabuf, sizeof(nabuf),
+                            "ROM-NEWALL: PC=0x94A6 R0=0x%02X IA=0x%02X",
+                            READ_REG(0), REG_IA);
+        if (nan > 0)
+          cpu->log_write(cpu->log_ctx, nabuf);
+      }
+      /* NEW ALL routine entry: PC=0x8D38 (rom1.src). Fires only if the ROM
+       * actually took the `jp z,&H8D38` branch after dispatching R0=0x9A. */
+      if (cpu->rom_newall_debug_log && instr_pc == 0x8D38 && cpu->log_write) {
+        char neabuf[48];
+        int nean = snprintf(neabuf, sizeof(neabuf), "ROM-NEWALL-ENTRY: PC=0x8D38");
+        if (nean > 0)
+          cpu->log_write(cpu->log_ctx, neabuf);
+      }
+      /* NEW ALL: reached CLRME (clear memory) call at PC=0x8D97. $2:$4 hold
+       * the address/length arguments per the "cal &H016E ;CLRME" call. */
+      if (cpu->rom_newall_debug_log && instr_pc == 0x8D97 && cpu->log_write) {
+        char clbuf[80];
+        int cln = snprintf(clbuf, sizeof(clbuf),
+                            "ROM-NEWALL-CLRME: PC=0x8D97 ADDR=0x%04X LEN=0x%04X",
+                            REG_GET16(2), REG_GET16(4));
+        if (cln > 0)
+          cpu->log_write(cpu->log_ctx, clbuf);
+      }
+      /* Candidate key detected (debounce start): PC=0x062C, "store the
+       * coordinates of a pressed key, $0=KO $1,$2=KI" (rom0.src). Filtered
+       * to KO=6 (our NEW ALL row) only — this routine fires for every key
+       * on the whole keyboard, so an unfiltered trace floods the console. */
+      if (cpu->rom_newall_debug_log && instr_pc == 0x062C && cpu->log_write &&
+          READ_REG(0) == 6) {
+        char cabuf[96];
+        int can = snprintf(cabuf, sizeof(cabuf),
+                            "ROM-CANDIDATE: PC=0x062C KO=0x%02X KI1=0x%02X "
+                            "KI2=0x%02X",
+                            READ_REG(0), READ_REG(1), READ_REG(2));
+        if (can > 0)
+          cpu->log_write(cpu->log_ctx, cabuf);
+      }
       if (cpu->debug_log && cpu->key_debug_log && instr_pc == 0x062C) {
         cpu_log(cpu,
                 "TRACE 062C: OP=0x%02X F=0x%02X IA=0x%02X IB=0x%02X IE=0x%02X "

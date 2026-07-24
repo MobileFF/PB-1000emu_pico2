@@ -37,7 +37,7 @@ _i2c = None  # 遅延初期化。None の間は未接続扱い。
 
 def register(system):
     """pb1000.py の _ext_load_modules() から呼ばれる。"""
-    system.register_call_hook(CALL_ADDR, lambda: _read(system))
+    system.register_call_hook(CALL_ADDR, lambda: _read(system), owner="dht20")
     print(f"dht20: hook {CALL_ADDR:#06x} ready (I2C1 GP2/GP3, lazy init)")
 
 

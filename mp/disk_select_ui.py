@@ -1,6 +1,6 @@
 """
 Disk image hot-swap UI for PB-1000 emulator.
-Presents a list of .img files on the ILI9341 display during emulation.
+Presents a list of .img files on the LCD (ILI9341/ST7796) during emulation.
 """
 import os
 import time

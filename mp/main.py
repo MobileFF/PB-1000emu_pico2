@@ -27,7 +27,7 @@ from main_runtime import (
     service_timer_realtime,
     update_frame_if_due,
 )
-from main_actions import handle_key_status_and_capture, handle_save_state_request, handle_disk_swap
+from main_actions import handle_key_status_and_capture, handle_disk_swap
 from main_cleanup import dump_shutdown_state
 
 
@@ -84,6 +84,21 @@ def main():
     print(f"Profile: {selected or '(none)'}")
     display.fill_rect(0, 0, display.width, display.height, 0x0000)
 
+    # USB keyboard input isn't needed again until the interactive main loop
+    # starts — configure_usb_keyboard_routing() (called right after
+    # configure_c_keyboard(), below) already restarts the background timer
+    # right before that point. Stopping it here means it stays off for the
+    # whole automatic setup phase that follows (ROM/RAM/VFDD loading, NTP
+    # sync, keymap sync in configure_c_keyboard()) — none of which involves
+    # any USB polling — avoiding a rare interrupt/flash timing hazard we've
+    # observed during that phase. No-op if the timer was never started
+    # (e.g. enable_usb_kbd=false).
+    try:
+        import usb_host
+        usb_host.stop_bg_timer()
+    except Exception:
+        pass
+
     # Step 5: Merged config (global + profile-specific override)
     cfg = load_config(profile_dir)
 
@@ -118,7 +133,6 @@ def main():
         key_hold_ms=get_int(cfg, "keyboard", "key_hold_ms"),
         key_release_hard_timeout_ms=get_int(cfg, "keyboard", "key_release_hard_timeout_ms"),
         inter_key_gap_ms=get_int(cfg, "keyboard", "inter_key_gap_ms"),
-        on_int_pulse_ms=30,
     )
     touch_input = TouchInputManager()
     cursor_repeat = CursorRepeatManager()
@@ -162,6 +176,23 @@ def main():
     print("[MEM] after  load_state: free=%d alloc=%d" %
           (gc.mem_free(), gc.mem_alloc()))
 
+    # Import emulator_menu now (after the ROM/RAM/VFDD one-time loads are
+    # done, instead of lazily on first F7 press). emulator_menu.py only
+    # imports `time` at module level (no dependency on `system`/CPU state),
+    # so it's safe here. Compiling it needs a sizable contiguous
+    # allocation — it has grown substantially (Full Capture, Hook Status,
+    # etc.) — and doing it lazily at F7 time meant competing with whatever
+    # fragmentation has built up by then. NOTE: it must NOT be imported any
+    # earlier than this (e.g. before the ROM buffer reservation above) —
+    # that was tried and it ate enough contiguous heap to make even the
+    # smallest ROM buffer reservation fail, breaking ROM1/VFDD loading.
+    # The later `from emulator_menu import show_emulator_menu` in the main
+    # loop then just hits sys.modules.
+    try:
+        import emulator_menu
+    except Exception as _e:
+        print(f"emulator_menu preload failed: {_e}")
+
     # WiFi & NTP Synchronization
     if get_bool(cfg, "ntp", "enable"):
         ssid = get_str(cfg, "wifi", "ssid")
@@ -203,6 +234,32 @@ def main():
                                  pio_uart_baudrate=pio_uart_baudrate)
     cpu_core = configure_c_keyboard(system, enable_usb_kbd=enable_usb_kbd)
     configure_usb_keyboard_routing()
+
+    # KEY_INT pulse interval (see [keyboard] key_pulse_interval_ms in
+    # pb1000.ini). Default 25ms; real hardware's Key/Pulse ISR runs every
+    # 3.9ms. Lower values shorten how long the ROM's keyboard debounce takes
+    # in wall-clock time. Can also be tuned live: hd61700.set_key_pulse_interval_ms(ms).
+    if cpu_core is not None and hasattr(cpu_core, 'set_key_pulse_interval_ms'):
+        _kb_pulse_ms = get_int(cfg, "keyboard", "key_pulse_interval_ms")
+        if _kb_pulse_ms > 0:
+            cpu_core.set_key_pulse_interval_ms(_kb_pulse_ms)
+
+    # Debug tracing (see [debug] in pb1000.ini). Config-driven so it can be
+    # toggled without a REPL Ctrl-C / mpremote session.
+    if cpu_core is not None:
+        _dbg_cpu = get_bool(cfg, "debug", "cpu_debug")
+        _dbg_key = get_bool(cfg, "debug", "key_debug")
+        _dbg_lcd = get_bool(cfg, "debug", "lcd_debug")
+        _dbg_newall = get_bool(cfg, "debug", "newall_debug")
+        if _dbg_cpu or _dbg_key or _dbg_lcd:
+            cpu_core.set_debug(_dbg_cpu or _dbg_key or _dbg_lcd)
+            cpu_core.set_key_debug(_dbg_key)
+            cpu_core.set_lcd_debug(_dbg_lcd)
+            print(f"[DEBUG] cpu={_dbg_cpu} key={_dbg_key} lcd={_dbg_lcd}")
+        if _dbg_newall and hasattr(cpu_core, 'set_newall_debug'):
+            cpu_core.set_newall_debug(True)
+            print("[DEBUG] newall=True (F12 press/release trace only)")
+
     system.power_on()
     print(f"System initialized. PC={system.pc:#06x}")
     print("Interactive Mode: USB keyboard input enabled.")
@@ -236,6 +293,16 @@ def main():
     gui_active_until = 0
     _touch = getattr(system, 'touch', None)
 
+    # Drain the UART keyboard's RX buffer once per CPU step_chunk (same
+    # cadence as service_pio_uart_bridge) instead of once per full
+    # active_step_count outer-loop iteration. Bytes arrive independently of
+    # CPU speed, so the previous once-per-outer-loop cadence could let the
+    # RX buffer fill up during a single active_step_count burst.
+    _uart_kbd_drain = None
+    if enable_uart_kbd:
+        def _uart_kbd_drain():
+            keyboard_input.drain_uart(system)
+
     try:
         while True:
             service_pio_uart_bridge(system, cpu_core)
@@ -255,6 +322,7 @@ def main():
                 active_steps=active_step_count,
                 sleep_ms=sleep_poll_ms,
                 step_chunk=step_chunk,
+                extra_svc=_uart_kbd_drain,
             )
 
             now = time.ticks_ms()
@@ -276,7 +344,7 @@ def main():
                     gui_active_until = 0
                     gc.collect()
                     from emulator_menu import show_emulator_menu
-                    result = show_emulator_menu(system, display, fkbar, joystick_input, cfg)
+                    result = show_emulator_menu(system, display, fkbar, keyboard_input, joystick_input, cfg)
                     joystick_input = result['joystick_input']
             elif sc == 0x53:  # NumLock → RESET
                 system.reset_emulator()
@@ -309,7 +377,6 @@ def main():
 
             _sc_mod = 8 if time.ticks_diff(gui_active_until, now) > 0 else 0
             handle_key_status_and_capture(system, sc, _sc_mod)
-            handle_save_state_request(system, enable_usb_kbd=enable_usb_kbd)
 
             frame_time = update_frame_if_due(
                 system,

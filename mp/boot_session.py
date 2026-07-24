@@ -84,7 +84,7 @@ def select_profile_ui(display, profiles, default, timeout_ms=30000):
 
 def _swap16(c):
     """Swap bytes of an RGB565 color value.
-    framebuf.RGB565 stores pixels little-endian; ILI9341 expects big-endian.
+    framebuf.RGB565 stores pixels little-endian; the LCD panel (ILI9341/ST7796) expects big-endian.
     """
     return ((c & 0xFF) << 8) | (c >> 8)
 
@@ -113,7 +113,7 @@ def _draw_text(display, x, y, text, fg, bg=0x0000):
 
 
 def _draw_profile_ui(display, profiles, sel, timeout_ms):
-    """Render profile list on LCD using ILI9341-compatible drawing."""
+    """Render profile list on LCD using the common ILI9341/ST7796 drawing API (set_window/fill_rect)."""
     try:
         W = display.width
         H = display.height

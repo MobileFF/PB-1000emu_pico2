@@ -10,6 +10,7 @@ Dangerous operations:
   RAM Load  — loads state then forces reset+power_on
   vFDD off  — refused while FDD interface is powered
   RS-232C   — warns but allows toggle while mid-transfer is unlikely
+  NEW ALL   — erases all user memory; requires confirmation
 """
 
 import time
@@ -65,13 +66,19 @@ def _badge(on):
     return (" ON", _S_ON) if on else ("OFF", _S_OFF)
 
 
-def _build_items(system, state):
-    """Build menu item list from current system + state.
+def _build_top_items():
+    """Top-level menu: one row per category, plus Exit."""
+    return [
+        {'id': 'cat_toggles', 'label': 'Toggles', 'badge': '>', 'badge_color': _FTR},
+        {'id': 'cat_storage', 'label': 'Storage', 'badge': '>', 'badge_color': _FTR},
+        {'id': 'cat_display', 'label': 'Display', 'badge': '>', 'badge_color': _FTR},
+        {'id': 'cat_system',  'label': 'System',  'badge': '>', 'badge_color': _FTR},
+        {'type': 'separator'},
+        {'id': 'exit', 'label': 'Exit'},
+    ]
 
-    state dict keys:
-      joystick_input   — current joystick manager or None
-      cfg              — merged config dict
-    """
+
+def _build_toggle_items(system, state):
     items = []
 
     # Serial Console
@@ -102,36 +109,44 @@ def _build_items(system, state):
     b, bc = _badge(getattr(system.lcd, 'vdp_enabled', True))
     items.append({'id': 'vdp',      'label': 'Color VRAM (VDP)', 'badge': b, 'badge_color': bc})
 
-    items.append({'type': 'separator'})
+    return items
 
-    # Storage
-    items.append({'id': 'fd_swap',  'label': 'FD Swap'})
-    items.append({'id': 'ram_save', 'label': 'RAM Save'})
-    items.append({'id': 'ram_load', 'label': 'RAM Load'})
-    items.append({'id': 'vram_save','label': 'VRAM Save'})
 
-    items.append({'type': 'separator'})
+def _build_storage_items():
+    return [
+        {'id': 'fd_swap',      'label': 'FD Swap'},
+        {'id': 'ram_save',     'label': 'RAM Save'},
+        {'id': 'ram_load',     'label': 'RAM Load'},
+        {'id': 'vram_save',    'label': 'VRAM Save'},
+        {'id': 'full_capture', 'label': 'Full Capture'},
+    ]
 
-    # Display
+
+def _build_display_items(system):
     fg_c = _rgb565_to_rgb332(system.lcd._color_fg)
     bg_c = _rgb565_to_rgb332(system.lcd._color_bg_on)
-    items.append({'id': 'fg_color', 'label': 'Foreground Color', 'badge': "%02X" % fg_c, 'badge_color': _FG})
-    items.append({'id': 'bg_color', 'label': 'Background Color', 'badge': "%02X" % bg_c, 'badge_color': _FG})
+    return [
+        {'id': 'fg_color', 'label': 'Foreground Color', 'badge': "%02X" % fg_c, 'badge_color': _FG},
+        {'id': 'bg_color', 'label': 'Background Color', 'badge': "%02X" % bg_c, 'badge_color': _FG},
+    ]
 
-    items.append({'type': 'separator'})
-    items.append({'id': 'exit',     'label': 'Exit'})
 
-    return items
+def _build_system_items():
+    return [
+        {'id': 'hook_status', 'label': 'Hook Status'},
+        {'id': 'reset',       'label': 'Reset'},
+        {'id': 'newall',      'label': 'NEW ALL (clear memory)'},
+    ]
 
 
 # ── Menu renderer ──────────────────────────────────────────────────────────────
 
-def _draw_menu(display, items, cursor, scroll, msg=""):
+def _draw_menu(display, title, hint, items, cursor, scroll, msg=""):
     W, H = display.width, display.height
     display.fill_rect(0, 0, W, H, _BG)
 
-    _draw_text(display, 4,  4, "==  EMULATOR MENU  ==", _HDR)
-    _draw_text(display, 4, 14, "GUI+F7:open  EXE:select  BRK:exit", _FTR)
+    _draw_text(display, 4,  4, title, _HDR)
+    _draw_text(display, 4, 14, hint, _FTR)
 
     y = _HDR_H
     vis_end = min(len(items), scroll + _MAX_VIS)
@@ -166,15 +181,6 @@ def _draw_menu(display, items, cursor, scroll, msg=""):
         display.fill_rect(0, H - _FTR_H, W, _FTR_H, _BG)
         _draw_text(display, 4, H - _FTR_H + 3, msg_trunc, _WARN)
 
-
-# ── Color picker sub-menu ─────────────────────────────────────────────────────
-
-_COLORS = [
-    ("Black",   0x0000), ("White",   0xFFFF), ("Green",   0x07E0),
-    ("Amber",   0xFD20), ("Blue",    0x001F), ("Cyan",    0x07FF),
-    ("Magenta", 0xF81F), ("Yellow",  0xFFE0), ("DkGreen", 0x0210),
-    ("DkGrey",  0x8410), ("LtGrey",  0xC618), ("Navy",    0x000F),
-]
 
 # USB HID scancode → printable char (a-z, 0-9, hyphen only — for folder names)
 _SC_ALPHA = {
@@ -211,49 +217,6 @@ def _rgb332_to_rgb565(c):
     g6 = (g3 << 3) | g3
     b5 = (b2 << 3) | (b2 << 1) | (b2 >> 1)
     return (r5 << 11) | (g6 << 5) | b5
-
-
-def _pick_color(display, title, current):
-    """Color picker sub-menu. Returns chosen RGB565 value or current on cancel."""
-    import hd61700
-    W, H = display.width, display.height
-
-    cursor = 0
-    for i, (_, c) in enumerate(_COLORS):
-        if c == current:
-            cursor = i
-            break
-
-    def _redraw_picker():
-        display.fill_rect(0, 0, W, H, _BG)
-        _draw_text(display, 4, 4,    title,                 _HDR)
-        _draw_text(display, 4, H-10, "EXE:ok  BRK:cancel",  _FTR)
-        y = 20
-        for i, (name, col) in enumerate(_COLORS):
-            is_cur = (i == cursor)
-            bg_r = _SEL_BG if is_cur else _BG
-            fg_r = _SEL_FG if is_cur else _FG
-            display.fill_rect(4,       y, 18, 8, col)     # color swatch
-            display.fill_rect(24,      y, W - 24, 8, bg_r)
-            pfx = "> " if is_cur else "  "
-            _draw_text(display, 24, y, pfx + name, fg_r, bg_r)
-            y += _ROW_H
-
-    _redraw_picker()
-    prev_sc = -1
-    while True:
-        sc = hd61700.get_last_key()
-        if sc != prev_sc:
-            prev_sc = sc
-            if sc == 0x52 and cursor > 0:
-                cursor -= 1; _redraw_picker()
-            elif sc == 0x51 and cursor < len(_COLORS) - 1:
-                cursor += 1; _redraw_picker()
-            elif sc == 0x28:
-                return _COLORS[cursor][1]
-            elif sc == 0x29:
-                return current
-        time.sleep_ms(30)
 
 
 # ── Text input sub-menu ────────────────────────────────────────────────────────
@@ -358,75 +321,6 @@ def _show_color_preview(display, title, rgb332):
                 return True
             elif sc == 0x29: # BRK
                 return False
-        time.sleep_ms(30)
-
-
-# ── RAM save folder picker ─────────────────────────────────────────────────────
-
-def _pick_save_dir(display, dirs, current_dir):
-    """Folder picker for RAM save.
-    items[0] = New folder option; items[1..] = existing dir names.
-    Returns ('existing', path) | ('new', None) | (None, None) on cancel."""
-    import hd61700
-    W, H = display.width, display.height
-    max_vis = (H - _HDR_H - _FTR_H) // _ROW_H
-
-    all_items = [None] + dirs   # None sentinel = "New folder"
-
-    # Default cursor: current profile match, else first existing dir, else New
-    cursor = 1 if dirs else 0
-    for i, name in enumerate(dirs, 1):
-        if _RAM_BASE + "/" + name == current_dir:
-            cursor = i
-            break
-    scroll = max(0, cursor - max_vis + 1)
-
-    def _redraw():
-        display.fill_rect(0, 0, W, H, _BG)
-        _draw_text(display, 4,  4, "== RAM SAVE ==", _HDR)
-        _draw_text(display, 4, 14, "EXE:save  BRK:cancel", _FTR)
-        y = _HDR_H
-        for i in range(scroll, min(len(all_items), scroll + max_vis)):
-            is_cur = (i == cursor)
-            bg_r = _SEL_BG if is_cur else _BG
-            fg_r = _SEL_FG if is_cur else _FG
-            display.fill_rect(0, y - 1, W, _ROW_H, bg_r)
-            pfx = "> " if is_cur else "  "
-            if all_items[i] is None:
-                col = _WARN if is_cur else _FTR
-                _draw_text(display, 4, y, pfx + "[ New folder... ]", col, bg_r)
-            else:
-                name = all_items[i]
-                mark = " *" if (_RAM_BASE + "/" + name == current_dir) else ""
-                _draw_text(display, 4, y, pfx + name + mark, fg_r, bg_r)
-            y += _ROW_H
-
-    _redraw()
-    prev_sc = -1
-    while True:
-        sc = hd61700.get_last_key()
-        if sc != prev_sc:
-            prev_sc = sc
-            if sc == 0x52:                                        # UP (wraps to bottom)
-                cursor = cursor - 1 if cursor > 0 else len(all_items) - 1
-                if cursor < scroll:
-                    scroll = cursor
-                elif cursor >= scroll + max_vis:
-                    scroll = max(0, cursor - max_vis + 1)
-                _redraw()
-            elif sc == 0x51:                                      # DOWN (wraps to top)
-                cursor = cursor + 1 if cursor < len(all_items) - 1 else 0
-                if cursor >= scroll + max_vis:
-                    scroll = cursor - max_vis + 1
-                elif cursor < scroll:
-                    scroll = 0
-                _redraw()
-            elif sc == 0x28:
-                if all_items[cursor] is None:
-                    return 'new', None
-                return 'existing', _RAM_BASE + "/" + all_items[cursor]
-            elif sc == 0x29:
-                return None, None
         time.sleep_ms(30)
 
 
@@ -613,231 +507,33 @@ def _confirm(display, title, detail=""):
         time.sleep_ms(30)
 
 
+def _do_reset(system):
+    system.reset_emulator()
+    return "Reset executed"
+
+
+def _do_newall(system, keyboard_input, display):
+    """Queue the NEW ALL matrix key (Win+F12 on real HW) after confirmation.
+
+    Must go through the keyboard queue rather than a direct press/release:
+    CPU stepping is paused while the menu is open, so the ROM can only see
+    the key transition once the main loop resumes and services it.
+    """
+    import keymap
+    entry = keymap.ADV_MAP.get((0x45, 8))
+    if entry is None:
+        return "!! NEW ALL: not mapped in keymap"
+    coord = entry[0][0]
+    if not _confirm(display, "NEW ALL: erase all memory?", "This cannot be undone"):
+        return ""
+    keyboard_input.enqueue_key(coord, 'NEWALL')
+    return "NEW ALL queued"
+
+
 def _do_fd_swap(system, display, fkbar):
     from main_actions import handle_disk_swap
     handle_disk_swap(system, display, fkbar)
     return "FD swap done"
-
-
-def _do_ram_save(system, display):
-    import os
-    try:
-        entries = sorted(os.listdir(_RAM_BASE))
-    except OSError:
-        entries = []
-    dirs = []
-    for name in entries:
-        try:
-            if os.stat(_RAM_BASE + "/" + name)[0] & 0x4000:
-                dirs.append(name)
-        except OSError:
-            pass
-
-    current_dir = getattr(system, 'profile_dir', None)
-    kind, path = _pick_save_dir(display, dirs, current_dir)
-
-    if kind is None:
-        return ""   # cancelled at folder picker
-
-    if kind == 'new':
-        name = _text_input(display, "New folder name:")
-        if name is None:
-            return ""   # cancelled at text input
-        path = _RAM_BASE + "/" + name
-    elif kind == 'existing':
-        folder = path.rsplit("/", 1)[-1]
-        if not _confirm(display, "Overwrite?", folder):
-            return ""   # cancelled at confirmation
-
-    try:
-        system.save_state(path=path)
-        return "RAM saved: " + path.rsplit("/", 1)[-1]
-    except Exception as e:
-        return f"!! RAM save error: {e}"
-
-
-_RAM_BASE = "/sd/rams"
-
-def _pick_ram_dir(display, dirs, current_dir):
-    """Scrollable folder picker for /sd/rams/. Returns full path or None on cancel."""
-    import hd61700
-    W, H = display.width, display.height
-    max_vis = (H - _HDR_H - _FTR_H) // _ROW_H
-
-    # Set initial cursor to current profile if present
-    cursor = 0
-    for i, name in enumerate(dirs):
-        if _RAM_BASE + "/" + name == current_dir:
-            cursor = i
-            break
-    scroll = max(0, cursor - max_vis + 1)
-
-    def _redraw():
-        display.fill_rect(0, 0, W, H, _BG)
-        _draw_text(display, 4,  4, "== RAM LOAD ==", _HDR)
-        _draw_text(display, 4, 14, "EXE:load  BRK:cancel", _FTR)
-        y = _HDR_H
-        for i in range(scroll, min(len(dirs), scroll + max_vis)):
-            name = dirs[i]
-            is_cur = (i == cursor)
-            bg_r = _SEL_BG if is_cur else _BG
-            fg_r = _SEL_FG if is_cur else _FG
-            display.fill_rect(0, y - 1, W, _ROW_H, bg_r)
-            pfx = "> " if is_cur else "  "
-            mark = " *" if (_RAM_BASE + "/" + name == current_dir) else ""
-            _draw_text(display, 4, y, pfx + name + mark, fg_r, bg_r)
-            y += _ROW_H
-
-    _redraw()
-    prev_sc = -1
-    while True:
-        sc = hd61700.get_last_key()
-        if sc != prev_sc:
-            prev_sc = sc
-            if sc == 0x52 and dirs:                     # UP (wraps to bottom)
-                cursor = cursor - 1 if cursor > 0 else len(dirs) - 1
-                if cursor < scroll:
-                    scroll = cursor
-                elif cursor >= scroll + max_vis:
-                    scroll = max(0, cursor - max_vis + 1)
-                _redraw()
-            elif sc == 0x51 and dirs:                   # DOWN (wraps to top)
-                cursor = cursor + 1 if cursor < len(dirs) - 1 else 0
-                if cursor >= scroll + max_vis:
-                    scroll = cursor - max_vis + 1
-                elif cursor < scroll:
-                    scroll = 0
-                _redraw()
-            elif sc == 0x28:                            # EXE
-                return _RAM_BASE + "/" + dirs[cursor]
-            elif sc == 0x29:                            # BRK
-                return None
-        time.sleep_ms(30)
-
-
-def _do_ram_load(system, display):
-    import os
-    # Collect subdirectories of /sd/rams
-    try:
-        entries = sorted(os.listdir(_RAM_BASE))
-    except OSError:
-        return "!! " + _RAM_BASE + " not found"
-    dirs = []
-    for name in entries:
-        try:
-            if os.stat(_RAM_BASE + "/" + name)[0] & 0x4000:
-                dirs.append(name)
-        except OSError:
-            pass
-    if not dirs:
-        return "!! No RAM saves found in " + _RAM_BASE
-
-    current_dir = getattr(system, 'profile_dir', None)
-    selected = _pick_ram_dir(display, dirs, current_dir)
-    if selected is None:
-        return ""  # cancelled — caller will redraw menu, no break
-    try:
-        system.load_state(path=selected)
-        system.reset_emulator()
-        system.power_on(force_reset=True)
-        return "RAM loaded: " + selected.rsplit("/", 1)[-1]
-    except Exception as e:
-        return f"!! RAM load error: {e}"
-
-
-def _do_vram_save(system):
-    import lcd_c as _lc
-    import os as _os
-    import utime as _utime
-    import gc as _gc
-    W = 192
-
-    # Free heap before allocating VRAM snapshots
-    _gc.collect()
-
-    num_pages = _lc.get_num_pages()  # 4 (32-dot) or 8 (64-dot)
-    H = num_pages * 8                # 32 or 64 pixel rows
-
-    vram_active = system.lcd.vram[:num_pages * W]            # active mono VRAM bytes only
-    cvram = _lc.get_color_vram() if hasattr(_lc, 'get_color_vram') else None  # 12288 B ref
-    edtop = bytes(system.ram[0x0100:0x0200])                 # 256 B EDTOP VRAM (0x6100-0x61FF)
-
-    # Determine writable base directory (/sd/screenshots preferred)
-    try:
-        _os.listdir("/sd")
-        base = "/sd/screenshots"
-    except OSError:
-        base = "/screenshots"
-    try:
-        _os.mkdir(base)
-    except OSError:
-        pass  # already exists
-
-    # Timestamp suffix: YYYYMMDD_HHMMSS
-    try:
-        t = _utime.localtime()
-        ts = "%04d%02d%02d_%02d%02d%02d" % (t[0], t[1], t[2], t[3], t[4], t[5])
-    except Exception:
-        ts = "000000_000000"
-
-    saved = []
-    errors = []
-
-    def _try(name, fn):
-        try:
-            with open(base + "/" + name, "wb") as f:
-                fn(f)
-            saved.append(name)
-        except Exception:
-            errors.append(name)
-
-    # ── 1. Mono VRAM — raw binary (num_pages * W bytes) ─────────────────────
-    _try("vram_%s.bin" % ts, lambda f: f.write(vram_active))
-
-    # ── 2. Mono VRAM — PBM image (P4 binary, 192 × H) ───────────────────────
-    def _pbm(f):
-        f.write(("P4\n%d %d\n" % (W, H)).encode())
-        row = bytearray(W // 8)   # 24 bytes per row
-        for y in range(H):
-            page, bit = y >> 3, y & 7
-            for i in range(W // 8):
-                p = 0
-                for j in range(8):
-                    p = (p << 1) | ((vram_active[page * W + i * 8 + j] >> bit) & 1)
-                row[i] = p
-            f.write(row)
-    _try("vram_%s.pbm" % ts, _pbm)
-
-    # ── 3. EDTOP VRAM — raw binary (256 bytes, 0x6100-0x61FF) ───────────────
-    _try("edtop_%s.bin" % ts, lambda f: f.write(edtop))
-
-    if cvram is not None:
-        # ── 3. Color VRAM — raw binary (12,288 bytes) ───────────────────────
-        _try("color_vram_%s.bin" % ts, lambda f: f.write(cvram))
-
-        # ── 4. Color VRAM — PPM image (P6 binary, 192×64, RGB332→RGB888) ───
-        H_C = len(cvram) // W   # = 64
-        def _ppm(f):
-            f.write(("P6\n%d %d\n255\n" % (W, H_C)).encode())
-            row = bytearray(W * 3)
-            for y in range(H_C):
-                for x in range(W):
-                    b = cvram[y * W + x]
-                    r = (b >> 5) & 7
-                    g = (b >> 2) & 7
-                    bl = b & 3
-                    row[x*3]   = (r << 5) | (r << 2) | (r >> 1)
-                    row[x*3+1] = (g << 5) | (g << 2) | (g >> 1)
-                    row[x*3+2] = (bl << 6) | (bl << 4) | (bl << 2) | bl
-                f.write(row)
-        _try("color_vram_%s.ppm" % ts, _ppm)
-
-    if not saved:
-        return "!! VRAM save: no files written"
-    msg = "VRAM saved: %d file%s" % (len(saved), "s" if len(saved) > 1 else "")
-    if errors:
-        msg += " (%d err)" % len(errors)
-    return msg
 
 
 def _do_fg_color(system, display):
@@ -880,30 +576,34 @@ def _next_cursor(items, cur, direction):
     return cur
 
 
-# ── Main entry point ─────────────────────────────────────────────────────────
+# ── Generic menu loop (shared by top level and every category submenu) ───────
 
-def show_emulator_menu(system, display, fkbar, joystick_input, cfg):
-    """
-    Show the emulator runtime menu.  Returns a dict:
-      {'joystick_input': <new value or unchanged>}
+def _run_menu(display, title, hint, build_items_fn, dispatch_fn):
+    """Run one menu level until it closes.
 
-    CPU stepping is paused implicitly because main() blocks here.
+    build_items_fn() -> item list, called on entry and after every EXE (so
+    badges stay current).
+
+    dispatch_fn(item_id, items, cursor) is called on EXE and must return
+    (msg, close_all):
+      close_all=True  — unwind every nested menu level back to the caller of
+                         show_emulator_menu (Exit, Reset, a successful RAM
+                         Load or NEW ALL — anything that needs the main loop
+                         to resume CPU stepping right away).
+      close_all=False — show msg, refresh the item list, keep looping here.
+
+    Returns True if the whole menu system should close, False if BRK was
+    pressed and this level should just return to its caller ("back").
     """
     import hd61700
 
-    state = {
-        'joystick_input': joystick_input,
-        '_joy_saved': None,
-    }
     msg = ""
-    items = _build_items(system, state)
-
-    # Start cursor on first non-separator item
+    items = build_items_fn()
     cursor = _next_cursor(items, -1, 1)
     scroll = 0
     prev_sc = -1
 
-    _draw_menu(display, items, cursor, scroll, msg)
+    _draw_menu(display, title, hint, items, cursor, scroll, msg)
 
     while True:
         sc = hd61700.get_last_key()
@@ -920,7 +620,7 @@ def show_emulator_menu(system, display, fkbar, joystick_input, cfg):
                     scroll = cursor
                 elif cursor >= scroll + _MAX_VIS:        # wrapped to bottom
                     scroll = max(0, cursor - _MAX_VIS + 1)
-                _draw_menu(display, items, cursor, scroll, msg)
+                _draw_menu(display, title, hint, items, cursor, scroll, msg)
 
         elif sc == 0x51: # DOWN
             new = _next_cursor(items, cursor, 1)
@@ -930,49 +630,142 @@ def show_emulator_menu(system, display, fkbar, joystick_input, cfg):
                     scroll = cursor - _MAX_VIS + 1
                 elif cursor < scroll:                    # wrapped to top
                     scroll = 0
-                _draw_menu(display, items, cursor, scroll, msg)
+                _draw_menu(display, title, hint, items, cursor, scroll, msg)
 
         elif sc == 0x28: # EXE — activate item
             item_id = items[cursor].get('id', '')
+            msg, close_all = dispatch_fn(item_id, items, cursor)
+            if close_all:
+                return True
+            items = build_items_fn()  # refresh badges
+            _draw_menu(display, title, hint, items, cursor, scroll, msg)
 
-            if item_id == 'exit':
-                break
-            elif item_id == 'console':
-                msg = _do_console(system)
-            elif item_id == 'rs232':
-                msg = _do_rs232(system)
-            elif item_id == 'vfdd':
-                msg = _do_vfdd(system)
-            elif item_id == 'beep':
-                msg = _do_beep(system, cfg)
-            elif item_id == 'joystick':
-                msg = _do_joystick(state)
-            elif item_id == 'vdp':
-                new_state = not getattr(system.lcd, 'vdp_enabled', True)
-                system.lcd.set_vdp_enable(new_state)
-                msg = "Color VRAM: " + ("ON" if new_state else "OFF (global color)")
-                system.lcd.dirty = True
-            elif item_id == 'fd_swap':
-                msg = _do_fd_swap(system, display, fkbar)
-            elif item_id == 'ram_save':
-                msg = _do_ram_save(system, display)
-            elif item_id == 'ram_load':
-                msg = _do_ram_load(system, display)
-                if msg and not msg.startswith("!!"):
-                    # Load succeeded — exit menu so main loop re-syncs after reset
-                    break
-            elif item_id == 'vram_save':
-                msg = _do_vram_save(system)
-            elif item_id == 'fg_color':
-                msg = _do_fg_color(system, display)
-            elif item_id == 'bg_color':
-                msg = _do_bg_color(system, display)
+        elif sc == 0x29: # BREAK — back one level
+            return False
 
-            items = _build_items(system, state)  # refresh badges
-            _draw_menu(display, items, cursor, scroll, msg)
 
-        elif sc == 0x29: # BREAK — exit
-            break
+# ── Per-category dispatch ─────────────────────────────────────────────────────
+
+def _dispatch_toggles(item_id, system, state, cfg):
+    if item_id == 'console':
+        return _do_console(system), False
+    if item_id == 'rs232':
+        return _do_rs232(system), False
+    if item_id == 'vfdd':
+        return _do_vfdd(system), False
+    if item_id == 'beep':
+        return _do_beep(system, cfg), False
+    if item_id == 'joystick':
+        return _do_joystick(state), False
+    if item_id == 'vdp':
+        new_state = not getattr(system.lcd, 'vdp_enabled', True)
+        system.lcd.set_vdp_enable(new_state)
+        system.lcd.dirty = True
+        return "Color VRAM: " + ("ON" if new_state else "OFF (global color)"), False
+    return "", False
+
+
+def _dispatch_storage(item_id, system, display, fkbar):
+    if item_id == 'fd_swap':
+        return _do_fd_swap(system, display, fkbar), False
+    if item_id == 'ram_save':
+        from emulator_menu_ext import _do_ram_save
+        return _do_ram_save(system, display), False
+    if item_id == 'ram_load':
+        from emulator_menu_ext import _do_ram_load
+        msg = _do_ram_load(system, display)
+        # Load succeeded — exit menu so main loop re-syncs after reset
+        return msg, bool(msg) and not msg.startswith("!!")
+    if item_id == 'vram_save':
+        from emulator_menu_ext import _do_vram_save
+        return _do_vram_save(system), False
+    if item_id == 'full_capture':
+        from emulator_menu_ext import _do_full_capture
+        return _do_full_capture(system, display, fkbar), False
+    return "", False
+
+
+def _dispatch_display(item_id, system, display):
+    if item_id == 'fg_color':
+        return _do_fg_color(system, display), False
+    if item_id == 'bg_color':
+        return _do_bg_color(system, display), False
+    return "", False
+
+
+def _dispatch_system(item_id, system, display, keyboard_input):
+    if item_id == 'hook_status':
+        from emulator_menu_ext import _do_hook_status
+        _do_hook_status(system, display)
+        return "", False
+    if item_id == 'reset':
+        # main loop must resume stepping from PC=0
+        return _do_reset(system), True
+    if item_id == 'newall':
+        msg = _do_newall(system, keyboard_input, display)
+        # Queued — exit menu so main loop resumes CPU stepping and the
+        # keyboard manager can press/release the key.
+        return msg, bool(msg) and not msg.startswith("!!")
+    return "", False
+
+
+def _dispatch_top(item_id, system, display, fkbar, keyboard_input, cfg, state):
+    if item_id == 'exit':
+        return "", True
+    if item_id == 'cat_toggles':
+        closed = _run_menu(
+            display, "-- TOGGLES --", "EXE:select  BRK:back",
+            lambda: _build_toggle_items(system, state),
+            lambda iid, items, cur: _dispatch_toggles(iid, system, state, cfg),
+        )
+        return "", closed
+    if item_id == 'cat_storage':
+        closed = _run_menu(
+            display, "-- STORAGE --", "EXE:select  BRK:back",
+            _build_storage_items,
+            lambda iid, items, cur: _dispatch_storage(iid, system, display, fkbar),
+        )
+        return "", closed
+    if item_id == 'cat_display':
+        closed = _run_menu(
+            display, "-- DISPLAY --", "EXE:select  BRK:back",
+            lambda: _build_display_items(system),
+            lambda iid, items, cur: _dispatch_display(iid, system, display),
+        )
+        return "", closed
+    if item_id == 'cat_system':
+        closed = _run_menu(
+            display, "-- SYSTEM --", "EXE:select  BRK:back",
+            _build_system_items,
+            lambda iid, items, cur: _dispatch_system(iid, system, display, keyboard_input),
+        )
+        return "", closed
+    return "", False
+
+
+# ── Main entry point ─────────────────────────────────────────────────────────
+
+def show_emulator_menu(system, display, fkbar, keyboard_input, joystick_input, cfg):
+    """
+    Show the emulator runtime menu.  Returns a dict:
+      {'joystick_input': <new value or unchanged>}
+
+    CPU stepping is paused implicitly because main() blocks here.
+
+    The top level lists categories (Toggles / Storage / Display / System);
+    each opens as its own sub-menu via _run_menu(), BRK going back one level.
+    BRK or Exit at the top level closes the whole menu.
+    """
+    state = {
+        'joystick_input': joystick_input,
+        '_joy_saved': None,
+    }
+
+    _run_menu(
+        display, "==  EMULATOR MENU  ==", "GUI+F7:open  EXE:select  BRK:exit",
+        _build_top_items,
+        lambda iid, items, cur: _dispatch_top(iid, system, display, fkbar, keyboard_input, cfg, state),
+    )
 
     # Restore display: clear menu area, then redraw bezel + LCD + FuncKeyBar
     display.fill_rect(0, 0, display.width, display.height, 0x0000)

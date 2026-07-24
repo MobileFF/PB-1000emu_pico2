@@ -82,11 +82,6 @@ class MD100Dos:
         self._close_disk_file(0xFF)   # close all
         return backend is not None
 
-    def dos_close(self):
-        """DosClose"""
-        self._backend = None
-        self._secnum = -1
-
     def is_ready(self):
         return self._backend is not None
 
@@ -400,27 +395,6 @@ class MD100Dos:
     # ------------------------------------------------------------------
     # Read / Write
     # ------------------------------------------------------------------
-
-    def _navigate_to_nextrec(self, handle, allocate):
-        """Walk FAT chain to fileinfo[handle].nextrec. Returns sector or 0."""
-        fi = self._fileinfo[handle]
-        nextrec  = fi[_FI_NEXTREC]
-        lastrec  = fi[_FI_LASTREC]
-        lastsec  = fi[_FI_LASTSEC]
-        firstsec = fi[_FI_FIRSTSEC]
-        if nextrec >= lastrec:
-            fromrec = lastrec
-            fromsec = lastsec
-        else:
-            fromrec = 0
-            fromsec = firstsec
-        while fromrec < nextrec:
-            fromsec = self._fat_next_sector(fromsec, allocate)
-            fromrec += 1
-            if fromsec == 0:
-                self.dos_status = DS_NO_DATA
-                return 0, 0, 0
-        return fromsec, fromrec, 0
 
     def write_disk_file(self, handle, data):
         """WriteDiskFile: write SIZE_SECTOR bytes to record nextrec. Returns bytes written."""

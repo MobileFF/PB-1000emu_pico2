@@ -47,13 +47,15 @@ def service_pio_uart_bridge(system, cpu_core):
             _clear_rx()
 
 
-def step_with_input_service(system, steps, *, chunk=64):
+def step_with_input_service(system, steps, *, chunk=64, extra_svc=None):
     _svc = getattr(system, 'service_pio_uart', None)
     _step = system.step
     ran = 0
     while ran < steps:
         if _svc:
             _svc()
+        if extra_svc:
+            extra_svc()
         n = chunk
         remain = steps - ran
         if n > remain:
@@ -68,17 +70,17 @@ def step_with_input_service(system, steps, *, chunk=64):
     return ran
 
 
-def run_cpu_slice(system, *, active_steps, sleep_ms, step_chunk):
+def run_cpu_slice(system, *, active_steps, sleep_ms, step_chunk, extra_svc=None):
     if system.is_sleeping:
         # Even during sleep, call step_with_input_service so that
         # c_kb_service_input_lines() fires KEY_INT pulses and can clear
         # CPU_SLP (hd61700_set_input clears it when KEY_INT is asserted
         # with FLAG_SW set).  hd61700_execute gracefully burns cycles
         # when CPU_SLP is set, so this is safe.
-        step_with_input_service(system, step_chunk, chunk=step_chunk)
+        step_with_input_service(system, step_chunk, chunk=step_chunk, extra_svc=extra_svc)
         time.sleep_ms(sleep_ms)
         return 0
-    return step_with_input_service(system, active_steps, chunk=step_chunk)
+    return step_with_input_service(system, active_steps, chunk=step_chunk, extra_svc=extra_svc)
 
 
 def update_frame_if_due(system, now, frame_time, *, frame_interval_ms):

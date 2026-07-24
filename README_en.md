@@ -10,7 +10,7 @@ This project emulates the Casio PB-1000 pocket computer, which is equipped with 
 
 - **High-Performance CPU Core**: HD61700 instruction set implemented in C.
 - **MicroPython Framework**: Peripheral logic written in MicroPython, allowing easy customization.
-- **Modern Display Support**: ILI9341 320x240 TFT LCD with touch interface (XPT2046).
+- **Modern Display Support**: ILI9341 (320x240) or ST7796 (480x320) TFT LCD, selectable via `pb1000.ini`, with touch interface (XPT2046).
 - **External Keyboard**: Supports HID USB keyboards (Host mode) and serial (UART) input.
 - **Storage**: SD Card support for saving/restoring RAM states, screenshots, and virtual FDD disk image operations.
 - **State Management**: Save/Load state functionality for RAM and registers.
@@ -22,7 +22,7 @@ This project emulates the Casio PB-1000 pocket computer, which is equipped with 
 
 ## Quick Start
 
-1.  **Hardware**: Prepare a Raspberry Pi Pico 2, ILI9341 LCD, and (optional) SD card module. See [Hardware Guide](doc/hardware_guide_en.md) for details.
+1.  **Hardware**: Prepare a Raspberry Pi Pico 2, an ILI9341 or ST7796 LCD, and (optional) SD card module. See [Hardware Guide](doc/hardware_guide_en.md) for details.
 2.  **Build**: Compile the custom MicroPython firmware. See [Build Guide](doc/build_guide_en.md).
 3.  **Flash**: Copy the generated `firmware.uf2` to your Pico 2.
 4.  **Setup**: Upload the Python files from `mp/` and your ROM images to `/roms/` or `/sd/`. See [Usage Guide](doc/usage_guide_en.md).

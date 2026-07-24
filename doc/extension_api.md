@@ -9,6 +9,13 @@
 BASIC は `CALL <アドレス>` で直接その関数を呼び出す。
 単一ディスパッチアドレスや関数コード体系は持たない。
 
+> **本ドキュメントで扱う `ext/` 配下のモジュール（`bank_loader.py`・`vram_loader.py` 等）は、
+> すべて BASIC プログラムから `CALL` して初めて使われる**任意（オプション）の機能**です。
+> HD61700 CPU コア・LCD・キーボードなど、エミュレータ本体の基本動作には一切必要ありません。
+> 使う・使わないはユーザーが自由に選択でき、`ext/` から削除しても通常のBASICプログラムの
+> 実行やシステムの起動には影響しません（`dotds_64dot.py` は例外で、64ドット表示モードの
+> 表示崩れを防ぐ内部修正のため常時同梱されます。詳細は後述します）。
+
 ---
 
 ## メモリ割り当て
@@ -80,15 +87,27 @@ RESULT = PEEK(&5F01)
 mp/
 └── ext/
     ├── __init__.py       # 空ファイル（パッケージ宣言）
-    ├── bank_loader.py    # バンク RAM ローダー（実装済み）
-    ├── vram_loader.py    # カラーVRAM イメージローダー（実装済み）
-    ├── dotds_64dot.py    # DOTDS/1文字表示の SCTOP 非依存化フィックス（実装済み・内部用）
+    ├── bank_loader.py    # バンク RAM ローダー（同梱・任意 — BASIC から CALL する場合のみ使う）
+    ├── vram_loader.py    # カラーVRAM イメージローダー（同梱・任意 — BASIC から CALL する場合のみ使う）
+    ├── dotds_64dot.py    # DOTDS/1文字表示の SCTOP 非依存化フィックス（内部用・64ドットモード時のみ有効）
     └── myext.py          # 追加したい拡張をここに置く
 ```
+
+`bank_loader.py`・`vram_loader.py` は `mp/ext/` に**同梱**されているため起動時に自動ロードされますが、
+実際に機能するのは BASIC プログラムから対応する `CALL &Hxxxx` を実行したときだけです。使わなければ
+何も起こらず、エミュレータの動作にも影響しません。取捨選択して使う「任意の拡張」だと考えてください。
+
+一方 `dotds_64dot.py` は BASIC から呼び出して使う拡張ではなく、64ドット表示モードの表示崩れを防ぐ
+ための内部修正である。ファイル自体は常に `mp/ext/` に同梱されるが、`pb1000.ini` の
+`[display] lcd_height` が `64` の場合のみ実際に有効化され、`32`（デフォルト）の場合は
+一切割り込まず ROM 本来の DOTDS/02BD がそのまま動作する（設定で明示的にオン・オフする項目は
+存在しないが、`lcd_height` の値に応じて自動的に切り替わる）。詳細は本ドキュメント末尾の
+`dotds_64dot.py` の項を参照してください。
 
 `sample/mp/ext/` にはすぐ使えるサンプル拡張（`dht20.py`（DHT20 温湿度センサー）、
 `ram_test.py` 等）が置かれているが、これらは `mp/ext/` へコピーしない限り自動ロードされない
 （`_ext_load_modules()` が走査するのは `/ext/` と `/sd/ext/` のみで、`sample/` は対象外）。
+つまりこれらもコピーして初めて使われる、あくまで任意の追加機能です。
 
 Pico 2 上では `/ext/` または `/sd/ext/` に配置する（SD カード優先）。
 
@@ -109,7 +128,9 @@ CALL_ADDR = 0x5E20   # CALL &5E20 に割り当て
 def register(system):
     try:
         # 必要なハードウェア初期化をここで行う
-        system.register_call_hook(CALL_ADDR, lambda: _handler(system))
+        # owner はエミュレータメニューの「Hook Status」画面に表示される
+        # ラベル。lambda を渡す場合は関数名から判別できないので明示推奨。
+        system.register_call_hook(CALL_ADDR, lambda: _handler(system), owner="myext")
         print(f"myext: registered at {CALL_ADDR:#06x}")
     except Exception as e:
         print(f"myext: init failed: {e}")
@@ -188,8 +209,11 @@ hd61700.set_call_hook_enabled(CALL_ADDR, True)   # 有効化
 | --- | --- | --- |
 | `system.enable_call_hook(addr)` | `hd61700.set_call_hook_enabled(addr, True)` | フックを有効化 |
 | `system.disable_call_hook(addr)` | `hd61700.set_call_hook_enabled(addr, False)` | フックを無効化（登録維持） |
-| `system.register_call_hook(addr, fn)` | `hd61700.set_call_hook(addr, fn)` | フックを登録（デフォルト有効） |
+| `system.register_call_hook(addr, fn, owner=None)` | `hd61700.set_call_hook(addr, fn)` | フックを登録（デフォルト有効）。`owner` は Hook Status 画面用のラベル |
 | `system.unregister_call_hook(addr)` | `hd61700.clear_call_hook(addr)` | フックを解除 |
+| `system.list_call_hooks()` | — | 登録済みフックを `(addr, owner, enabled)` のリストで取得 |
+
+登録状況は Win+F7 のエミュレータメニュー **Hook Status** からも確認できる（詳細は `dev_guide.md` §6.2）。
 
 ---
 
@@ -205,13 +229,16 @@ hd61700.set_call_hook_enabled(CALL_ADDR, True)   # 有効化
 | `0x5E41`/`0x5E51`/`0x5E61`/`0x5E71` | `ram_test.py`（sample、未搭載） | RAM テスト各種 |
 | `0x5E81` | `bank_loader.py` | SD/フラッシュファイル → バンク RAM ロード |
 | `0x5E91` | `bank_loader.py` | 仮想FDDイメージ内ファイル → バンク RAM ロード |
-| `0x022C` | `dotds_64dot.py`（内部フィックス） | DOTDS：LEDTP → モノクロ VRAM 一括転送（SCTOP 非依存） |
-| `0x02BD` | `dotds_64dot.py`（内部フィックス） | 1文字クイック表示：EDCSR 直書き（SCTOP 非依存） |
+| `0x022C` | `dotds_64dot.py`（内部フィックス、64ドットモード時のみ有効） | DOTDS：LEDTP → モノクロ VRAM 一括転送（SCTOP 非依存） |
+| `0x02BD` | `dotds_64dot.py`（内部フィックス、64ドットモード時のみ有効） | 1文字クイック表示：EDCSR 直書き（SCTOP 非依存） |
 
 `dht20.py` / `ram_test.py` は `sample/mp/ext/` に置かれたサンプルであり、`mp/ext/` へコピーしない
 限り実機では動作しない（上表の「sample、未搭載」）。`dotds_64dot.py` は BASIC 向け汎用拡張ではなく、
-64 ドット表示モード対応のための内部フィックスモジュールで、`mp/ext/` に常時同梱される。
-ユーザー拡張を追加する際は `0x022C`/`0x02BD` との CALL アドレス重複に注意すること。
+64 ドット表示モード対応のための内部フィックスモジュールで、`mp/ext/` に常時同梱される。ただし
+`0x022C`/`0x02BD` の call_hook 自体は `[display] lcd_height = 64` の場合のみ有効化され、
+32ドットモード（デフォルト）では常に無効（ROM本来の DOTDS/02BD がそのまま動作）となるため、
+32ドットモードで運用する限りこの2アドレスと衝突する心配はない。ユーザー拡張を追加する際も
+念のため `0x022C`/`0x02BD` との CALL アドレス重複には注意すること。
 
 ---
 
@@ -332,12 +359,33 @@ BASIC 向けの CALL 拡張ではなく、64 ドット表示モードで DOTDS (
   `lcd_c.get_num_pages() * 192` バイトをモノクロ VRAM へ一括転送する（32ドット時 4 行 / 64ドット時 8 行）。
 - **call_hook `&H02BD`（1文字クイック表示上書き）**: SCTOP を無視した生の EDCSR から行・列を求め、
   呼び出し元がレジスタ `$2`/`$3` に積んだ 6 バイトを VRAM へ直接書き込む。
-- **mem_write_hook `&H68D0`（DSPMD 監視）**: DSPMD への書き込みを監視し、通常表示モード
-  （`DSPMD == 0`）のときだけ上記 2 つの call_hook を有効化し、MENU 表示モード
-  （`DSPMD == 3`）などでは無効化して ROM 本来の動作に戻す。
+- **mem_write_hook `&H68D0`（DSPMD 監視）**: DSPMD への書き込みを監視し、64ドットモードかつ
+  通常表示モード（`DSPMD == 0`）のときだけ上記 2 つの call_hook を有効化する。MENU 表示モード
+  （`DSPMD == 3`）や、そもそも 32 ドットモード（`[display] lcd_height = 32`、デフォルト）の
+  場合は常に無効化し、ROM 本来の DOTDS/02BD 実装をそのまま動作させる。
+
+32ドットモードではこのフィックス自体が不要（LEDTP は元々4行しか使わず、ROM本来の
+SCTOPベースのスクロール処理が正しく機能する）だけでなく、SCTOPを無視するこのオーバーライドを
+そのまま適用すると32ドットモード本来のスクロール表示を壊してしまうため、`register(system)`
+実行時に `system._config`（`pb1000.ini` のマージ済み設定）から `[display] lcd_height` を読み、
+`64` の場合のみ以降の DSPMD 監視による有効化ロジックが動作するようにしている。
 
 `register(system)` 内で `system.register_mem_write_hook(0x68D0, ...)` を呼び出しており、
 §6.1 で説明したメモリ書き込みフック API の実運用例になっている（詳細は `dev_guide.md` §6.1 参照）。
+
+**パフォーマンス（ネイティブ C フック）**: DOTDS は画面更新のたび、1文字クイック表示は
+PRINT で文字を書くたびに呼ばれるホットパスであるため、上記2つの call_hook 本体は
+独立したネイティブモジュール `dotds64`（`src/moddotds64.c`、`dotds64.dotds_hook()` /
+`char_hook()`）として C 実装済み（挙動は Python 版の `_dotds_override()`/
+`_char_display_override()` と同一）。このモジュールは `hd61700` CPU コア本体には含めておらず、
+`hd61700` 側が公開するのは他モジュールが CPU 状態を読むための汎用的で最小限の C 関数
+（`hd61700_get_reg()` / `hd61700_mem_read()` / `hd61700_ram_read()`、いずれも Python 非公開の
+extern 関数。詳細は `dev_guide.md` の `dotds64` モジュールの項を参照）のみ。
+`register(system)` はビルド済みファームウェアに `dotds64` モジュールが存在すれば
+（`import dotds64` 成功時）自動的にそちらを登録し、存在しない場合のみ Python 版へ
+フォールバックする。有効・無効の切り替え（DSPMD 監視）は native/Python どちらでも
+同じ Python コードが担当するため、フック自体の登録アドレスや動作条件はこの節の説明と
+変わらない。詳細は `dev_guide.md` の `dotds64` モジュールの項を参照。
 
 ---
 
@@ -351,3 +399,6 @@ BASIC 向けの CALL 拡張ではなく、64 ドット表示モードで DOTDS (
 | 2026-06-11 | `vram_loader.py` を追加。`bank_loader.py` を追加 |
 | 2026-07-04 | `vram_loader.py`: 転送後に `set_vdp_init_done(True)` を呼ぶよう修正（カラーVRAM直書き込みが即座に描画へ反映されるように） |
 | 2026-07-09 | 実装との差異を修正: `dht20.py`/`ram_test.py` が sample 未搭載であることを明記、`dotds_64dot.py`（mem_write_hook 実運用例）を追記、ext work area の C ダイレクト実装（`get_ext_work_view()`）に関する記述を更新 |
+| 2026-07-10 | `dotds_64dot.py`: 32ドットモードでは call_hook を常時 disable するよう修正（従来は DSPMD のみで判定しており32ドットモードでも有効になっていた）。`register(system)` 時に `system._config` から `[display] lcd_height` を読んで判定 |
+| 2026-07-13 | `dotds_64dot.py`: DOTDS/1文字クイック表示のホットパスをネイティブ C 実装に変更（描画速度改善）。独立モジュール `dotds64`（`src/moddotds64.c`）として実装し、`hd61700` コアには含めない設計とした。旧ファームウェアでは Python 実装に自動フォールバック |
+| 2026-07-13 | `moddotds64.c`: DOTDS の LEDTP バルクコピーが `hd61700_mem_read()`（UART受信割り込み/スリープ解除の副作用を持つ）を最大1536回呼んでいた不具合を修正。副作用のない `hd61700_ram_read()` を新設し、そちらを使うよう変更 |

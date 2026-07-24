@@ -3,6 +3,10 @@
 Reference for the general-purpose subroutine hooks bundled with the emulator,
 with BASIC usage examples.
 
+Every hook described in this document is an **optional** feature — it only does anything once a
+BASIC program explicitly `CALL`s it, and has no effect on the emulator's core operation (CPU, LCD,
+keyboard, etc.) otherwise. Whether to use any given hook, and which ones, is entirely up to you.
+
 Hardware-specific hooks (DHT20 temperature sensor, etc.) are not covered here.  
 For the hook framework and how to write your own hooks, see [extension_api_en.md](extension_api_en.md).
 

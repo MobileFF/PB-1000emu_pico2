@@ -1,6 +1,3 @@
-# PB1000 System
-#
-#
 import hd61700 as cpu_core
 import gc
 import os
@@ -22,8 +19,6 @@ try:
     import lcd_c
 except ImportError:
     lcd_c = None
-
-# original keyboard.py is kept but unused.
 
 # PIO UART for RS-232C passthrough (optional)
 try:
@@ -159,15 +154,8 @@ def init_display():
 
 def draw_bezel(display, scale=1.0, x=16, y=40, lcd_height=32):
     """Draws the PB-1000 LCD bezel scaled to fit the display."""
-    # Inner LCD area size
     lw = int(192 * scale)
     lh = int(lcd_height * scale)
-    
-    # Margin and boarders (scaled or fixed?)
-    # Original: (12, 36, 296, 72, 0x4228) -> inner (16,40, 288,64)
-    # 288 width was exactly 192 * 1.5.
-    # Let's make it more general.
-    
     padding = 4
     
     # Outer bezel (dark grey)
@@ -350,7 +338,6 @@ class PB1000System:
         self._key_trace_last = {}
 
         self.lcd = LCDController(display, debug=self.debug_cfg["lcd"])
-        self._save_requested = False
         self.lcd.on_scale_change = self._on_lcd_scale_change
         if hasattr(self.lcd, 'set_char_output_callback'):
             self.lcd.set_char_output_callback(self._on_lcd_char_output)
@@ -473,14 +460,6 @@ class PB1000System:
     def _is_lcd_vram_addr(self, offset):
         return (0x6100 <= offset <= 0x61FF) or (0x6201 <= offset <= 0x6850)
 
-    def arm_display_write_probe(self, label="EVENT"):
-        self._display_probe_active = True
-        self._display_probe_hit = False
-        self._display_probe_label = label
-
-    def display_write_probe_hit(self):
-        return self._display_probe_hit
-
     def _port_read(self):
         # Called by C only when FDD interface is powered (PD_PWR bit=0).
         # Return STR-based ACK for the MD-100 transfer protocol.
@@ -502,12 +481,9 @@ class PB1000System:
             return val0
             
         elif index == 1:
-            # Status Register: Return ready flags.
-            # FDD mode requires BOTH _virtual_fdd_interface_powered AND _virtual_fdd_ack.
-            # _virtual_fdd_ack is only True after a genuine FDD STR strobe fires.
-            # RS-232C RECEIVE writes port D (setting _virtual_fdd_interface_powered) but
-            # never issues a STR strobe, so _virtual_fdd_ack stays False and UART RX
-            # remains visible throughout the entire RS-232C transfer.
+            # Status Register. FDD mode needs BOTH _virtual_fdd_interface_powered
+            # AND _virtual_fdd_ack (only set by a genuine STR strobe); RS-232C sets
+            # the former without the latter, so UART RX stays visible throughout.
             status = 0xC0
             _in_fdd_mode = (self.has_virtual_fdd()
                             and self._virtual_fdd_interface_powered
@@ -522,12 +498,9 @@ class PB1000System:
                 # Ensure rendering is inhibited during polling
                 self._fdd_active = True
                 try:
-                    # PB-1000 MD-100 Status:
-                    # Bit 0: Low Battery (LB) flag (Active High).
-                    # Bit 1: FDD Present / battery OK path for MD-100 polling.
-                    # Bit 6: Interface Ready (Active High/1).
-                    # Bit 7: Power Ready (Active High/1).
-                    # Keep bit 0 clear to avoid ROM D8D0 -> LB Error.
+                    # MD-100 status bits: 0=LowBattery 1=FDD-present/ready
+                    # 6=IF-ready 7=Power-ready. Keep bit0 clear (ROM D8D0
+                    # treats a set bit0 as an LB Error).
                     status |= 0x02
                 finally:
                     # Note: We keep it active if many polls are expected, but here we
@@ -537,10 +510,9 @@ class PB1000System:
                     self._uart_vfdd_warn = True
                     print(f"[UART_WARN] FDD ack+power active while UART RX pending ({self.pio_uart.any()}B)")
             else:
-                # Bytes stay in the Python PIO buffer (_rx_buffer); the MMIO
-                # callback for 0x0C02 (IO read path) serves them directly.
-                # service_pio_uart_bridge() only signals INT1 via uart_signal_rx()
-                # without moving bytes to the C UART FIFO.
+                # Bytes stay in the Python PIO buffer; 0x0C02's MMIO callback
+                # serves them directly — service_pio_uart_bridge() only signals
+                # INT1, it never copies bytes into the C UART FIFO.
                 if self.pio_uart and self.pio_uart.any():
                     status |= 0x01 # RX Ready (RS-232C mode)
                 else:
@@ -558,10 +530,9 @@ class PB1000System:
                 # does not re-enter the ISR before the next byte arrives.
                 if not self.pio_uart.any() and hasattr(cpu_core, 'uart_clear_rx_signal'):
                     cpu_core.uart_clear_rx_signal()
-                # ROM consumed the EOF byte — request auto-BREAK via main loop.
-                # _pio_uart_eof_pending is checked each main loop tick; the
-                # KeyboardInputManager queues BRK and waits for is_key_input_enabled
-                # before pressing, so it fires only after the ROM finishes processing.
+                # ROM consumed EOF — flag auto-BREAK; main loop's KeyboardInputManager
+                # queues BRK and waits for is_key_input_enabled so it only fires
+                # after the ROM finishes processing.
                 if data and data[0] == 0x1A and not getattr(self, '_pio_uart_eof_pending', False):
                     self._pio_uart_eof_pending = True
                     print("[UART_EOF] EOF byte read by ROM; auto-BREAK scheduled")
@@ -571,17 +542,14 @@ class PB1000System:
             
         elif index == 3:
             if not self._virtual_fdd_interface_powered:
-                # Always return 0x55 (MD-100 identifier) when the VFDD is
-                # configured but powered off. This prevents the ROM from
-                # storing 0xFF in OPTCD (which would switch it to the non-
-                # MD-100 code path that checks every dir-entry byte for errors).
+                # Return 0x55 (MD-100 ID) while VFDD is configured-but-off, so
+                # the ROM doesn't store 0xFF in OPTCD and switch to the slower
+                # non-MD-100 code path that checks every dir-entry byte.
                 return 0x55
 
-            # Return the FDD data register value without any error-bit masking.
-            # LB/FM error prevention is handled upstream by the D8D0 PC-based
-            # approach (returning 0x55 for non-D924 reads), so masking here
-            # is no longer needed and only corrupts legitimate data bytes
-            # (e.g., status=0x10 would become 0x00 with the old 0xEE mask).
+            # No error-bit masking here — LB/FM prevention is handled upstream
+            # via the D8D0 PC-based 0x55 return; masking here would corrupt
+            # real data bytes (e.g. status=0x10 -> 0x00 with the old mask).
             return self._io_rd_regs[4]
         elif index == 4:
             # Data register: Return last received data byte
@@ -601,10 +569,9 @@ class PB1000System:
             self._handle_virtual_fdd_port_write(data)
             
         elif index == 3:
-            # 0x0C03 = TX Data Register (UART) OR FDD read-data port.
-            # Suppress PIO UART TX only during active FDD transfer (powered AND ack).
-            # RS-232C operations set _virtual_fdd_interface_powered without _virtual_fdd_ack,
-            # so TX is allowed through for RS-232C even when the interface power bit is low.
+            # 0x0C03 = TX Data Register (UART) OR FDD read-data port. Suppress
+            # PIO UART TX only during an active FDD transfer (powered AND ack) —
+            # RS-232C sets powered without ack, so its TX always goes through.
             _in_fdd_mode = (self.has_virtual_fdd()
                             and self._virtual_fdd_interface_powered
                             and self._virtual_fdd_ack)
@@ -680,10 +647,14 @@ class PB1000System:
 
     def _ext_load_modules(self):
         """ext/ ディレクトリの拡張モジュールを自動ロードする。
-        検索順: /sd/ext/ → /ext/  (先に見つかった方を優先)
+        /sd/ext/ と /ext/ の両方を対象にマージしてロードする。
+        同名モジュールが両方にある場合は /sd/ext/ 側を優先し、
+        /ext/ 側は無視する(sys.path も /sd/ext を先に登録するため、
+        import 解決自体が自然に SD 優先になる)。
         各モジュールは register(system) 関数を持つこと。
         """
-        import os, sys
+        import os, sys, gc
+        mod_sources = {}  # mod_name -> ext_dir (最初に見つかった = 優先されるディレクトリ)
         for ext_dir in ("/sd/ext", "/ext"):
             try:
                 files = os.listdir(ext_dir)
@@ -695,17 +666,28 @@ class PB1000System:
                 if not fname.endswith(".py") or fname.startswith("_"):
                     continue
                 mod_name = fname[:-3]
-                try:
-                    mod = __import__(mod_name)
-                    if hasattr(mod, "register"):
-                        mod.register(self)
-                        print(f"EXT: loaded {mod_name} from {ext_dir}")
-                    else:
-                        print(f"EXT: {mod_name} has no register(), skipped")
-                except Exception as e:
-                    print(f"EXT: {mod_name} load error: {e}")
-                    sys.print_exception(e)
-            break  # 最初に見つかったディレクトリのみ使用
+                if mod_name not in mod_sources:
+                    mod_sources[mod_name] = ext_dir
+
+        for mod_name in sorted(mod_sources):
+            ext_dir = mod_sources[mod_name]
+            try:
+                # Compiling each ext module's source needs a transient
+                # contiguous allocation; loading several in a row without
+                # collecting in between lets heap fragmentation from
+                # earlier imports cause a later, smaller import to fail
+                # with "memory allocation failed" even when total free
+                # memory looks sufficient.
+                gc.collect()
+                mod = __import__(mod_name)
+                if hasattr(mod, "register"):
+                    mod.register(self)
+                    print(f"EXT: loaded {mod_name} from {ext_dir}")
+                else:
+                    print(f"EXT: {mod_name} has no register(), skipped")
+            except Exception as e:
+                print(f"EXT: {mod_name} load error: {e}")
+                sys.print_exception(e)
 
     def _log_vfdd(self, msg):
         pass
@@ -745,10 +727,8 @@ class PB1000System:
             elif (current & PD_RES) == 0 and (previous & PD_RES) != 0:
                 # Falling edge of RES: Reset Released (Run Mode)
                 self._log_vfdd("Reset released")
-                # Initialize data register to MD-100 identifier (0x55).
-                # The boot ROM reads 0x0C03 to detect the FDD: it stores this
-                # value into OPTCD and later checks OPTCD == 0x55 to confirm
-                # the MD-100 interface is present.
+                # Boot ROM reads 0x0C03, stores it in OPTCD, then checks
+                # OPTCD==0x55 to confirm the MD-100 interface is present.
                 self._io_rd_regs[4] = 0x55  # MD-100 identifier for boot detection
                 if hasattr(cpu_core, "set_vfdd_data"):
                     cpu_core.set_vfdd_data(0x55)
@@ -761,17 +741,15 @@ class PB1000System:
                 # Data was already pre-fetched at the end of the previous cycle.
                 self._virtual_fdd_ack = True
 
-                # Retrieve the latest data written by the CPU to 0x0C04.
-                # NOTE: cpu_core.get_vfdd_write_data() is broken (always returns 0x00).
-                # Use _io_wr_regs[4] which is correctly updated by the _write_io_register callback.
+                # cpu_core.get_vfdd_write_data() is broken (always 0x00); use
+                # _io_wr_regs[4], kept correct by the _write_io_register callback.
                 val_in = self._io_wr_regs[4]
 
                 if res_released_now:
-                    # Boot pulse: RES released in this same CTRL write as STR fell
-                    # (e.g. CTRL 1C->00). Keep _io_rd_regs[4]=0x55 so the ROM's
-                    # boot OPTCD detection read at 0x0C03 sees the MD-100 identifier.
-                    # Do NOT call transfer() here, as it would advance the state
-                    # before the real command is issued.
+                    # Boot pulse: RES released in this same CTRL write as STR
+                    # fell (e.g. CTRL 1C->00). Don't call transfer() here — it
+                    # would advance state before the real command is issued;
+                    # just leave _io_rd_regs[4]=0x55 for the ROM's OPTCD read.
                     pass
                 else:
                     val_out_next = self.virtual_fdd_controller.transfer(val_in)
@@ -1032,10 +1010,6 @@ class PB1000System:
             sys.print_exception(exc)
             return False
 
-    def try_auto_configure_virtual_fdd(self):
-        self.discover_virtual_fdd_config()
-        return self.activate_pending_virtual_fdd()
-
     def boot_virtual_fdd(self):
         """Robust initialization: Discovery + Activation in one call."""
         cfg = self.discover_virtual_fdd_config()
@@ -1136,11 +1110,7 @@ class PB1000System:
             print(f"Error saving registers: {e}")
             sys.print_exception(e)
 
-    def save_ram(self):
-        """Compatibility alias for save_state."""
-        self.save_state()
-
-    def register_call_hook(self, address, fn):
+    def register_call_hook(self, address, fn, owner=None):
         """Register a callable for the given destination address.
         fn may be a Python function or a native C MicroPython function.
         Fires when CAL, JP, or JR targets this exact address — some ROM
@@ -1150,10 +1120,19 @@ class PB1000System:
         address before jumping (interception pops it and returns as if
         RTN had executed); JP/JR push nothing, so interception simply
         skips the jump and continues at the next instruction instead.
+
+        owner: optional human-readable label (e.g. "dotds_64dot") shown by
+        the emulator menu's Hook Status screen. Extension modules should
+        pass their own module name; if omitted, fn.__name__ is used as a
+        best-effort fallback (may be unavailable on some MicroPython builds).
         """
         if not hasattr(self, "_call_hook_refs"):
             self._call_hook_refs = {}
+            self._call_hook_owner = {}
+            self._call_hook_enabled = {}
         self._call_hook_refs[address] = fn  # Python-side GC anchor
+        self._call_hook_owner[address] = owner or getattr(fn, "__name__", "?")
+        self._call_hook_enabled[address] = True  # new entries are enabled by default
         if hasattr(cpu_core, "set_call_hook"):
             cpu_core.set_call_hook(address, fn)
 
@@ -1161,30 +1140,56 @@ class PB1000System:
         """Unregister the hook for the given CAL destination address."""
         if hasattr(self, "_call_hook_refs"):
             self._call_hook_refs.pop(address, None)
+            self._call_hook_owner.pop(address, None)
+            self._call_hook_enabled.pop(address, None)
         if hasattr(cpu_core, "clear_call_hook"):
             cpu_core.clear_call_hook(address)
 
     def enable_call_hook(self, address):
         """Enable a previously registered hook. No-op if not registered."""
+        if hasattr(self, "_call_hook_enabled") and address in self._call_hook_enabled:
+            self._call_hook_enabled[address] = True
         if hasattr(cpu_core, "set_call_hook_enabled"):
             cpu_core.set_call_hook_enabled(address, True)
 
     def disable_call_hook(self, address):
         """Disable a registered hook without unregistering it."""
+        if hasattr(self, "_call_hook_enabled") and address in self._call_hook_enabled:
+            self._call_hook_enabled[address] = False
         if hasattr(cpu_core, "set_call_hook_enabled"):
             cpu_core.set_call_hook_enabled(address, False)
 
-    def register_mem_write_hook(self, addr_start, fn, addr_end=None):
+    def list_call_hooks(self):
+        """Return [(address, owner, enabled), ...] sorted by address, for
+        diagnostic display (e.g. the emulator menu's Hook Status screen)."""
+        refs = getattr(self, "_call_hook_refs", {})
+        owners = getattr(self, "_call_hook_owner", {})
+        enabled = getattr(self, "_call_hook_enabled", {})
+        return sorted(
+            (addr, owners.get(addr, "?"), enabled.get(addr, True))
+            for addr in refs
+        )
+
+    def register_mem_write_hook(self, addr_start, fn, addr_end=None, owner=None):
         """Call fn(addr, data, bank) before a byte is written to memory.
         Omit addr_end to watch a single address; pass addr_end to watch a
         range (addr_start..addr_end inclusive). fn returning True cancels
         the write. Registering again with the same addr_start overwrites
-        the previous entry (range and callable included)."""
+        the previous entry (range and callable included).
+
+        owner: optional human-readable label shown by the emulator menu's
+        Hook Status screen; see register_call_hook() for details."""
         if addr_end is None:
             addr_end = addr_start
         if not hasattr(self, "_mem_write_hook_refs"):
             self._mem_write_hook_refs = {}
+            self._mem_write_hook_range = {}
+            self._mem_write_hook_owner = {}
+            self._mem_write_hook_enabled = {}
         self._mem_write_hook_refs[addr_start] = fn  # Python-side GC anchor
+        self._mem_write_hook_range[addr_start] = addr_end
+        self._mem_write_hook_owner[addr_start] = owner or getattr(fn, "__name__", "?")
+        self._mem_write_hook_enabled[addr_start] = True  # new entries are enabled by default
         if hasattr(cpu_core, "set_mem_write_hook"):
             cpu_core.set_mem_write_hook(addr_start, addr_end, fn)
 
@@ -1192,18 +1197,38 @@ class PB1000System:
         """Unregister the hook registered with the given start address."""
         if hasattr(self, "_mem_write_hook_refs"):
             self._mem_write_hook_refs.pop(addr_start, None)
+            self._mem_write_hook_range.pop(addr_start, None)
+            self._mem_write_hook_owner.pop(addr_start, None)
+            self._mem_write_hook_enabled.pop(addr_start, None)
         if hasattr(cpu_core, "clear_mem_write_hook"):
             cpu_core.clear_mem_write_hook(addr_start)
 
     def enable_mem_write_hook(self, addr_start):
         """Enable a previously registered hook. No-op if not registered."""
+        if hasattr(self, "_mem_write_hook_enabled") and addr_start in self._mem_write_hook_enabled:
+            self._mem_write_hook_enabled[addr_start] = True
         if hasattr(cpu_core, "set_mem_write_hook_enabled"):
             cpu_core.set_mem_write_hook_enabled(addr_start, True)
 
     def disable_mem_write_hook(self, addr_start):
         """Disable a registered hook without unregistering it."""
+        if hasattr(self, "_mem_write_hook_enabled") and addr_start in self._mem_write_hook_enabled:
+            self._mem_write_hook_enabled[addr_start] = False
         if hasattr(cpu_core, "set_mem_write_hook_enabled"):
             cpu_core.set_mem_write_hook_enabled(addr_start, False)
+
+    def list_mem_write_hooks(self):
+        """Return [(addr_start, addr_end, owner, enabled), ...] sorted by
+        addr_start, for diagnostic display (e.g. the emulator menu's Hook
+        Status screen)."""
+        refs = getattr(self, "_mem_write_hook_refs", {})
+        ranges = getattr(self, "_mem_write_hook_range", {})
+        owners = getattr(self, "_mem_write_hook_owner", {})
+        enabled = getattr(self, "_mem_write_hook_enabled", {})
+        return sorted(
+            (addr, ranges.get(addr, addr), owners.get(addr, "?"), enabled.get(addr, True))
+            for addr in refs
+        )
 
     def load_state(self, path=None):
         import json
@@ -1329,18 +1354,11 @@ class PB1000System:
 
         # Reset page count to default (4=32-dot, 8=64-dot) so the renderer
         # doesn't expose pages 4-7 if a previous program used 64-dot mode.
-        #print(f"lcd.set_num_pages({self._lcd_height // 8})")
+        # (Vacated pages always render as background regardless of VDP state
+        # since _pixel_color()'s active_pages clamp applies to both render
+        # paths, so this no longer needs to also force VDP off to be safe.)
         self.lcd.set_num_pages(self._lcd_height // 8)
-        # Drop back to mono rendering so a color image left in color_vram by a
-        # previous program (e.g. vram_loader) doesn't keep showing through in
-        # the vacated lower half; the ROM/BASIC re-enables VDP explicitly if needed.
-        self.lcd.set_vdp_enable(False)
-        # time.sleep(3)
-        
         self.set_status("SYSTEM RESET", 1500)
-        # Re-initialize basic state if needed but usually reset() is enough
-        # We might want to keep RAM as is (like a warm reset) or clear it?
-        # The user said "force PC to 0x0000", which is what reset() does.
 
     def tick_timer(self):
         cpu_core.timer_tick()
@@ -1355,16 +1373,6 @@ class PB1000System:
              result = self.pio_uart.service_rx()
              if result:
                  self.set_status(result,10000)
-
-    # ------------------------------------------------------------------ #
-    #  VRAM text extraction (serial console output)                        #
-    # ------------------------------------------------------------------ #
-
-    def _build_char_lookup(self):
-        return {}
-
-    def _scan_vram_for_text(self):
-        pass
 
     @property
     def console_uart(self):
@@ -1389,7 +1397,6 @@ class PB1000System:
         if y_offset is not None: self._disp_y = y_offset
         self.lcd.render_to_display(self._disp_x, self._disp_y)
         self._render_status_bar()
-        self._scan_vram_for_text()
 
     def force_full_redraw(self):
         """Redraw bezel + LCD after overlaying the screen (e.g. after menu closes)."""

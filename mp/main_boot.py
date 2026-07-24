@@ -127,57 +127,17 @@ def create_console_uart(machine, *, enable_uart_kbd, baudrate, tx_pin, rx_pin):
                 tx=machine.Pin(tx_pin),
                 rx=machine.Pin(rx_pin),
                 txbuf=2048,
+                # Explicit rxbuf (default is a small fixed size on the rp2
+                # port): outer-loop UART polling cadence can lag behind
+                # incoming bytes, so give the RX side enough headroom to
+                # ride that out instead of silently overflowing.
+                rxbuf=2048,
             )
             console_uart = uart_kbd
             print(f"UART1 Console I/O enabled: GP{tx_pin}(TX)/GP{rx_pin}(RX) @ {baudrate}bps")
         except Exception as e:
             print(f"Failed to init UART1 console: {e}")
     return uart_kbd, console_uart
-
-
-def initialize_system(*, console_uart=None):
-    ret = init_display()
-    if isinstance(ret, tuple) and len(ret) >= 2:
-        display = ret[0]
-        touch = ret[1]
-    else:
-        display = ret
-        touch = None
-    #display.fill_rect(0, 0, 320, 240, 0xC618)
-
-    if hasattr(display, 'lcd_sync'):
-        display.lcd_sync()
-
-    print("Initializing PB1000System...")
-    system = PB1000System(ret, debug={"sys": False, "lcd": False, "kb": False}, restore_registers=False)
-    print("PB1000System initialized.")
-    system.touch = touch
-    if console_uart is not None:
-        system._console_uart_hw = console_uart  # store hw ref; console starts OFF by default
-    dw = getattr(display, "width", 320)
-    dh = getattr(display, "height", 240)
-    # Default scale: 1.5 for 320x240, 2.0 for 480x320
-    scale = 2.0 if dw >= 480 else 1.5
-    from config import load_config
-    _cfg = load_config()
-    _disp_cfg = (_cfg or {}).get("display", {})
-    lcd_height = int(_disp_cfg.get("lcd_height", "32"))
-    if lcd_height not in (32, 64):
-        lcd_height = 32
-    print(f"LCD height: {lcd_height} dots")
-    if hasattr(system.lcd, "set_num_pages"):
-        system.lcd.set_num_pages(lcd_height // 8)
-    system._lcd_height = lcd_height
-    auto_x = max(0, (dw - int(192 * scale)) // 2)
-    # Center the whole group (LCD + gap + fkbar) vertically
-    _lcd_h = int(lcd_height * scale)
-    _group_h = _lcd_h + 24 + 42  # 24=gap, 42=fkbar height
-    auto_y = max(0, (dh - _group_h) // 2)
-    system._disp_x = auto_x
-    system._disp_y = auto_y
-    system.lcd.set_display_scale(scale)
-    _setup_touch_offsets(system, dw, dh, _cfg)
-    return system
 
 
 def load_default_roms(system):
@@ -227,13 +187,16 @@ def configure_c_keyboard(system, *, enable_usb_kbd):
     try:
         import hd61700 as cpu_core
         print("[DEBUG boot] configure_c_keyboard: hd61700 imported")
-        if hasattr(cpu_core, 'set_f11_callback'):
-            def _on_f11(_):
-                print("F11 pressed (Callback)")
-                system._save_requested = True
-            system._f11_handler = _on_f11
-            cpu_core.set_f11_callback(system._f11_handler)
         print("[DEBUG boot] configure_c_keyboard: before import keymap")
+        # NOTE: this is the first real `import keymap` in the boot sequence
+        # (main_actions.py now imports it lazily, inside the one function
+        # that uses it, specifically so this is where keymap.json actually
+        # gets searched for and loaded — not earlier, at main.py's own
+        # module-load time). The disable_irq() guard that used to be here
+        # was a no-op left over from when this WAS just a cache hit; the
+        # real fix for the flash/IRQ timing hazard is stopping the USB
+        # background timer earlier, in main.py right after profile
+        # selection (see the comment there).
         import keymap
         print("[DEBUG boot] configure_c_keyboard: keymap imported")
         if hasattr(cpu_core, 'keyboard_config_adv'):

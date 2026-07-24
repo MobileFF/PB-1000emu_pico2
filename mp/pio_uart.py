@@ -131,30 +131,6 @@ class PioUart:
         """Return number of bytes available in software buffer and FIFO."""
         return len(self._rx_buffer) + self._sm_rx.rx_fifo()
 
-    def set_baudrate(self, baudrate):
-        """Change baud rate dynamically."""
-        if baudrate == self._baudrate:
-            return
-        self._baudrate = baudrate
-        # Restart state machines with new frequency
-        self._sm_tx.active(0)
-        self._sm_rx.active(0)
-
-        self._sm_tx = rp2.StateMachine(
-            self._sm_tx_id, uart_tx_prog,
-            freq=8 * baudrate,
-            sideset_base=Pin(self._tx_pin),
-            out_base=Pin(self._tx_pin),
-        )
-        self._sm_rx = rp2.StateMachine(
-            self._sm_rx_id, uart_rx_prog,
-            freq=8 * baudrate,
-            in_base=Pin(self._rx_pin, Pin.IN, Pin.PULL_UP),
-            jmp_pin=Pin(self._rx_pin, Pin.IN, Pin.PULL_UP),
-        )
-        self._sm_tx.active(1)
-        self._sm_rx.active(1)
-
     def clear_buffers(self):
         """Clear software TX and RX buffers."""
         self._tx_buffer = []

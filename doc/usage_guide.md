@@ -67,7 +67,7 @@
 | **PrintScreen** | スクリーンショット | LCD 内容を `/sd/screenshots/` に `.pbm` として保存 |
 | **Win（GUI）+ F7** | エミュレータメニュー | 各種機能の切り替えメニューを開く |
 | **Win（GUI）+ F6** | ディスクスワップ | 仮想 FDD のディスクイメージを切り替える |
-| **Win（GUI）+ Esc** | エミュレータ終了 | MicroPython REPL に戻る |
+| **Win（GUI）+ Esc** | エミュレータ終了 | MicroPython REPL に戻る（※GP0/GP1 配線の UART REPL 経由。[Hardware Guide](hardware_guide.md) 参照） |
 | **Esc** | BREAK | BASIC プログラムの停止 / エラー解除 |
 | **Enter** | EXE | コマンドの実行 |
 | **Backspace** | BS | 文字の削除 |
@@ -111,23 +111,8 @@ PB-1000 の 16 キータッチパネルは LCD のタッチスクリーンでエ
 ## 5. エミュレータメニュー（Win + F7）
 
 メインループを一時停止して設定を変更できるメニューです。変更はリアルタイムに反映されます。
-
-| 項目 | 機能 |
-| :--- | :--- |
-| **Serial Console** | LCD 文字検出 → UART 出力機能のオン/オフ |
-| **RS-232C (PIO)** | PIO UART（仮想 RS-232C）のオン/オフ |
-| **vFDD** | 仮想フロッピードライブのオン/オフ |
-| **Beep** | ビープ音のオン/オフ（ミュート切り替え） |
-| **Joystick** | ジョイスティック入力のオン/オフ |
-| **Color VRAM** | per-pixel カラー表示（VDP）のオン/オフ |
-| **FD Swap** | 仮想 FDD のディスクイメージを切り替える |
-| **RAM Save** | 現在の RAM を `/sd/rams/` にスナップショット保存 |
-| **RAM Load** | `/sd/rams/` から RAM スナップショットを復元 |
-| **VRAM Save** | 現在の LCD VRAM を 4 ファイル（PBM/バイナリ）として保存 |
-| **Foreground Color** | LCD 点灯ピクセルの色を変更 |
-| **Background Color** | LCD 消灯ピクセルの色を変更 |
-
-上下キーでカーソル移動、EXE で実行、BREAK でメニューを閉じます。
+Toggles / Storage / Display / System の4カテゴリに分かれた階層メニューになっており、
+各項目の詳細な説明・操作方法は `emulator_menu_guide.md` を参照してください。
 
 ---
 
@@ -198,12 +183,28 @@ PIO ソフト UART（デフォルト GP6 TX / GP13 RX）で CASIO PB-1000 の RS
 
 ## 9. スクリーンショット
 
-**PrintScreen** キーで現在の LCD 内容をキャプチャします。
+**PrintScreen** キー、またはエミュレータメニューの **VRAM Save** で、PB-1000 の
+エミュレート画面（192×32 または 192×64、モノクロ VRAM + カラー VRAM）をキャプチャします。
+どちらも同じ処理（内部的には `_do_vram_save()`）を呼び出すため、結果は同一です。
 
-- 形式: PBM（Portable BitMap、1 bit 白黒）
-- 保存先: `/sd/screenshots/screenshot_YYYYMMDD_HHMMSS.pbm`
-  - SD カード非接続時は `/roms/` に保存
-- 生 VRAM ダンプ（`vram_dump_....bin`）も同時保存
+- 保存先: `/sd/screenshots/`（SD カード非接続時は `/screenshots/`）
+- 保存されるファイル（タイムスタンプ `YYYYMMDD_HHMMSS` 付き）:
+  - `vram_<timestamp>.bin` / `.pbm`: モノクロ VRAM の生データ / PBM 画像
+  - `edtop_<timestamp>.bin`: EDTOP バッファの生データ
+  - `color_vram_<timestamp>.bin` / `.ppm`: カラー VRAM（VDP）が有効な場合のみ、生データ / PPM 画像
+
+ベゼルやファンクションキーバーを含む**画面全体**をキャプチャしたい場合は、エミュレータメニューの
+**Full Capture** を使用してください（次項参照）。
+
+### 画面全体のキャプチャ（Full Capture）
+
+エミュレータメニューの **Full Capture** は、ベゼル・PB-1000 画面・ファンクションキーバーを
+含む物理ディスプレイ全体（例: 320×240 または 480×320）を 1 枚の PPM 画像として保存します。
+
+- 保存先: `/sd/screenshots/full_<timestamp>.ppm`（VRAM Save と同じディレクトリ）
+- 実装上、SPI 経由で実機の画面を読み出しているわけではなく、エミュレータが保持している
+  VRAM・ベゼル配置・ファンクションキーバー画像から画面全体を再構成しています。そのため、
+  キー入力時に一時的に表示されるステータスメッセージ（トースト表示）はキャプチャに反映されません。
 
 ---
 

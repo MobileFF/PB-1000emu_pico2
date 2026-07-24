@@ -6,6 +6,14 @@ The Extension API lets BASIC programs running on the PB-1000 call Pico 2 periphe
 
 It is built directly on the call_hook mechanism. Each extension function is registered as a call_hook at its own address, and BASIC calls it directly with `CALL <address>`. There is no single dispatch address or function-code scheme.
 
+> **Every module under `ext/` described in this document (`bank_loader.py`, `vram_loader.py`, etc.)
+> is an entirely optional feature** that only does anything when a BASIC program `CALL`s it.
+> None of them are required for the emulator's core operation (the HD61700 CPU core, LCD, keyboard,
+> etc.). Use whichever ones you want and ignore the rest — removing them from `ext/` has no effect
+> on running ordinary BASIC programs or booting the system (the one exception is `dotds_64dot.py`,
+> an internal fix that prevents display corruption in 64-dot mode and always ships enabled — see
+> below for details).
+
 ---
 
 ## Memory Allocation
@@ -75,15 +83,28 @@ No changes to `pb1000.py` are needed. Place an extension module in the `ext/` di
 mp/
 └── ext/
     ├── __init__.py       # empty file (package declaration)
-    ├── bank_loader.py    # bank RAM loader (included)
-    ├── vram_loader.py    # colour VRAM image loader (included)
-    ├── dotds_64dot.py    # DOTDS / single-char display SCTOP-independence fix (included, internal)
+    ├── bank_loader.py    # bank RAM loader (bundled, optional — only used if BASIC calls it)
+    ├── vram_loader.py    # colour VRAM image loader (bundled, optional — only used if BASIC calls it)
+    ├── dotds_64dot.py    # DOTDS / single-char display SCTOP-independence fix (internal, 64-dot mode only)
     └── myext.py          # add your own extensions here
 ```
 
+`bank_loader.py` and `vram_loader.py` ship inside `mp/ext/` and are auto-loaded at boot, but they
+only actually do anything when a BASIC program executes the matching `CALL &Hxxxx`. If you never
+call them, nothing happens and the emulator's behavior is unaffected — treat them as optional
+extras you can pick and choose to use.
+
+`dotds_64dot.py`, in contrast, is not something you call from BASIC — it's an internal fix that
+prevents display corruption in 64-dot display mode. The file always ships in `mp/ext/`, but it is
+only actually activated when `pb1000.ini`'s `[display] lcd_height` is `64`; with the default `32`
+it never intercepts anything and the ROM's native DOTDS/02BD run unmodified (there is no explicit
+on/off setting — it switches automatically based on `lcd_height`). See the `dotds_64dot.py` entry
+near the end of this document for details.
+
 `sample/mp/ext/` contains ready-to-use sample extensions (`dht20.py` — DHT20 temperature/humidity
 sensor, `ram_test.py`, etc.), but these are **not** auto-loaded unless copied into `mp/ext/`
-(`_ext_load_modules()` only scans `/ext/` and `/sd/ext/`; `sample/` is never scanned).
+(`_ext_load_modules()` only scans `/ext/` and `/sd/ext/`; `sample/` is never scanned). These, too,
+are purely optional add-ons that only take effect once copied in.
 
 On the Pico 2, place files under `/ext/` or `/sd/ext/` (SD card takes priority).
 
@@ -103,7 +124,9 @@ CALL_ADDR = 0x5E20   # assigned to CALL &5E20
 def register(system):
     try:
         # Perform any required hardware initialisation here
-        system.register_call_hook(CALL_ADDR, lambda: _handler(system))
+        # owner is the label shown on the emulator menu's "Hook Status" screen.
+        # Recommended explicitly since lambdas can't be identified by name.
+        system.register_call_hook(CALL_ADDR, lambda: _handler(system), owner="myext")
         print(f"myext: registered at {CALL_ADDR:#06x}")
     except Exception as e:
         print(f"myext: init failed: {e}")
@@ -181,8 +204,11 @@ hd61700.set_call_hook_enabled(CALL_ADDR, True)   # enable
 | --- | --- | --- |
 | `system.enable_call_hook(addr)` | `hd61700.set_call_hook_enabled(addr, True)` | Enable a hook |
 | `system.disable_call_hook(addr)` | `hd61700.set_call_hook_enabled(addr, False)` | Disable a hook (registration kept) |
-| `system.register_call_hook(addr, fn)` | `hd61700.set_call_hook(addr, fn)` | Register a hook (enabled by default) |
+| `system.register_call_hook(addr, fn, owner=None)` | `hd61700.set_call_hook(addr, fn)` | Register a hook (enabled by default). `owner` is the label shown in the Hook Status screen |
 | `system.unregister_call_hook(addr)` | `hd61700.clear_call_hook(addr)` | Remove a hook |
+| `system.list_call_hooks()` | — | Returns registered hooks as `(addr, owner, enabled)` tuples |
+
+Registration status can also be viewed from the Win+F7 emulator menu's **Hook Status** entry (see `dev_guide_en.md` §6.2).
 
 ---
 
@@ -198,13 +224,16 @@ hd61700.set_call_hook_enabled(CALL_ADDR, True)   # enable
 | `0x5E41`/`0x5E51`/`0x5E61`/`0x5E71` | `ram_test.py` (sample, not shipped) | Various RAM tests |
 | `0x5E81` | `bank_loader.py` | Load SD/flash file into bank RAM |
 | `0x5E91` | `bank_loader.py` | Load virtual FDD image file into bank RAM |
-| `0x022C` | `dotds_64dot.py` (internal fix) | DOTDS: bulk LEDTP → monochrome VRAM transfer (SCTOP-independent) |
-| `0x02BD` | `dotds_64dot.py` (internal fix) | Single-char quick display: direct EDCSR write (SCTOP-independent) |
+| `0x022C` | `dotds_64dot.py` (internal fix, active in 64-dot mode only) | DOTDS: bulk LEDTP → monochrome VRAM transfer (SCTOP-independent) |
+| `0x02BD` | `dotds_64dot.py` (internal fix, active in 64-dot mode only) | Single-char quick display: direct EDCSR write (SCTOP-independent) |
 
 `dht20.py` / `ram_test.py` live under `sample/mp/ext/` and do not run on a stock device unless
 copied into `mp/ext/` (marked "sample, not shipped" above). `dotds_64dot.py` is not a general-purpose
 BASIC extension but an internal fix module for 64-dot display mode, and it always ships as part of
-`mp/ext/`. When adding your own extensions, avoid colliding with its `0x022C`/`0x02BD` call addresses.
+`mp/ext/`. Its `0x022C`/`0x02BD` call_hooks themselves are only enabled when
+`[display] lcd_height = 64`; in 32-dot mode (the default) they are always disabled and the ROM's
+native DOTDS/02BD run untouched, so there is no collision risk with those two addresses in 32-dot
+mode. When adding your own extensions, it's still good practice to avoid those two call addresses.
 
 ---
 
@@ -284,11 +313,33 @@ display (`&H02BD`) render all 8 rows correctly in 64-dot display mode.
 - **call_hook `&H02BD` (single-char quick display override)**: computes row/column from the raw EDCSR
   (ignoring SCTOP) and writes the 6 bytes pushed by the caller in registers `$2`/`$3` directly to VRAM.
 - **mem_write_hook `&H68D0` (DSPMD watch)**: watches writes to DSPMD and enables the two call_hooks
-  above only in normal display mode (`DSPMD == 0`), disabling them (e.g. in MENU mode, `DSPMD == 3`)
-  so the ROM's original behaviour is restored.
+  above only when in 64-dot mode *and* in normal display mode (`DSPMD == 0`). They are disabled
+  whenever in MENU mode (`DSPMD == 3`), or unconditionally whenever running in 32-dot mode
+  (`[display] lcd_height = 32`, the default), so the ROM's original DOTDS/02BD implementation runs
+  untouched.
+
+This fix isn't needed in 32-dot mode at all — the LEDTP buffer only uses 4 rows there and the ROM's
+native SCTOP-based scrolling already works correctly — and applying the SCTOP-ignoring override
+unconditionally would actually break normal 32-dot scrolling. So `register(system)` reads
+`[display] lcd_height` from `system._config` (the same merged config dict passed into
+`create_system()`) once at startup to decide whether 64-dot mode is configured, before the DSPMD
+watch logic ever runs.
 
 `register(system)` calls `system.register_mem_write_hook(0x68D0, ...)`, making this a real-world
 usage example of the memory write hook API described in dev_guide.md §6.1.
+
+**Performance (native C hooks)**: DOTDS fires on every screen redraw and the single-char quick
+display hook fires on every character printed via PRINT, so both are hot paths. Their bodies are
+implemented in C in a standalone native module, `dotds64` (`src/moddotds64.c`,
+`dotds64.dotds_hook()` / `char_hook()`), behaving identically to the Python `_dotds_override()`/
+`_char_display_override()` functions. This module is deliberately kept out of the `hd61700` CPU
+core itself; `hd61700` only exposes small, generic C functions for reading CPU state
+(`hd61700_get_reg()` / `hd61700_mem_read()` / `hd61700_ram_read()`, none exposed to Python — see
+the `dotds64` module entry in `dev_guide_en.md` for details) for other modules to use.
+`register(system)` automatically uses the native module when `import dotds64` succeeds, falling
+back to the Python implementations otherwise. Enabling/disabling (via the DSPMD watch) is handled
+by the same Python code either way, so the registered addresses and activation conditions
+described above are unaffected. See the `dotds64` module entry in `dev_guide_en.md` for details.
 
 ---
 
@@ -302,3 +353,6 @@ usage example of the memory write hook API described in dev_guide.md §6.1.
 | 2026-06-11 | Added `vram_loader.py` and `bank_loader.py` |
 | 2026-07-04 | `vram_loader.py`: now calls `set_vdp_init_done(True)` after transfer so a direct colour-VRAM write is picked up by the renderer immediately |
 | 2026-07-09 | Corrected discrepancies vs. implementation: noted `dht20.py`/`ram_test.py` are unshipped samples, documented `dotds_64dot.py` (a real mem_write_hook usage example), and updated the ext work area's C-direct description (`get_ext_work_view()`) |
+| 2026-07-10 | `dotds_64dot.py`: now disables its call_hooks unconditionally in 32-dot mode (previously gated only on DSPMD, so it was incorrectly left active in 32-dot mode too). Reads `[display] lcd_height` from `system._config` at `register(system)` time |
+| 2026-07-13 | `dotds_64dot.py`: moved the DOTDS / single-char quick display hot paths to native C for faster rendering, implemented as a standalone `dotds64` module (`src/moddotds64.c`) kept out of the `hd61700` core. Automatically falls back to the Python implementation on older firmware |
+| 2026-07-13 | `moddotds64.c`: fixed DOTDS's LEDTP bulk copy calling `hd61700_mem_read()` (which has a UART-RX interrupt/sleep-wake side effect) up to 1536 times per call. Added side-effect-free `hd61700_ram_read()` and switched to it |

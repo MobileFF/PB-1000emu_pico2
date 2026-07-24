@@ -39,24 +39,6 @@ class XPT2046:
             return self.irq.value() == 0
         return False
 
-    def _transfer(self, cmd):
-        # Temporarily lower SPI speed for touch controller
-        self.spi.init(baudrate=self.baudrate)
-        
-        self.cs.value(0)
-        # 1 byte cmd, 2 bytes response. Buffer for write_readinto.
-        send = bytearray([cmd, 0, 0])
-        recv = bytearray(3)
-        self.spi.write_readinto(send, recv)
-        self.cs.value(1)
-        
-        # Restore high speed for display (best effort, assuming shared bus)
-        self.spi.init(baudrate=self.lcd_baudrate)
-        
-        # 12-bit result is typically across the last 2 bytes
-        # Bit 7-0 of byte 1 and bit 7-4 of byte 2 (shifted down)
-        return (recv[1] << 5 | recv[2] >> 3)
-
     def read_raw(self):
         """Read raw X, Y values in a single SPI transaction (avoids double baudrate-switch glitch)."""
         self.spi.init(baudrate=self.baudrate)

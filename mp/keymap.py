@@ -2,7 +2,7 @@
 PB-1000 Keyboard Mapping Definitions
 
 Search order for JSON override:
-  /sd/roms/keymap.json  >  /sd/keymap.json  >  /roms/keymap.json
+  /sd/roms/keymap.json  >  /sd/keymap.json  >  /roms/keymap.json  >  /keymap.json
 Falls back to built-in defaults when no JSON file is found.
 """
 
@@ -13,7 +13,7 @@ def _load_json_keymap():
         import json as _json
     except ImportError:
         return None, None
-    for path in ('/sd/roms/keymap.json', '/sd/keymap.json', '/roms/keymap.json'):
+    for path in ('/sd/roms/keymap.json', '/sd/keymap.json', '/roms/keymap.json', '/keymap.json'):
         print(f"[DEBUG boot] keymap: trying open({path})")
         try:
             with open(path) as f:

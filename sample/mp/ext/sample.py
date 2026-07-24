@@ -14,7 +14,7 @@ CALL_ADDR  = 0x5E20
 def register(system):
     """pb1000.py の _ext_load_modules() から呼ばれる。"""
     try:
-        system.register_call_hook(CALL_ADDR, lambda: _callback(system))
+        system.register_call_hook(CALL_ADDR, lambda: _callback(system), owner="sample")
         print(f"sample ext: hook {CALL_ADDR:#06x} ready")
     except Exception as e:
         print(f"sample ext: init failed: {e}")

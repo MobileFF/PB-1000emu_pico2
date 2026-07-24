@@ -311,7 +311,6 @@ class LCDControllerC:
             self._char_out_cb(data)
         lcd_c.write(data)
 
-    def lcd_read(self): return lcd_c.read()
     def clear(self): lcd_c.clear()
     def get_pixel(self, x, y): return lcd_c.get_pixel(x, y)
     def mark_dirty(self): lcd_c.mark_dirty()

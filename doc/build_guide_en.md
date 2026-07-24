@@ -107,6 +107,14 @@ The output firmware will be located at `build-RPI_PICO2_W/firmware.uf2`.
 
 Once the firmware is flashed, you need to upload the Python logic and ROM files.
 
+> [!IMPORTANT]
+> This firmware builds the Pico's USB port as **USB host only** (`CFG_TUD_ENABLED=0`), so
+> `mpremote` cannot connect over the Pico's own USB port. Wire a USB-to-serial adapter to
+> **GP0/GP1 (UART0 REPL)** and connect to that serial port explicitly (e.g. `/dev/ttyUSB0`,
+> `COMx` on Windows) — see "UART and Serial" in the [Hardware Guide](hardware_guide_en.md) for
+> wiring. Read every `mpremote` command below as `mpremote connect <port> ...`, or set
+> `MPREMOTE_TTY=/dev/ttyUSB0` before running them.
+
 1.  **Install mpremote**:
     ```bash
     pip install mpremote
@@ -114,15 +122,15 @@ Once the firmware is flashed, you need to upload the Python logic and ROM files.
 2.  **Upload Python files**:
     ```bash
     cd PB-1000_emu_AG2/mp
-    mpremote fs cp * :
+    mpremote connect /dev/ttyUSB0 fs cp * :
     ```
 3.  **Upload ROMs**:
     ```bash
     # Create roms directory on Pico
-    mpremote fs mkdir :roms
+    mpremote connect /dev/ttyUSB0 fs mkdir :roms
     # Upload ROM files (rom0.bin, rom1.bin)
     cd ../roms
-    mpremote fs cp *.bin :roms/
+    mpremote connect /dev/ttyUSB0 fs cp *.bin :roms/
     ```
 
 ## Troubleshooting

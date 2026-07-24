@@ -71,28 +71,6 @@ static mp_obj_t mod_lcd_get_vram(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(mod_lcd_get_vram_obj, mod_lcd_get_vram);
 
-/* lcd_c.get_vram_byte(offset) -> int */
-static mp_obj_t mod_lcd_get_vram_byte(mp_obj_t off_obj) {
-  int off = mp_obj_get_int(off_obj);
-  if (off < 0 || off >= LCD_VRAM_SIZE) {
-    return MP_OBJ_NEW_SMALL_INT(0);
-  }
-  return MP_OBJ_NEW_SMALL_INT(lcd_state.vram[off]);
-}
-static MP_DEFINE_CONST_FUN_OBJ_1(mod_lcd_get_vram_byte_obj,
-                                 mod_lcd_get_vram_byte);
-
-/* lcd_c.get_vram_view() -> bytearray (direct writable reference to C static
-   array, mirrors get_color_vram()). Lets Python bulk-write the mono LCD
-   framebuffer (e.g. via memoryview slice assignment) without per-byte
-   write()/ctrl() protocol calls — needed for high-frequency callers like a
-   DOTDS call_hook override. Remember to call mark_dirty() after writing. */
-static mp_obj_t mod_lcd_get_vram_view(void) {
-  return mp_obj_new_bytearray_by_ref(LCD_VRAM_SIZE, lcd_state.vram);
-}
-static MP_DEFINE_CONST_FUN_OBJ_0(mod_lcd_get_vram_view_obj,
-                                  mod_lcd_get_vram_view);
-
 /* lcd_c.blit_reversed(src, dst_offset) — bulk-copy src (any buffer-protocol
    object, e.g. a memoryview slice) into lcd_state.vram starting at
    dst_offset, bit-reversing every byte on the way in.
@@ -162,22 +140,6 @@ static mp_obj_t mod_lcd_is_display_on(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(mod_lcd_is_display_on_obj,
                                  mod_lcd_is_display_on);
-
-/* lcd_c.set_x_mirror(enabled) */
-static mp_obj_t mod_lcd_set_x_mirror(mp_obj_t enabled_obj) {
-  lcd_set_x_mirror(&lcd_state, mp_obj_is_true(enabled_obj));
-  return mp_const_none;
-}
-static MP_DEFINE_CONST_FUN_OBJ_1(mod_lcd_set_x_mirror_obj,
-                                 mod_lcd_set_x_mirror);
-
-/* lcd_c.set_draw_bitimage_reverse(enabled) */
-static mp_obj_t mod_lcd_set_draw_bitimage_reverse(mp_obj_t enabled_obj) {
-  lcd_set_draw_bitimage_reverse(&lcd_state, mp_obj_is_true(enabled_obj));
-  return mp_const_none;
-}
-static MP_DEFINE_CONST_FUN_OBJ_1(mod_lcd_set_draw_bitimage_reverse_obj,
-                                 mod_lcd_set_draw_bitimage_reverse);
 
 /* lcd_c.load_charset(bytes_data) */
 static mp_obj_t mod_lcd_load_charset(mp_obj_t buf_obj) {
@@ -271,13 +233,6 @@ static mp_obj_t mod_lcd_vdp_write(mp_obj_t reg_obj, mp_obj_t data_obj) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_2(mod_lcd_vdp_write_obj, mod_lcd_vdp_write);
 
-/* lcd_c.vdp_read(reg) -> int — reg is 0-4 (offset - 0x0C20) */
-static mp_obj_t mod_lcd_vdp_read(mp_obj_t reg_obj) {
-  uint32_t reg = (uint32_t)mp_obj_get_int(reg_obj);
-  return MP_OBJ_NEW_SMALL_INT(lcd_vdp_read(&lcd_state, reg));
-}
-static MP_DEFINE_CONST_FUN_OBJ_1(mod_lcd_vdp_read_obj, mod_lcd_vdp_read);
-
 /* lcd_c.set_vdp_enable(bool) — enable/disable per-pixel color VRAM rendering */
 static mp_obj_t mod_lcd_set_vdp_enable(mp_obj_t enabled_obj) {
   lcd_set_vdp_enable(&lcd_state, mp_obj_is_true(enabled_obj));
@@ -350,18 +305,12 @@ static const mp_rom_map_elem_t lcd_c_module_globals_table[] = {
     {MP_ROM_QSTR(MP_QSTR_read), MP_ROM_PTR(&mod_lcd_read_obj)},
     {MP_ROM_QSTR(MP_QSTR_get_pixel), MP_ROM_PTR(&mod_lcd_get_pixel_obj)},
     {MP_ROM_QSTR(MP_QSTR_get_vram), MP_ROM_PTR(&mod_lcd_get_vram_obj)},
-    {MP_ROM_QSTR(MP_QSTR_get_vram_view), MP_ROM_PTR(&mod_lcd_get_vram_view_obj)},
     {MP_ROM_QSTR(MP_QSTR_blit_reversed), MP_ROM_PTR(&mod_lcd_blit_reversed_obj)},
-    {MP_ROM_QSTR(MP_QSTR_get_vram_byte),
-     MP_ROM_PTR(&mod_lcd_get_vram_byte_obj)},
     {MP_ROM_QSTR(MP_QSTR_is_dirty), MP_ROM_PTR(&mod_lcd_is_dirty_obj)},
     {MP_ROM_QSTR(MP_QSTR_clear_dirty), MP_ROM_PTR(&mod_lcd_clear_dirty_obj)},
     {MP_ROM_QSTR(MP_QSTR_mark_dirty), MP_ROM_PTR(&mod_lcd_mark_dirty_obj)},
     {MP_ROM_QSTR(MP_QSTR_is_display_on),
      MP_ROM_PTR(&mod_lcd_is_display_on_obj)},
-    {MP_ROM_QSTR(MP_QSTR_set_x_mirror), MP_ROM_PTR(&mod_lcd_set_x_mirror_obj)},
-    {MP_ROM_QSTR(MP_QSTR_set_draw_bitimage_reverse),
-     MP_ROM_PTR(&mod_lcd_set_draw_bitimage_reverse_obj)},
     {MP_ROM_QSTR(MP_QSTR_load_charset), MP_ROM_PTR(&mod_lcd_load_charset_obj)},
     {MP_ROM_QSTR(MP_QSTR_set_debug), MP_ROM_PTR(&mod_lcd_set_debug_obj)},
     {MP_ROM_QSTR(MP_QSTR_set_bg_colors),
@@ -382,14 +331,11 @@ static const mp_rom_map_elem_t lcd_c_module_globals_table[] = {
     {MP_ROM_QSTR(MP_QSTR_render), MP_ROM_PTR(&mod_lcd_render_obj)},
     {MP_ROM_QSTR(MP_QSTR_wait_for_idle), MP_ROM_PTR(&mod_lcd_wait_for_idle_obj)},
     {MP_ROM_QSTR(MP_QSTR_vdp_write), MP_ROM_PTR(&mod_lcd_vdp_write_obj)},
-    {MP_ROM_QSTR(MP_QSTR_vdp_read),  MP_ROM_PTR(&mod_lcd_vdp_read_obj)},
     {MP_ROM_QSTR(MP_QSTR_get_num_pages), MP_ROM_PTR(&mod_lcd_get_num_pages_obj)},
     {MP_ROM_QSTR(MP_QSTR_set_num_pages), MP_ROM_PTR(&mod_lcd_set_num_pages_obj)},
     /* Constants */
     {MP_ROM_QSTR(MP_QSTR_WIDTH), MP_ROM_INT(LCD_WIDTH)},
     {MP_ROM_QSTR(MP_QSTR_HEIGHT), MP_ROM_INT(LCD_HEIGHT)},
-    {MP_ROM_QSTR(MP_QSTR_VRAM_SIZE), MP_ROM_INT(LCD_VRAM_SIZE)},
-    {MP_ROM_QSTR(MP_QSTR_COLOR_VRAM_SIZE), MP_ROM_INT(LCD_COLOR_VRAM_SIZE)},
 };
 static MP_DEFINE_CONST_DICT(lcd_c_module_globals, lcd_c_module_globals_table);
 

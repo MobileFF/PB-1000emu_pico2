@@ -107,6 +107,14 @@ Windows ネイティブビルドは上記 CFLAGS の関係で非推奨です。W
 
 ファームウェアの書き込みが終わったら、Python のロジックと ROM ファイルをアップロードする必要があります。
 
+> [!IMPORTANT]
+> このファームウェアは Pico の USB ポートを **USB ホスト専用**でビルドしているため（`CFG_TUD_ENABLED=0`）、
+> `mpremote` は Pico 本体の USB ポート経由では接続できません。**GP0/GP1 に配線した UART REPL** に
+> USB-シリアル変換アダプタを接続し、そのシリアルポート（例: `/dev/ttyUSB0`、Windows は `COMx`）を
+> 明示的に指定して接続してください（配線は [Hardware Guide](hardware_guide.md) の「UART およびシリアル」参照）。
+> 下記コマンド例の `mpremote` はすべて `mpremote connect <ポート>` を先頭に読み替えるか、
+> 環境変数 `MPREMOTE_TTY=/dev/ttyUSB0` 等を設定してから実行してください。
+
 1.  **mpremote のインストール**:
     ```bash
     pip install mpremote
@@ -114,15 +122,15 @@ Windows ネイティブビルドは上記 CFLAGS の関係で非推奨です。W
 2.  **Python ファイルのアップロード**:
     ```bash
     cd PB-1000_emu_AG2/mp
-    mpremote fs cp * :
+    mpremote connect /dev/ttyUSB0 fs cp * :
     ```
 3.  **ROM のアップロード**:
     ```bash
     # Pico 側に roms ディレクトリを作成
-    mpremote fs mkdir :roms
+    mpremote connect /dev/ttyUSB0 fs mkdir :roms
     # ROM ファイル (rom0.bin, rom1.bin) をアップロード
     cd ../roms
-    mpremote fs cp *.bin :roms/
+    mpremote connect /dev/ttyUSB0 fs cp *.bin :roms/
     ```
 
 ## トラブルシューティング

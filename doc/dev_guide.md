@@ -24,6 +24,7 @@ src/
   modlcd_controller.c     # lcd_c MicroPython モジュール
   usb_host_core.c / .h    # USB ホストドライバコア
   modusb_host.c           # usb_host MicroPython モジュール
+  moddotds64.c            # dotds64 MicroPython モジュール（64ドット表示フィックスの高速化）
   micropython.cmake       # ビルドシステム設定
 
 mp/
@@ -41,7 +42,8 @@ mp/
   config.py               # pb1000.ini 読み込み
   pio_uart.py             # PIO ソフト UART（RS-232C）
   keymap.py / keymap.json # キーボードマッピングテーブル
-  ili9341.py              # ILI9341 TFT ドライバ
+  ili9341.py              # ILI9341 TFT ドライバ (320x240)
+  st7796.py               # ST7796 TFT ドライバ (480x320)
   ext/                    # 拡張 API モジュール（自動ロード）
 
 hardware/
@@ -131,6 +133,34 @@ RP2350 の USB ホスト機能（TinyUSB HID）を MicroPython から操作。
 - `hd61700.keyboard_config_adv()` / `keyboard_config_base()` とセットで使用（キーマップ設定）。
 - `hd61700.process_usb_key(scancode, pressed)` は手動でキーイベントを注入するテスト用フックであり、`usb_host` モジュールではなく `hd61700` モジュールに属する。
 
+### `dotds64` モジュール（`src/moddotds64.c`）
+
+`mp/ext/dotds_64dot.py`（64ドット表示モードの内部フィックス、§9・`extension_api.md` 参照）専用の
+ネイティブ call_hook 実装を提供する、小さな独立モジュール。DOTDS (`&H022C`) と1文字クイック表示
+(`&H02BD`) の置き換え処理はホットパス（画面更新のたび／PRINT で文字を書くたびに呼ばれる）のため、
+MicroPython 経由の呼び出しオーバーヘッドを避けてパフォーマンスを確保する目的でC実装している。
+
+| 関数 | 説明 |
+| --- | --- |
+| `dotds_hook()` | DOTDS の置き換え処理。`mp/ext/dotds_64dot.py` の `_dotds_override()` と同一ロジック |
+| `char_hook()` | 1文字クイック表示の置き換え処理。同 `_char_display_override()` と同一ロジック |
+
+**設計方針**: この機能は `hd61700` CPU コア本体には含めていない（サブルーチンフックの実装を
+コアから分離し、独立したモジュールとして構成する方針）。`hd61700` 側が公開するのは、他のモジュールが
+CPU 状態を読むための汎用的で最小限の C 関数のみで、64ドット対応固有のロジックは一切持たない。
+LCD 側の状態アクセスは既存の `lcd_c_get_state()`（`modlcd_controller.c`）をそのまま利用する。
+
+| 関数（いずれも Python 非公開の extern 関数） | 説明 |
+| --- | --- |
+| `uint8_t hd61700_get_reg(int idx)` | 汎用レジスタ `$idx` を読む（`hd61700.get_reg()` と同等） |
+| `uint8_t hd61700_mem_read(uint16_t addr)` | CPU バス経由の1バイト読み出し（`hd61700.read_mem()` と同等）。MMIO判定や UART受信割り込み/スリープ解除などの副作用を含むため、実際の「CPUが1回メモリを読む」動作を再現したい場合にのみ使う |
+| `uint8_t hd61700_ram_read(uint16_t ram_offset)` | メインRAM（`0x6000`–`0x7FFF`、RAM相対オフセット指定）への副作用なし直接読み出し。バルクコピー（DOTDS の LEDTP 転送など）で `hd61700_mem_read()` を大量に繰り返し呼ぶと UART 副作用が何百回も再実行されてしまうため、その用途向けに用意 |
+
+`mp/ext/dotds_64dot.py` の `register()` は `import dotds64` を試み、成功すれば
+`dotds64.dotds_hook`/`char_hook` を call_hook として登録する。モジュールが存在しない
+（古い）ファームウェアでは `ImportError` を捕捉し、Python実装（`_dotds_override()`/
+`_char_display_override()`）に自動フォールバックする。
+
 ---
 
 ## 4. CPU コアの詳細
@@ -203,7 +233,9 @@ CAL 命令を使わない BASIC の CALL 文（push+JP 経路）にも対応で�
 
 ```python
 # フック登録（新規エントリはデフォルトで有効）
-system.register_call_hook(0x5E20, my_handler)
+# owner は任意のラベル文字列。省略時は fn.__name__ を使用（ラムダの場合は
+# 判別できないことが多いため、拡張モジュールでは明示的に渡すことを推奨）。
+system.register_call_hook(0x5E20, my_handler, owner="myext")
 
 # フック解除
 system.unregister_call_hook(0x5E20)
@@ -211,6 +243,10 @@ system.unregister_call_hook(0x5E20)
 # 有効・無効の切り替え（解除せず一時停止）
 system.disable_call_hook(0x5E20)
 system.enable_call_hook(0x5E20)
+
+# 登録済みフックの一覧を取得（アドレス, owner, enabled のタプルのリスト）
+# エミュレータメニューの「Hook Status」画面もこれを使って表示している。
+system.list_call_hooks()
 ```
 
 ### C ネイティブフック
@@ -235,7 +271,8 @@ Python 関数を `fn(addr, data, bank)` の形で呼び出す。関数が `True`
 
 ```python
 # フック登録（アドレス範囲 addr_start..addr_end、省略時は 1 バイトのみ）
-system.register_mem_write_hook(0x68D0, my_write_handler, addr_end=0x68D0)
+# owner は call_hook と同様、任意のラベル文字列（省略時は fn.__name__）。
+system.register_mem_write_hook(0x68D0, my_write_handler, addr_end=0x68D0, owner="myext")
 
 # フック解除
 system.unregister_mem_write_hook(0x68D0)
@@ -243,10 +280,23 @@ system.unregister_mem_write_hook(0x68D0)
 # 有効・無効の切り替え（解除せず一時停止）
 system.disable_mem_write_hook(0x68D0)
 system.enable_mem_write_hook(0x68D0)
+
+# 登録済みフックの一覧を取得（addr_start, addr_end, owner, enabled のタプルのリスト）
+system.list_mem_write_hooks()
 ```
 
+### 6.2 Hook Status（エミュレータメニュー）
+
+`system.list_call_hooks()` / `system.list_mem_write_hooks()` を使って、現在登録されている
+call_hook・mem_write_hook をアドレス・登録元(owner)・有効/無効状態つきで一覧表示するメニュー項目。
+Win+F7 のエミュレータメニューから **Hook Status** を選択すると表示される（`emulator_menu.py`
+の `_do_hook_status()`）。上下キーでスクロール、BREAK で閉じる。デバッグ時に「どの拡張がどの
+アドレスをフックしているか」「MENU 表示モードなどで意図通り無効化されているか」を確認する用途。
+
 実際の使用例として `mp/ext/dotds_64dot.py` が DSPMD レジスタ（0x68D0）へのメモリ書き込みフックを登録し、
-値に応じて CALL フックの有効・無効を切り替えている（64 ドット表示行対応）。
+値に応じて CALL フックの有効・無効を切り替えている（64 ドット表示行対応）。ただし
+`[display] lcd_height = 32`（デフォルト）の場合はこの仕組み自体が常に無効化され、
+ROM 本来の実装がそのまま動作する（32 ドットモードではこのフィックスは不要かつ有害なため）。
 設計・実装の経緯は `doc/plan_mem_write_hook.md` を参照（実装済み）。
 
 ---
@@ -300,6 +350,10 @@ BASIC から Pico 2 の周辺機能（I2C、SPI、WiFi 等）を `CALL` 命令�
 - `mp/ext/` ディレクトリにモジュールを置くだけで起動時に自動ロード。
 - モジュールが `register(system)` 関数を持っていれば呼び出される。
 - BASIC との値受け渡しは拡張ワークエリア（0x5F00–0x5FFF）を使用。
+- `ext/` 配下のモジュール（`bank_loader.py`・`vram_loader.py` 等）はいずれも**任意**の機能であり、
+  BASIC から明示的に `CALL` して初めて動作する。エミュレータ本体の基本動作には影響しない
+  （`dotds_64dot.py` は例外で、64ドット表示モードの内部フィックスだが、`[display] lcd_height`
+  の設定に応じて自動的に有効・無効が切り替わり、32ドットモードでは常に無効）。
 
 詳細は `doc/extension_api.md` を参照。
 

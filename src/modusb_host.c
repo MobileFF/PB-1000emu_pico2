@@ -24,22 +24,6 @@ static mp_obj_t mod_usb_host_init(size_t n_args, const mp_obj_t *args) {
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(mod_usb_host_init_obj, 0, 1,
                                            mod_usb_host_init);
 
-// Python API: usb_host.probe() - simple call to test module linkage
-static mp_obj_t mod_usb_host_probe(void) {
-  TRACE("[USB Host] probe called");
-  mp_printf(&mp_plat_print, "[USB Host] probe called\n");
-  return mp_const_none;
-}
-static MP_DEFINE_CONST_FUN_OBJ_0(mod_usb_host_probe_obj, mod_usb_host_probe);
-
-// Python API: usb_host.task()
-// Should be called frequently in the main loop
-static mp_obj_t mod_usb_host_task(void) {
-  usb_host_core_task();
-  return mp_const_none;
-}
-static MP_DEFINE_CONST_FUN_OBJ_0(mod_usb_host_task_obj, mod_usb_host_task);
-
 // Python API: usb_host.start_bg_timer(interval_ms=8)
 static mp_obj_t mod_usb_host_start_bg_timer(size_t n_args, const mp_obj_t *args) {
   int interval = (n_args > 0) ? mp_obj_get_int(args[0]) : 8;
@@ -61,8 +45,6 @@ static MP_DEFINE_CONST_FUN_OBJ_0(mod_usb_host_stop_bg_timer_obj,
 static const mp_rom_map_elem_t usb_host_module_globals_table[] = {
     {MP_ROM_QSTR(MP_QSTR___name__), MP_ROM_QSTR(MP_QSTR_usb_host)},
     {MP_ROM_QSTR(MP_QSTR_init), MP_ROM_PTR(&mod_usb_host_init_obj)},
-    {MP_ROM_QSTR(MP_QSTR_probe), MP_ROM_PTR(&mod_usb_host_probe_obj)},
-    {MP_ROM_QSTR(MP_QSTR_task), MP_ROM_PTR(&mod_usb_host_task_obj)},
     {MP_ROM_QSTR(MP_QSTR_start_bg_timer),
      MP_ROM_PTR(&mod_usb_host_start_bg_timer_obj)},
     {MP_ROM_QSTR(MP_QSTR_stop_bg_timer),

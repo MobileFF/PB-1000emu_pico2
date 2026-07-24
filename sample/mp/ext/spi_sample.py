@@ -30,7 +30,7 @@ import os
 
 CALL_ADDR      = 0x5E30
 MY_CS_PIN      = 28          # 使用するCSピン番号 (GP28: 汎用予備ピン)
-MY_BAUD        = 1_000_000   # デバイスのボーレート
+MY_BAUD        = 400_000   # デバイスのボーレート
 LCD_BAUD       = 40_000_000  # LCDが使う40MHz に戻す値
 
 # 外付けSDカードモジュール設定
@@ -53,7 +53,7 @@ def register(system):
         return
     try:
         cs = machine.Pin(MY_CS_PIN, machine.Pin.OUT, value=1)
-        system.register_call_hook(CALL_ADDR, lambda: _callback(system, cs))
+        system.register_call_hook(CALL_ADDR, lambda: _callback(system, cs), owner="spi_sample")
         print(f"spi_sample: hook {CALL_ADDR:#06x} ready (CS=GP{MY_CS_PIN})")
     except Exception as e:
         print(f"spi_sample: init failed: {e}")
@@ -115,6 +115,7 @@ def list_ext_sd(cs_pin=EXT_SD_CS_PIN, mount_path=EXT_MOUNT_PATH):
 
 
 def _callback(system, cs):
+    list_ext_sd()
     """CALL &5E30 ハンドラ: SPI デバイスから1バイト読み取る"""
     w = system._ext_work
     try:

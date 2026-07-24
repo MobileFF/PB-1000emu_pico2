@@ -9,13 +9,14 @@ _DEFAULTS = {
     "keyboard": {
         "enable_usb_kbd": "true",
         "enable_uart_kbd": "false",
-        "uart_baudrate": "115200",
+        "uart_baudrate": "9600",
         "uart_tx_pin": "4",
         "uart_rx_pin": "5",
         "key_hold_ms": "120",
         "key_release_hard_timeout_ms": "1200",
         "inter_key_gap_ms": "80",
         "uart_enter_always_exe": "true",
+        "key_pulse_interval_ms": "25",
     },
     "emulator": {
         "frame_interval_ms": "33",
@@ -74,6 +75,12 @@ _DEFAULTS = {
         "server": "pool.ntp.org",
         "tz_offset_h": "9",
         "timeout_ms": "15000",
+    },
+    "debug": {
+        "cpu_debug": "false",
+        "key_debug": "false",
+        "lcd_debug": "false",
+        "newall_debug": "false",
     },
 }
 

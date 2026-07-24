@@ -1,50 +1,12 @@
 """
 Bank RAM Loader Extension
 
-Load binary data from SD card or virtual FDD disk image into bank RAM (banks 1/2/3).
+CALL &H5E81  SD/フラッシュファイル   → バンクRAM (1/2/3) ロード
+CALL &H5E91  仮想FDDイメージ内ファイル → バンクRAM (1/2/3) ロード
 
---- Load from SD file ---
-CALL &H5E81
-
-Input (_ext_work before CALL):
-  [0]      : bank number (1/2/3)
-  [1][2]   : destination offset high/low byte (0x0000-0x7FFF, bank-relative)
-  [3][4]   : file byte offset high/low byte (0x0000 = start of file)
-  [5][6]   : max length high/low byte (0x0000 = load all that fits)
-  [7..]    : file path, null-terminated ASCII (e.g. "/sd/game.bin")
-
-Output (_ext_work after CALL):
-  [0]      : 0x00=OK  0x01=bank not present  0x02=file error  0xFF=other error
-  [1][2]   : bytes loaded high/low byte
-
---- Load from FDD disk image ---
-CALL &H5E91
-
-Input (_ext_work before CALL):
-  [0]      : bank number (1/2/3)
-  [1][2]   : destination offset high/low byte (0x0000-0x7FFF, bank-relative)
-  [3]      : skip records (0 = from beginning of file)
-  [4..14]  : filename 11 bytes (8 name + 3 ext, space-padded, e.g. b"PROGRAM BAS")
-
-Output (_ext_work after CALL):
-  [0]      : 0x00=OK  0x01=bank not present  0x02=file not found
-             0x03=FDD not ready  0xFF=other error
-  [1][2]   : bytes loaded high/low byte
-
-BASIC example (load "/sd/game.bin" into bank 2 at offset 0x0000):
-  POKE &H5F00, 2          ' bank 2
-  POKE &H5F01, &H00       ' dest high
-  POKE &H5F02, &H00       ' dest low
-  POKE &H5F03, 0          ' file offset high
-  POKE &H5F04, 0          ' file offset low
-  POKE &H5F05, 0          ' max length high (0=all)
-  POKE &H5F06, 0          ' max length low
-  ' "/sd/game.bin" = 47,115,100,47,103,97,109,101,46,98,105,110,0
-  POKE &H5F07, 47  : POKE &H5F08, 115 : POKE &H5F09, 100
-  ...
-  CALL &H5E81
-  IF PEEK(&H5F00)<>0 THEN PRINT "ERR": END
-  PRINT "LOADED:"; PEEK(&H5F01)*256+PEEK(&H5F02); "BYTES"
+ext_work レイアウト・結果コード・BASIC使用例は
+doc/extension_api.md「bank_loader.py」を参照。ここに全文を置くと
+起動時ロードのたびにコンパイル時メモリを圧迫するため要点のみ。
 """
 
 from md100_dos import MD100Dos, DS_NO_ERROR
@@ -63,8 +25,8 @@ _CHUNK = 256
 
 def register(system):
     try:
-        system.register_call_hook(SD_LOAD_ADDR,  lambda: _load_sd(system))
-        system.register_call_hook(FDD_LOAD_ADDR, lambda: _load_fdd(system))
+        system.register_call_hook(SD_LOAD_ADDR,  lambda: _load_sd(system), owner="bank_loader")
+        system.register_call_hook(FDD_LOAD_ADDR, lambda: _load_fdd(system), owner="bank_loader")
         print(f"bank_loader: CALL &H{SD_LOAD_ADDR:04X}  -> load SD file to bank RAM")
         print(f"bank_loader: CALL &H{FDD_LOAD_ADDR:04X}  -> load FDD file to bank RAM")
     except Exception as e:

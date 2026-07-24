@@ -1,75 +1,12 @@
 """
 vram_loader.py — カラーVRAM イメージローダー 拡張モジュール
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- CALL &H5E20  SDカード/フラッシュ → バンクRAM → カラーVRAM
- CALL &H5E21  仮想FDDイメージ     → バンクRAM → カラーVRAM
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CALL &H5E20  SDカード/フラッシュ → バンクRAM → カラーVRAM
+CALL &H5E21  仮想FDDイメージ     → バンクRAM → カラーVRAM
 
-ロード後はバンクRAMにデータが残るため、DMA MMIO (0x0C30-0x0C37) で
-ファイルI/Oなしの高速再転送が可能。
-
-【共通パラメータ (CALL 前に POKE)】
-  &H5F42  中継バンク番号 (1/2/3、デフォルト=2)
-  &H5F43  転送先オフセット lo  (color_vram 内、デフォルト=0)
-  &H5F44  転送先オフセット hi
-  &H5F45  転送バイト数 lo      (0=ファイル全体)
-  &H5F46  転送バイト数 hi
-  &H5F49  先頭スキップバイト数 lo  (デフォルト=0)
-  &H5F4A  先頭スキップバイト数 hi
-          BSAVE で保存したファイルは先頭4バイトがヘッダ
-          (開始アドレス2B + 長さ2B) のため POKE &H5F49,4 を指定
-
-【CALL &H5E20 専用パラメータ】
-  &H5F01  ファイル名バイト長 (1-64)
-  &H5F02-&H5F41  ファイル名 ASCII
-          絶対パス例: /sd/images/bg.bin
-          ファイル名のみの場合は /sd/images/, /sd/screenshots/, /sd/, / の順に検索
-
-【CALL &H5E21 専用パラメータ】
-  &H5F01  ファイル名バイト長 (1-12)
-  &H5F02-&H5F0D  ファイル名 ASCII (8.3形式: "NAME.EXT" or "NAME    EXT")
-          FDD がマウントされていない場合はエラー (結果コード 5)
-
-【出力結果 (CALL 後に PEEK)】
-  &H5F00  0=OK / 1=ファイル未発見 / 2=読み取りエラー
-          3=バンク未割当 / 4=範囲外 / 5=FDD未マウント
-  &H5F47  実転送バイト数 lo
-  &H5F48  実転送バイト数 hi
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- BASIC 使用例 (SDカード)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  10 S$="bg.bin"
-  20 POKE &H5F01,LEN(S$)
-  30 FOR I=1 TO LEN(S$):POKE &H5F01+I,ASC(MID$(S$,I,1)):NEXT I
-  40 POKE &H5F42,2:POKE &H5F43,0:POKE &H5F44,0
-  50 POKE &H5F45,0:POKE &H5F46,0
-  60 CALL &H5E20
-  70 IF PEEK(&H5F00)<>0 THEN PRINT "ERR:";PEEK(&H5F00):END
-  80 PRINT PEEK(&H5F47)+PEEK(&H5F48)*256;"bytes"
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- BASIC 使用例 (仮想FDD)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  10 S$="BG.BIN"
-  20 POKE &H5F01,LEN(S$)
-  30 FOR I=1 TO LEN(S$):POKE &H5F01+I,ASC(MID$(S$,I,1)):NEXT I
-  40 POKE &H5F42,2:POKE &H5F43,0:POKE &H5F44,0
-  50 POKE &H5F45,0:POKE &H5F46,0
-  55 POKE &H5F49,4:POKE &H5F4A,0  : REM BSAVEヘッダ4バイトをスキップ
-  60 CALL &H5E21
-  70 IF PEEK(&H5F00)<>0 THEN PRINT "ERR:";PEEK(&H5F00):END
-  80 PRINT PEEK(&H5F47)+PEEK(&H5F48)*256;"bytes"
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- DMA 再転送例 (ロード済みデータをVRAMに再反映)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  POKE &H0C30,2:POKE &H0C31,0:POKE &H0C32,0
-  POKE &H0C33,0:POKE &H0C34,0
-  POKE &H0C35,0:POKE &H0C36,&H30
-  POKE &H0C37,0
-  IF PEEK(&H0C37) AND 1 THEN PRINT "DMA ERR"
+パラメータ表・結果コード・BASIC使用例・DMA再転送例は
+doc/extension_api.md「vram_loader.py」を参照。ここに全文を置くと
+起動時ロードのたびにコンパイル時メモリを圧迫するため要点のみ。
 """
 
 try:
@@ -114,8 +51,8 @@ _FDD_HANDLE = 15
 
 
 def register(system):
-    system.register_call_hook(CALL_ADDR,     lambda: _load_vram_sd(system))
-    system.register_call_hook(CALL_FDD_ADDR, lambda: _load_vram_fdd(system))
+    system.register_call_hook(CALL_ADDR,     lambda: _load_vram_sd(system), owner="vram_loader")
+    system.register_call_hook(CALL_FDD_ADDR, lambda: _load_vram_fdd(system), owner="vram_loader")
     print(f"vram_loader: CALL &H{CALL_ADDR:04X} (SD)  CALL &H{CALL_FDD_ADDR:04X} (FDD) ready")
 
 

@@ -1,6 +1,29 @@
 # To use this module, add the following to your MicroPython build command:
 # USER_C_MODULES=../../../PB-1000_emu_AG2/src/micropython.cmake
 
+# ------------------------------------------------------------------------
+# Disable Bluetooth (BTstack + CYW43 BT integration).
+#
+# The RPI_PICO2_W board definition (boards/RPI_PICO2_W/mpconfigboard.cmake)
+# enables MICROPY_PY_BLUETOOTH / MICROPY_BLUETOOTH_BTSTACK /
+# MICROPY_PY_BLUETOOTH_CYW43 by default, but this project never uses
+# Bluetooth (no `import bluetooth` anywhere in mp/). That still costs real
+# RAM at runtime: BTstack's HCI/L2CAP buffers and run-loop state, plus the
+# CYW43 driver's Bluetooth code paths, plus the combined WiFi+BT firmware
+# blob (lib/cyw43-driver/firmware/wb43439A0_..._combined.h, ~44KB larger
+# than the WiFi-only blob) versus the WiFi-only firmware selected once BT
+# is off. WiFi/NTP (MICROPY_PY_NETWORK_CYW43 / MICROPY_PY_LWIP, used by
+# mp/ntp_sync.py) is left untouched.
+#
+# This must be set here (via USER_C_MODULES, included from
+# ports/rp2/CMakeLists.txt before the MICROPY_PY_BLUETOOTH checks are
+# evaluated) rather than by editing the shared board file, so the override
+# stays local to this project's build.
+set(MICROPY_PY_BLUETOOTH OFF)
+set(MICROPY_BLUETOOTH_BTSTACK OFF)
+set(MICROPY_PY_BLUETOOTH_CYW43 OFF)
+# ------------------------------------------------------------------------
+
 add_compile_options(-Wno-error -Wno-error=implicit-function-declaration)
 add_compile_definitions(CFG_TUH_HID_EP_BUFSIZE=64)
 
@@ -40,6 +63,7 @@ target_sources(hd61700_lib INTERFACE
     ${CMAKE_CURRENT_LIST_DIR}/lcd_controller.c
     ${CMAKE_CURRENT_LIST_DIR}/modlcd_controller.c
     ${CMAKE_CURRENT_LIST_DIR}/modusb_host.c
+    ${CMAKE_CURRENT_LIST_DIR}/moddotds64.c
 )
 
 target_include_directories(hd61700_lib INTERFACE
@@ -148,3 +172,31 @@ target_link_libraries(usermod INTERFACE
     hd61700_lib
     usb_host_core_lib
 )
+
+# ------------------------------------------------------------------------
+# Restore the pico/cyw43_driver.h include path lost by disabling Bluetooth
+# above.
+#
+# In an unmodified (Bluetooth-enabled) build, ports/rp2/CMakeLists.txt only
+# ever links the WiFi-only target `cyw43_driver_picow` (which compiles
+# cyw43_bus_pio_spi.c, needed purely for WiFi) directly into the firmware.
+# That target's own INTERFACE include dirs do NOT contain
+# pico_cyw43_driver/include/ (where pico/cyw43_driver.h lives) — the SDK
+# only adds that path via `pico_btstack_hci_transport_cyw43`, a Bluetooth
+# target that happens to share the same include directory. With
+# MICROPY_BLUETOOTH_BTSTACK off, that target is never linked, so
+# cyw43_bus_pio_spi.c fails with "pico/cyw43_driver.h: No such file or
+# directory" even though the missing header has nothing to do with
+# Bluetooth.
+#
+# Link only `pico_cyw43_driver_headers` (the SDK's convention for a
+# headers-only INTERFACE target: include dirs/compile defs, no sources) —
+# NOT the full `pico_cyw43_driver` target, which also carries
+# cyw43_driver.c (an async_context integration layer MicroPython's own
+# WiFi glue doesn't use and was never compiled in the original Bluetooth-
+# enabled build either). Pulling in the full target instead of just its
+# headers would newly require pico/async_context.h and an async_context
+# implementation neither this project nor stock MicroPython links here.
+if (MICROPY_PY_NETWORK_CYW43 AND NOT MICROPY_BLUETOOTH_BTSTACK)
+    target_link_libraries(hd61700_lib INTERFACE pico_cyw43_driver_headers)
+endif()
