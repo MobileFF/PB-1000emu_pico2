@@ -28,6 +28,7 @@ src/
   micropython.cmake       # ビルドシステム設定
 
 mp/
+  boot.py                 # 起動前の GPIO 初期状態設定（main.py より前に実行される）
   main.py                 # エントリポイント
   pb1000.py               # PB1000System クラス
   lcd_controller_c.py     # lcd_c モジュールの Python ラッパー
@@ -36,7 +37,8 @@ mp/
   main_runtime.py         # CPU 実行ループ補助
   main_actions.py         # スクリーンショット・save-state・ディスクスワップ
   main_cleanup.py         # 終了処理・メモリダンプ
-  emulator_menu.py        # GUI+F7 ランタイムメニュー
+  emulator_menu.py        # GUI+F7 ランタイムメニュー（頻用項目）
+  emulator_menu_ext.py    # 同メニューの重量級・低頻度項目（コンパイルコスト分離のため分割）
   funckey_bar.py          # 画面下部ファンクションキーバー
   boot_session.py         # プロファイル選択 UI
   config.py               # pb1000.ini 読み込み
@@ -44,6 +46,15 @@ mp/
   keymap.py / keymap.json # キーボードマッピングテーブル
   ili9341.py              # ILI9341 TFT ドライバ (320x240)
   st7796.py               # ST7796 TFT ドライバ (480x320)
+  xpt2046.py              # XPT2046 タッチパネルコントローラドライバ
+  sdcard.py               # SD カード SPI ドライバ
+  disk_select_ui.py       # 仮想 FDD ディスクイメージ選択 UI
+  fdd_protocol.py         # 仮想 FDD (MD-100) コマンド/データプロトコル
+  fdd_storage.py          # 仮想 FDD ストレージバックエンド
+  md100_dos.py            # MD-100 DOS 層（pb1000es dos.pas 移植）
+  ntp_sync.py             # WiFi 経由 NTP 時刻同期
+  debug.py                # REPL 向け CPU/レジスタデバッグ補助
+  workarea.py             # PB-1000 ワークエリア（RAM）アドレス辞書
   ext/                    # 拡張 API モジュール（自動ロード）
 
 hardware/
@@ -98,28 +109,28 @@ HD61830 LCD コントローラエミュレーションと SPI レンダリング
 
 | 関数 | 説明 |
 | --- | --- |
-| `setup_display(spi, cs, dc, scale, x, y)` | SPI ディスプレイへの出力設定 |
+| `init()` / `clear()` | 内部状態の初期化・VRAM/カラー VRAM のクリア |
+| `ctrl(data)` / `write(data)` / `read()` | LCD コントローラプロトコルへの生アクセス（制御・データ書き込み・読み出し） |
+| `setup_display(spi_id, cs, dc, scale, x, y, baudrate=0)` | SPI ディスプレイへの出力設定 |
 | `render()` | dirty フラグが立っていれば SPI 経由で LCD を描画 |
 | `wait_for_idle()` | 進行中の SPI 転送完了を待機 |
 | `is_dirty()` / `mark_dirty()` / `clear_dirty()` | dirty フラグ管理 |
-| `get_vram()` / `get_vram_view()` / `get_vram_byte(offset)` | 現在の VRAM バイト列・ゼロコピービュー・単バイト取得 |
+| `get_vram()` | 現在のモノクロ VRAM バイト列を取得 |
 | `get_color_vram()` | per-pixel カラー VRAM（VDP）バイト列を返す |
 | `get_pixel(x, y)` | 指定ピクセルの点灯状態を取得 |
-| `blit_reversed(...)` | VRAM をミラー転送 |
+| `blit_reversed(src, dst_off)` | VRAM をミラー転送 |
 | `is_display_on()` | HD61830 の表示 ON/OFF 状態を返す |
-| `set_x_mirror(bool)` | X 方向ミラー表示の切り替え |
-| `set_draw_bitimage_reverse(bool)` | ビットイメージ描画の反転設定 |
 | `load_charset(data)` | 文字認識用 `charset.bin` をロード |
-| `set_colors(fg, bg)` / `set_bg_colors(...)` | 点灯・消灯ピクセルの RGB565 色設定 |
+| `set_colors(fg, bg)` / `set_bg_colors(on_bg, off_bg)` | 点灯・消灯ピクセルの RGB565 色設定 |
 | `set_vdp_enable(bool)` / `get_vdp_enable()` | per-pixel カラー VRAM（VDP）の有効・無効 |
 | `set_vdp_init_done(bool)` / `vdp_init_done()` | VDP「初期描画済み」フラグの強制設定・参照（§8 参照） |
-| `vdp_sync_enable(bool)` | VDP 同期モードの有効・無効 |
+| `vdp_sync_enable()` | VRAM→カラー VRAM（pages 0-3）を現在の色設定で同期し VDP を有効化 |
 | `vdp_any_write()` / `vdp_write_count()` | VDP への書き込み有無・回数を取得 |
-| `vdp_write(reg, data)` / `vdp_read(reg)` | VDP レジスタへの直接読み書き |
+| `vdp_write(reg, data)` | VDP レジスタへの直接書き込み |
 | `get_num_pages()` / `set_num_pages(n)` | 表示ページ数（64 ドット行対応）の取得・設定 |
 | `set_debug(bool)` | LCD 書き込みトレースの有効・無効 |
-| `set_scale(num, den)` | スケール設定（整数または分数） |
-| `WIDTH` / `HEIGHT` / `VRAM_SIZE` / `COLOR_VRAM_SIZE` | 画面サイズ・VRAM サイズの定数 |
+| `set_scale(num, den=1)` | スケール設定（整数または分数） |
+| `WIDTH` / `HEIGHT` | 画面サイズの定数（192 / 32） |
 
 Python ラッパー `lcd_controller_c.py` の `LCDControllerC` クラスを通じて操作するのが標準。
 

@@ -32,7 +32,6 @@ Not responsible for:
 - USB / PIO / UART initialisation internals
 - Screenshot saving
 - Save-state implementation details
-- Wake trace diagnostics
 
 ---
 
@@ -104,20 +103,6 @@ Responsibilities:
 - VRAM dump output
 - Save-state request handling
 - Disk swap delegation
-
----
-
-### `mp/main_diag.py`
-
-Responsibilities:
-
-- Wake trace snapshot generation
-- Diagnostic string formatting
-- Wake-path tracing
-
-Notes:
-
-- Largely independent of the normal execution flow; intended as a diagnostic helper only.
 
 ---
 
@@ -251,10 +236,6 @@ main_runtime.py
 main_actions.py
   -> system object API
   -> hd61700 / usb_host / keymap
-
-main_diag.py
-  -> system object API
-  -> hd61700 CPU core API
 
 emulator_menu.py
   -> system object API

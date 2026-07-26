@@ -40,24 +40,32 @@ def init_display_only():
 
 
 def _setup_touch_offsets(system, dw, dh, config=None):
-    """Apply touch offset settings from config, falling back to built-in defaults."""
+    """Apply touch offset settings from config, falling back to built-in defaults.
+
+    Keys may be scoped to one driver with a "ili9341."/"st7796." prefix (e.g.
+    st7796.y_offset) so both panels' calibrations can live in the same ini
+    at once; an unprefixed key applies to whichever driver is active."""
     touch_cfg = (config or {}).get("touch", {})
+    _prefix = "st7796" if dw >= 480 else "ili9341"
 
     def _gi(key, default):
-        try:
-            return int(touch_cfg[key]) if key in touch_cfg else default
-        except (ValueError, TypeError):
-            return default
+        for k in (_prefix + "." + key, key):
+            if k in touch_cfg:
+                try:
+                    return int(touch_cfg[k])
+                except (ValueError, TypeError):
+                    break
+        return default
 
     if dw >= 480:
         system.touch_x_offset         = _gi("x_offset",         8)
-        system.touch_y_offset         = _gi("y_offset",        -4)
-        system.funckey_touch_x_offset = _gi("funckey_x_offset",  8)
+        system.touch_y_offset         = _gi("y_offset",         0)
+        system.funckey_touch_x_offset = _gi("funckey_x_offset",  2)
         system.funckey_touch_y_offset = _gi("funckey_y_offset", -8)
     else:
         _ty = dh / 240.0
         system.touch_x_offset         = _gi("x_offset",         0)
-        system.touch_y_offset         = _gi("y_offset",         round(-104 * _ty))
+        system.touch_y_offset         = _gi("y_offset",         round(-10 * _ty))
         system.funckey_touch_x_offset = _gi("funckey_x_offset",  0)
         system.funckey_touch_y_offset = _gi("funckey_y_offset",  round(24  * _ty))
 
@@ -141,20 +149,27 @@ def create_console_uart(machine, *, enable_uart_kbd, baudrate, tx_pin, rx_pin):
 
 
 def load_default_roms(system):
+    """Load rom0.bin/rom1.bin from /roms/. Returns a list of the paths that
+    failed to load (empty list means both loaded successfully)."""
     import gc
+    failed = []
     for path, slot in (('/roms/rom0.bin', 0), ('/roms/rom1.bin', 1)):
         try:
             gc.collect()
-            system.load_rom(path, slot=slot)
+            if not system.load_rom(path, slot=slot):
+                failed.append(path)
         except MemoryError as e:
             print(f"ROM load warning ({path}): {e}")
+            failed.append(path)
         except Exception as e:
             print(f"ROM load error ({path}): {e}")
+            failed.append(path)
     try:
         if hasattr(system, "boot_virtual_fdd"):
             system.boot_virtual_fdd()
     except Exception as e:
         print(f"VFDD init warning: {e}")
+    return failed
 
 
 def initialize_usb_host_and_pio(system, *, enable_usb_kbd, pio_uart_baudrate=9600):

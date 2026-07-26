@@ -15,6 +15,14 @@ def _keypos(row, ki_col):
 
 KEY_EXE = _keypos(10, 4)
 
+# Safety net for _press_next_queued_key: if is_key_input_enabled() stays
+# False this long for the same queued key, press it anyway rather than
+# blocking forever. The ROM's KEY_INT enable bit (REG_IE bit 6) is pure
+# software state (see check_irqs() in hd61700.c, which never touches it),
+# so a stuck debounce/ISR state on the ROM side can otherwise deadlock
+# input indefinitely.
+_INPUT_BLOCKED_TIMEOUT_MS = 1000
+
 
 class KeyboardInputManager:
     def __init__(
@@ -52,6 +60,7 @@ class KeyboardInputManager:
         self._typed_since_enter = False
         self._last_was_cr = False
         self._input_blocked_log_at_ms = 0
+        self._input_blocked_since_ms = None
         # Only built when UART keyboard input is actually enabled: it's the
         # sole consumer (_poll_uart_input() below), and building it forces
         # keymap.py's module-level keymap.json load, which we want to defer
@@ -189,6 +198,7 @@ class KeyboardInputManager:
 
     def _press_next_queued_key(self, system, now):
         if self._active_key is not None or not self._key_queue:
+            self._input_blocked_since_ms = None
             return
         if time.ticks_diff(now, self._next_press_at_ms) < 0:
             return
@@ -202,15 +212,28 @@ class KeyboardInputManager:
         # BRK always bypasses is_key_input_enabled: it must interrupt the ROM
         # even during RECE or other busy states (sleep is already handled above).
         is_brk = pending_label in ("BRK", "BREAK")
-        if (not is_brk and hasattr(system, "is_key_input_enabled")
-                and not system.is_key_input_enabled()):
-            if time.ticks_diff(now, self._input_blocked_log_at_ms) >= 0:
-                print(
-                    f"[INPUT_BLOCKED] label={pending_label} "
-                    f"sleep=0 key_enabled=0 queue_len={len(self._key_queue)}"
-                )
-                self._input_blocked_log_at_ms = time.ticks_add(now, 500)
-            return
+        blocked = (not is_brk and hasattr(system, "is_key_input_enabled")
+                   and not system.is_key_input_enabled())
+        if blocked:
+            if self._input_blocked_since_ms is None:
+                self._input_blocked_since_ms = now
+            waited_ms = time.ticks_diff(now, self._input_blocked_since_ms)
+            if waited_ms < _INPUT_BLOCKED_TIMEOUT_MS:
+                if time.ticks_diff(now, self._input_blocked_log_at_ms) >= 0:
+                    pc = getattr(system, "pc", -1)
+                    print(
+                        f"[INPUT_BLOCKED] label={pending_label} "
+                        f"sleep={getattr(system, 'is_sleeping', False)} "
+                        f"key_enabled={system.is_key_input_enabled()} "
+                        f"pc={pc:#06x} queue_len={len(self._key_queue)}"
+                    )
+                    self._input_blocked_log_at_ms = time.ticks_add(now, 500)
+                return
+            # Gave up waiting for the ROM to re-enable KEY_INT: press anyway
+            # rather than blocking forever (mirrors the BRK bypass above).
+            print(f"[INPUT_BLOCKED] label={pending_label} timed out after "
+                  f"{waited_ms}ms waiting for key_enabled; pressing anyway")
+        self._input_blocked_since_ms = None
 
         key, label, chord = self._key_queue.pop(0)
 
@@ -283,6 +306,10 @@ class TouchInputManager:
         y += getattr(system, "touch_y_offset", 0)
 
         scale = getattr(system.lcd, "scale", 1.0)
+        # TK1..16 corresponds to the physical touch pad, which always covers
+        # only the original 32-dot LCD area — it does not grow with
+        # [display] lcd_height (64-dot mode is VRAM/graphics-only, the real
+        # hardware never had a taller touch pad).
         lw = int(192 * scale)
         lh = int(32 * scale)
         lx0 = system._disp_x

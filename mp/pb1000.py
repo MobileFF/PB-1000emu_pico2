@@ -62,32 +62,43 @@ def init_sdcard(spi, lcd_baudrate=40_000_000):
         sys.print_exception(e)
         return False
 
-def _read_display_ini():
-    """Read only the [display] section from /pb1000.ini and /roms/pb1000.ini.
-    SD card is not yet mounted at this point, so only internal flash is checked."""
-    cfg = {}
+def _read_early_ini_sections(section_names):
+    """Read the given sections from /pb1000.ini and /roms/pb1000.ini.
+    SD card is not yet mounted at this point, so only internal flash is checked.
+    Returns {section_name: {key: value}}."""
+    wanted = {s.lower() for s in section_names}
+    result = {s: {} for s in wanted}
     for path in ("/pb1000.ini", "/roms/pb1000.ini"):
         try:
             with open(path, "r") as f:
-                in_section = False
+                section = None
                 for raw in f:
                     line = raw.strip()
                     if not line or line[0] in (";", "#"):
                         continue
                     if line.startswith("[") and line.endswith("]"):
-                        in_section = (line[1:-1].strip().lower() == "display")
+                        name = line[1:-1].strip().lower()
+                        section = name if name in wanted else None
                         continue
-                    if in_section and "=" in line:
+                    if section and "=" in line:
                         k, v = line.split("=", 1)
                         k = k.strip().lower()
                         v = v.split(";", 1)[0].split("#", 1)[0].strip()
-                        cfg[k] = v
+                        result[section][k] = v
         except OSError:
             pass
-    return cfg
+    return result
+
+
+def _early_bool(s, default):
+    if s is None:
+        return default
+    return s.strip().lower() in ("1", "true", "yes", "on")
 
 def init_display():
-    disp_cfg = _read_display_ini()
+    _early_cfg = _read_early_ini_sections(("display", "touch"))
+    disp_cfg = _early_cfg["display"]
+    touch_early_cfg = _early_cfg["touch"]
     # Accept both "driver=ST7796" and "display=ST7796" as equivalent keys.
     driver = disp_cfg.get("driver", disp_cfg.get("display", "ILI9341")).upper()
 
@@ -140,12 +151,43 @@ def init_display():
     touch = None
     try:
         from xpt2046 import XPT2046
-        touch = XPT2046(spi, T_CS_PIN, T_IRQ_PIN,
-                        width=display.width, height=display.height,
-                        swap_xy=True, x_inv=True, y_inv=True,
-                        y_min=325, y_max=3850,
-                        lcd_baudrate=spi_baud,
-                        rotate180=(rotation == 180))
+        # XPT2046 orientation depends on how the touch overlay film is
+        # mounted on each physical panel, which differs between the
+        # ILI9341 and ST7796 modules — the two need different swap/invert
+        # settings by default. ILI9341 needs axes swapped only (no invert);
+        # ST7796 (MSP4021 etc.) needs axes swapped and both inverted, plus
+        # its own calibration range. Can be overridden per-panel via
+        # swap_xy/x_inv/y_inv in [touch] section of /pb1000.ini — use a
+        # "ili9341."/"st7796." prefixed key (e.g. ili9341.y_inv) to scope the
+        # override to one driver, since both drivers' settings can coexist in
+        # the same ini and only one is active at a time via [display] driver.
+        # An unprefixed key still applies to whichever driver is active.
+        # (SD card is not yet mounted here, so only internal-flash
+        # pb1000.ini is honored for these early keys.)
+        _driver_prefix = driver.lower()
+        def _touch_early(key):
+            dkey = _driver_prefix + "." + key
+            if dkey in touch_early_cfg:
+                return touch_early_cfg[dkey]
+            return touch_early_cfg.get(key)
+        swap_xy = _early_bool(_touch_early("swap_xy"), True)
+        if driver == "ST7796":
+            x_inv = _early_bool(_touch_early("x_inv"), True)
+            y_inv = _early_bool(_touch_early("y_inv"), True)
+            touch = XPT2046(spi, T_CS_PIN, T_IRQ_PIN,
+                            width=display.width, height=display.height,
+                            swap_xy=swap_xy, x_inv=x_inv, y_inv=y_inv,
+                            y_min=325, y_max=3850,
+                            lcd_baudrate=spi_baud,
+                            rotate180=(rotation == 180))
+        else:
+            x_inv = _early_bool(_touch_early("x_inv"), False)
+            y_inv = _early_bool(_touch_early("y_inv"), False)
+            touch = XPT2046(spi, T_CS_PIN, T_IRQ_PIN,
+                            width=display.width, height=display.height,
+                            swap_xy=swap_xy, x_inv=x_inv, y_inv=y_inv,
+                            lcd_baudrate=spi_baud,
+                            rotate180=(rotation == 180))
     except Exception as e:
         print("Touch panel init failed:", e)
         sys.print_exception(e)
@@ -426,6 +468,8 @@ class PB1000System:
             self.load_state()
             
     def load_rom(self, path, slot=0, keep_copy=False):
+        """Load a ROM image into `slot` (0 or 1). Returns True on success,
+        False if the file couldn't be read (missing/corrupt SD card etc)."""
         try:
             gc.collect()
             with open(path, 'rb') as f:
@@ -439,8 +483,10 @@ class PB1000System:
                     self.rom1 = data if must_keep_copy else None
                     if hasattr(cpu_core, "load_rom"):
                         cpu_core.load_rom(1, data)
+            return True
         except OSError as e:
             print(f"ROM load error ({path}): {e}")
+            return False
 
     @property
     def has_exp(self):

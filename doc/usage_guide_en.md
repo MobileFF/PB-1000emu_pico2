@@ -74,7 +74,7 @@ Configuration priority (low → high): flash `/pb1000.ini` → `/sd/pb1000.ini` 
 | **Insert** | INS | Toggle insert mode |
 | **Arrow keys** | Cursor move | ↑↓←→ (auto-repeat when held) |
 | **Alt (L/R)** | Shift | PB-1000 Shift key |
-| **F1 – F4** | T13 – T16 | Function keys |
+| **F1 – F4** | TK13 – TK16 | Function keys |
 
 ### Key Mapping
 
@@ -93,42 +93,47 @@ Holding an arrow key triggers automatic cursor movement after an initial delay o
 
 ## 4. Touch Interface and FuncKeyBar
 
-### Touch Panel (T1–T16)
+### Touch Panel (TK1–TK16)
 
 The PB-1000's 16-key touch panel is emulated via the LCD touchscreen.
 
-- Tapping the LCD display area (192×32 pixel region) fires the corresponding touch key (T1–T16).
+- Tapping the LCD display area (192×32 pixel region) fires the corresponding touch key (TK1–TK16).
 - The LCD area is divided into a 4×4 grid for touch coordinate mapping.
+- This hit-test area always uses the physical touch pad's fixed height (32 dots × `scale`),
+  regardless of `[display] lcd_height = 64` (extended mode) — the real hardware has no touch
+  pad covering the extended rows, so the hit-test area does not grow with it.
 
 ### FuncKeyBar
 
-A bar showing LCKEY, MENU, CAL and CALC keys is permanently displayed at the bottom of the screen. Tapping the bar fires the corresponding key.
+A bar showing LCKEY, MENU, CAL and CALC keys is permanently displayed at the bottom of the screen. Tapping the bar fires the corresponding key. Its on-screen position is computed automatically from `[display] lcd_height` and `scale`.
+
+### Touch Panel Calibration (XPT2046)
+
+The XPT2046 touch controller chip may need axis swap/invert and pixel-offset tuning per LCD
+module, since the touch film is mounted differently on each panel. Adjust these in the
+`[touch]` section of `pb1000.ini`.
+
+- `swap_xy` / `x_inv` / `y_inv`: swap the X/Y touch axes and/or invert each axis. Built-in
+  defaults are `swap_xy=true, x_inv=false, y_inv=false` for ILI9341 and
+  `swap_xy=true, x_inv=true, y_inv=true` for ST7796. These are read only from the
+  internal-flash `/pb1000.ini` (and `/roms/pb1000.ini`) at boot, before the SD card is
+  mounted, so SD-card or per-profile ini files cannot override them.
+- `x_offset` / `y_offset` (for the LCD touch area) and `funckey_x_offset` /
+  `funckey_y_offset` (for the FuncKeyBar): pixel-space coordinate correction. These can be
+  overridden from the SD card or a per-profile ini as well.
+- Settings for ILI9341 and ST7796 can coexist in the same `[touch]` section: prefix a key
+  with `ili9341.` or `st7796.` to scope it to whichever driver is active via
+  `[display] driver` (e.g. `st7796.y_offset = -4`). An unprefixed key applies to either
+  driver unless overridden by a driver-scoped one.
+- See the comments in `pb1000.ini` for each item's built-in default and example usage.
 
 ---
 
 ## 5. Emulator Menu (Win + F7)
 
-Opens a settings menu that pauses the main loop. Changes take effect immediately.
-
-| Item | Function |
-| :--- | :--- |
-| **Serial Console** | Toggle LCD character detection → UART output |
-| **RS-232C (PIO)** | Toggle PIO UART (virtual RS-232C) |
-| **vFDD** | Toggle virtual floppy drive |
-| **Beep** | Toggle beep sound (mute/unmute) |
-| **Joystick** | Toggle joystick input |
-| **Color VRAM** | Toggle per-pixel colour display (VDP) |
-| **FD Swap** | Switch the virtual FDD disk image |
-| **RAM Save** | Snapshot current RAM to `/sd/rams/` |
-| **RAM Load** | Restore a RAM snapshot from `/sd/rams/` |
-| **VRAM Save** | Save current LCD VRAM to files (PBM + binary) |
-| **Full Capture** | Save the entire physical screen (bezel + function key bar included) as a single PPM image |
-| **Foreground Color** | Change the colour of lit LCD pixels (RGB332) |
-| **Background Color** | Change the colour of unlit LCD pixels (RGB332) |
-| **Hook Status** | List every registered subroutine hook (call_hook) and memory write hook (mem_write_hook): address, owning module, and enabled/disabled state |
-
-Use Up/Down keys to navigate, Enter/EXE to activate, BREAK to close.
-(Inside the **Hook Status** screen, Up/Down scrolls the list and BREAK closes it and returns to the menu.)
+Opens a settings menu that pauses the main loop. Changes take effect immediately. It's organized
+as a hierarchy of four categories — Toggles / Storage / Display / System — see
+`emulator_menu_guide_en.md` for the full item-by-item reference and usage notes.
 
 ---
 
@@ -259,9 +264,15 @@ duty     = 30
 baudrate = 9600
 
 [display]
+driver   = ILI9341          ; ILI9341 (320x240) or ST7796 (480x320)
+scale    = 1.5               ; on-screen magnification (ILI9341=1.5, ST7796=2.0 recommended)
+lcd_height = 32              ; 32=original / 64=extended mode
 fg_color = 0               ; foreground (lit pixel) colour, RGB332 format 0–255
 bg_color = 180             ; background (unlit pixel) colour, RGB332 format 0–255
 rotation = 0                ; 0=normal / 180=upside down (match how the board is mounted)
+
+[touch]
+ili9341.y_offset = -10      ; driver-scoped key prefix (see §4)
 ```
 
 **RGB332 Colour Format (`[display]` section)**

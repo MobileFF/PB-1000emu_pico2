@@ -28,6 +28,7 @@ src/
   micropython.cmake       # Build system configuration
 
 mp/
+  boot.py                 # Pre-boot GPIO init (runs before main.py)
   main.py                 # Entry point
   pb1000.py               # PB1000System class
   lcd_controller_c.py     # Python wrapper for lcd_c module
@@ -36,7 +37,8 @@ mp/
   main_runtime.py         # CPU execution loop helpers
   main_actions.py         # Screenshots, save-state, disk swap
   main_cleanup.py         # Shutdown and memory dump
-  emulator_menu.py        # Win+F7 runtime menu
+  emulator_menu.py        # Win+F7 runtime menu (common items)
+  emulator_menu_ext.py    # Heavier, less-frequently-used menu items (split out to keep menu compile cost low)
   funckey_bar.py          # On-screen function key bar
   boot_session.py         # Profile selection UI
   config.py               # pb1000.ini loading
@@ -44,6 +46,15 @@ mp/
   keymap.py / keymap.json # Keyboard mapping tables
   ili9341.py              # ILI9341 TFT driver (320x240)
   st7796.py               # ST7796 TFT driver (480x320)
+  xpt2046.py              # XPT2046 touch panel controller driver
+  sdcard.py               # SD card SPI driver
+  disk_select_ui.py       # Virtual FDD disk image selection UI
+  fdd_protocol.py         # Virtual FDD (MD-100) command/data protocol
+  fdd_storage.py          # Virtual FDD storage backend
+  md100_dos.py            # MD-100 DOS layer (ported from pb1000es dos.pas)
+  ntp_sync.py             # NTP time sync over WiFi
+  debug.py                # REPL CPU/register debug helpers
+  workarea.py             # PB-1000 work-area (RAM) address dictionary
   ext/                    # Extension API modules (auto-loaded)
 
 hardware/
@@ -101,28 +112,28 @@ Emulates the HD61830 LCD controller and drives the SPI display.
 
 | Function | Description |
 | --- | --- |
-| `setup_display(spi, cs, dc, scale, x, y)` | Attach a physical SPI display |
+| `init()` / `clear()` | Initialise internal state / clear VRAM and colour VRAM |
+| `ctrl(data)` / `write(data)` / `read()` | Raw access to the LCD controller protocol (control / data write / read) |
+| `setup_display(spi_id, cs, dc, scale, x, y, baudrate=0)` | Attach a physical SPI display |
 | `render()` | Render to SPI if the dirty flag is set |
 | `wait_for_idle()` | Wait for an in-flight SPI transfer to finish |
 | `is_dirty()` / `mark_dirty()` / `clear_dirty()` | Manage the dirty flag |
-| `get_vram()` / `get_vram_view()` / `get_vram_byte(offset)` | Return the current VRAM as bytes / as a zero-copy view / a single byte |
+| `get_vram()` | Return the current monochrome VRAM as bytes |
 | `get_color_vram()` | Return the per-pixel colour VRAM (VDP) bytes |
 | `get_pixel(x, y)` | Return whether a given pixel is lit |
-| `blit_reversed(...)` | Mirror-blit the VRAM |
+| `blit_reversed(src, dst_off)` | Mirror-blit the VRAM |
 | `is_display_on()` | Return the HD61830 display on/off state |
-| `set_x_mirror(bool)` | Toggle X-axis mirroring |
-| `set_draw_bitimage_reverse(bool)` | Toggle reversed bit-image drawing |
 | `load_charset(data)` | Load the `charset.bin` used for character detection |
-| `set_colors(fg, bg)` / `set_bg_colors(...)` | Set lit/unlit pixel colours in RGB565 |
+| `set_colors(fg, bg)` / `set_bg_colors(on_bg, off_bg)` | Set lit/unlit pixel colours in RGB565 |
 | `set_vdp_enable(bool)` / `get_vdp_enable()` | Enable/disable per-pixel colour VRAM (VDP) |
 | `set_vdp_init_done(bool)` / `vdp_init_done()` | Force-set / read the VDP "initial fill done" flag (see §8) |
-| `vdp_sync_enable(bool)` | Enable/disable VDP sync mode |
+| `vdp_sync_enable()` | Sync VRAM → colour VRAM (pages 0-3) using the current colour settings, then enable VDP |
 | `vdp_any_write()` / `vdp_write_count()` | Query whether/how many times VDP has been written |
-| `vdp_write(reg, data)` / `vdp_read(reg)` | Directly read/write a VDP register |
+| `vdp_write(reg, data)` | Directly write a VDP register |
 | `get_num_pages()` / `set_num_pages(n)` | Get/set the number of display pages (64-dot row support) |
 | `set_debug(bool)` | Enable/disable LCD write trace |
-| `set_scale(num, den)` | Set the display scale factor |
-| `WIDTH` / `HEIGHT` / `VRAM_SIZE` / `COLOR_VRAM_SIZE` | Screen and VRAM size constants |
+| `set_scale(num, den=1)` | Set the display scale factor (integer or fractional) |
+| `WIDTH` / `HEIGHT` | Screen size constants (192 / 32) |
 
 Use the `LCDControllerC` wrapper class in `lcd_controller_c.py` in normal code.
 

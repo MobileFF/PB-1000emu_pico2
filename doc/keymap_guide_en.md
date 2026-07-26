@@ -86,10 +86,10 @@ USB `A`–`Z` and `0`–`9` map directly to the same PB-1000 character keys (sca
 
 | USB key | PB-1000 key |
 | :--- | :--- |
-| F1 (`0x3A`) | F1 (same as touch key T13) |
-| F2 (`0x3B`) | F2 (same as T14) |
-| F3 (`0x3C`) | F3 (same as T15) |
-| F4 (`0x3D`) | F4 (same as T16) |
+| F1 (`0x3A`) | F1 (same as touch key TK13) |
+| F2 (`0x3B`) | F2 (same as TK14) |
+| F3 (`0x3C`) | F3 (same as TK15) |
+| F4 (`0x3D`) | F4 (same as TK16) |
 | F5 (`0x3E`) | LC KEY |
 | F6 (`0x3F`) | MENU |
 | F7 (`0x40`) | CAL |
@@ -185,24 +185,24 @@ Pressing F12 (`0x45`) alone, without Win held, is treated as the normal **CALC**
 
 ---
 
-## 7. Correspondence with touch keys (T1–T16)
+## 7. Correspondence with touch keys (TK1–TK16)
 
 Independently of any USB key, `KEY_MAP` in `mp/keymap.py` also defines the mapping
-between the PB-1000's 16-key touch panel (T1–T16) and matrix coordinates.
+between the PB-1000's 16-key touch panel (TK1–TK16) and matrix coordinates.
 
 | Touch key | Coordinate (row, ki) | Touch key | Coordinate (row, ki) |
 | :--- | :--- | :--- | :--- |
-| T1 | (7, 12) | T9  | (7, 10) |
-| T2 | (8, 12) | T10 | (8, 10) |
-| T3 | (9, 12) | T11 | (9, 10) |
-| T4 | (10, 12) | T12 | (10, 10) |
-| T5 | (7, 11) | T13 | (7, 9) |
-| T6 | (8, 11) | T14 | (8, 9) |
-| T7 | (9, 11) | T15 | (9, 9) |
-| T8 | (10, 11) | T16 | (10, 9) |
+| TK1 | (7, 12) | TK9  | (7, 10) |
+| TK2 | (8, 12) | TK10 | (8, 10) |
+| TK3 | (9, 12) | TK11 | (9, 10) |
+| TK4 | (10, 12) | TK12 | (10, 10) |
+| TK5 | (7, 11) | TK13 | (7, 9) |
+| TK6 | (8, 11) | TK14 | (8, 9) |
+| TK7 | (9, 11) | TK15 | (9, 9) |
+| TK8 | (10, 11) | TK16 | (10, 9) |
 
-T13–T16 share the same coordinates as F1–F4 in §2, so on the USB keyboard, F1–F4 and
-touch keys T13–T16 effectively refer to the same PB-1000 key.
+TK13–TK16 share the same coordinates as F1–F4 in §2, so on the USB keyboard, F1–F4 and
+touch keys TK13–TK16 effectively refer to the same PB-1000 key.
 
 ---
 

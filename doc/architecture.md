@@ -32,7 +32,6 @@
 - USB / PIO / UART 初期化詳細
 - スクリーンショット保存処理
 - save-state 処理詳細
-- wake trace 診断
 
 ---
 
@@ -103,20 +102,6 @@
 - VRAM ダンプ出力
 - save-state 要求処理
 - ディスクスワップ処理委譲
-
----
-
-### `mp/main_diag.py`
-
-役割:
-
-- wake trace 用スナップショット生成
-- 診断文字列整形
-- wake path トレース
-
-備考:
-
-- 通常実行フローからはほぼ独立した診断補助モジュールである
 
 ---
 
@@ -250,10 +235,6 @@ main_runtime.py
 main_actions.py
   -> system object API
   -> hd61700 / usb_host / keymap
-
-main_diag.py
-  -> system object API
-  -> hd61700 CPU core API
 
 emulator_menu.py
   -> system object API

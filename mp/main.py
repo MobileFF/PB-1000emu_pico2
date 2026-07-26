@@ -31,6 +31,45 @@ from main_actions import handle_key_status_and_capture, handle_disk_swap
 from main_cleanup import dump_shutdown_state
 
 
+def _sw16(c):
+    return ((c & 0xFF) << 8) | (c >> 8)
+
+
+def _draw_text(display, x, y, text, fg, bg=0x0000):
+    import framebuf
+    text = str(text)
+    max_chars = max(0, (display.width - x) // 8)
+    text = text[:max_chars]
+    if not text:
+        return
+    buf = bytearray(8 * 8 * 2)  # one 8x8 character cell
+    fb = framebuf.FrameBuffer(buf, 8, 8, framebuf.RGB565)
+    cx = x
+    for ch in text:
+        fb.fill(_sw16(bg))
+        fb.text(ch, 0, 0, _sw16(fg))
+        display.set_window(cx, y, cx + 7, y + 7)
+        display.write_data(buf)
+        cx += 8
+
+
+def _show_rom_load_error(display, failed_paths):
+    """Full-screen error report for a fatal ROM load failure. Startup stops
+    right after this is drawn — see the `return` at the load_default_roms()
+    call site in main() — so this is the last thing shown on the LCD."""
+    display.fill_rect(0, 0, display.width, display.height, 0x0000)
+    _draw_text(display, 4, 4, "ROM LOAD FAILED", 0xF800)
+    y = 20
+    for path in failed_paths:
+        _draw_text(display, 4, y, path, 0xFFE0)
+        y += 12
+    y += 4
+    _draw_text(display, 4, y, "Check /roms/ on the SD card.", 0xFFFF)
+    _draw_text(display, 4, y + 12, "Emulator startup halted.", 0xFFFF)
+    if hasattr(display, "lcd_sync"):
+        display.lcd_sync()
+
+
 def main():
     # Pre-reserve a contiguous ROM-sized block before heap fragmentation.
     # Released just before load_default_roms() so the freed region can
@@ -164,7 +203,11 @@ def main():
     if _rom_reserve is not None:
         del _rom_reserve
         gc.collect()
-    load_default_roms(system)
+    failed_roms = load_default_roms(system)
+    if failed_roms:
+        print(f"*** ROM load failed: {failed_roms} — halting startup.")
+        _show_rom_load_error(display, failed_roms)
+        return
     gc.collect()
     print("[MEM] after VFDD init: free=%d alloc=%d" %
           (gc.mem_free(), gc.mem_alloc()))
