@@ -1,0 +1,7 @@
+(sym_lib_table
+  (version 7)
+  (lib (name "PB-1000_pico2_Library")(type "KiCad")(uri "${KIPRJMOD}/PB-1000_pico2_Library.kicad_sym")(options "")(descr ""))
+  (lib (name "MSP4021")(type "KiCad")(uri "${KIPRJMOD}/symbols/MSP4021.kicad_sym")(options "")(descr ""))
+  (lib (name "MSP2807")(type "KiCad")(uri "${KIPRJMOD}/symbols/MSP2807.kicad_sym")(options "")(descr ""))
+  (lib (name "Grove")(type "KiCad")(uri "${KIPRJMOD}/symbols/grove_4p.kicad_sym")(options "")(descr ""))
+)

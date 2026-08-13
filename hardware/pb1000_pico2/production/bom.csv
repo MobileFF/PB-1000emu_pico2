@@ -1,0 +1,11 @@
+﻿Designator,Footprint,Quantity,Value,LCSC Part #
+A1,RaspberryPi_Pico_Common_Unspecified,1,RaspberryPi_Pico,
+J1,PinHeader_1x06_P2.54mm_Horizontal,1,SPI,
+J2,Grove_4Pin_THT_2.00mm,1,Serial Console,
+J3,Grove_4Pin_THT_2.00mm,1,REPL,
+J4,Grove_4Pin_THT_2.00mm,1,Grove_Buzzer,
+J5,DSUB-9_Pins_Horizontal_P2.77x2.84mm_EdgePinOffset9.40mm,1,DE9_Pins,
+J6,PinHeader_1x06_P2.54mm_Horizontal,1,UART(RS-232C),
+J7,Grove_4Pin_THT_2.00mm,1,I2C,
+J8,PinHeader_1x04_P2.54mm_Vertical,1,Conn_01x04_Pin,
+U1,MSP4021,1,MSP4021,

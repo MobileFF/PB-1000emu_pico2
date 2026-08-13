@@ -1,0 +1,183 @@
+(footprint "Grove_4Pin_THT_2.00mm"
+	(version 20240108)
+	(generator "kicad_footprint_editor")
+	(generator_version "9.0")
+	(layer "F.Cu")
+	(descr "Grove connector, 4 pin, through-hole, 2.00mm pitch, single row")
+	(tags "Grove connector THT 2.0mm")
+	(property "Reference" "REF**"
+		(at 0 -4.5 0)
+		(layer "F.SilkS")
+		(uuid "50000000-0000-0000-0000-000000000001")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Value" "Grove_4Pin_THT_2.00mm"
+		(at 0 4.5 0)
+		(layer "F.Fab")
+		(uuid "50000000-0000-0000-0000-000000000002")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Footprint" ""
+		(at 0 0 0)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "50000000-0000-0000-0000-000000000003")
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Datasheet" ""
+		(at 0 0 0)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "50000000-0000-0000-0000-000000000004")
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(property "Description" ""
+		(at 0 0 0)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "50000000-0000-0000-0000-000000000005")
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+	)
+	(attr through_hole)
+	(fp_line
+		(start -4.5 -2.5)
+		(end 4.5 -2.5)
+		(stroke
+			(width 0.12)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "60000000-0000-0000-0000-000000000001")
+	)
+	(fp_line
+		(start -4.5 2.5)
+		(end 4.5 2.5)
+		(stroke
+			(width 0.12)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "60000000-0000-0000-0000-000000000002")
+	)
+	(fp_line
+		(start -4.5 -2.5)
+		(end -4.5 2.5)
+		(stroke
+			(width 0.12)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "60000000-0000-0000-0000-000000000003")
+	)
+	(fp_line
+		(start 4.5 -2.5)
+		(end 4.5 2.5)
+		(stroke
+			(width 0.12)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "60000000-0000-0000-0000-000000000004")
+	)
+	(fp_line
+		(start -5 -3)
+		(end 5 -3)
+		(stroke
+			(width 0.1)
+			(type solid)
+		)
+		(layer "F.Fab")
+		(uuid "70000000-0000-0000-0000-000000000001")
+	)
+	(fp_line
+		(start 5 -3)
+		(end 5 3)
+		(stroke
+			(width 0.1)
+			(type solid)
+		)
+		(layer "F.Fab")
+		(uuid "70000000-0000-0000-0000-000000000002")
+	)
+	(fp_line
+		(start 5 3)
+		(end -5 3)
+		(stroke
+			(width 0.1)
+			(type solid)
+		)
+		(layer "F.Fab")
+		(uuid "70000000-0000-0000-0000-000000000003")
+	)
+	(fp_line
+		(start -5 3)
+		(end -5 -3)
+		(stroke
+			(width 0.1)
+			(type solid)
+		)
+		(layer "F.Fab")
+		(uuid "70000000-0000-0000-0000-000000000004")
+	)
+	(fp_circle
+		(center -4.3 -2)
+		(end -4.1 -2)
+		(stroke
+			(width 0.1)
+			(type solid)
+		)
+		(fill none)
+		(layer "F.SilkS")
+		(uuid "80000000-0000-0000-0000-000000000001")
+	)
+	(pad "1" thru_hole circle
+		(at -3 0)
+		(size 1.6 1.6)
+		(drill 1.0)
+		(layers "*.Cu" "*.Mask")
+		(uuid "90000000-0000-0000-0000-000000000001")
+	)
+	(pad "2" thru_hole circle
+		(at -1 0)
+		(size 1.6 1.6)
+		(drill 1.0)
+		(layers "*.Cu" "*.Mask")
+		(uuid "90000000-0000-0000-0000-000000000002")
+	)
+	(pad "3" thru_hole circle
+		(at 1 0)
+		(size 1.6 1.6)
+		(drill 1.0)
+		(layers "*.Cu" "*.Mask")
+		(uuid "90000000-0000-0000-0000-000000000003")
+	)
+	(pad "4" thru_hole circle
+		(at 3 0)
+		(size 1.6 1.6)
+		(drill 1.0)
+		(layers "*.Cu" "*.Mask")
+		(uuid "90000000-0000-0000-0000-000000000004")
+	)
+)
