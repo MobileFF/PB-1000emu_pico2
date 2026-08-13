@@ -196,13 +196,9 @@ def configure_c_keyboard(system, *, enable_usb_kbd):
     import gc
     if not enable_usb_kbd:
         return None
-    print("[DEBUG boot] configure_c_keyboard: before gc.collect()")
     gc.collect()
-    print("[DEBUG boot] configure_c_keyboard: after gc.collect()")
     try:
         import hd61700 as cpu_core
-        print("[DEBUG boot] configure_c_keyboard: hd61700 imported")
-        print("[DEBUG boot] configure_c_keyboard: before import keymap")
         # NOTE: this is the first real `import keymap` in the boot sequence
         # (main_actions.py now imports it lazily, inside the one function
         # that uses it, specifically so this is where keymap.json actually
@@ -213,20 +209,15 @@ def configure_c_keyboard(system, *, enable_usb_kbd):
         # background timer earlier, in main.py right after profile
         # selection (see the comment there).
         import keymap
-        print("[DEBUG boot] configure_c_keyboard: keymap imported")
         if hasattr(cpu_core, 'keyboard_config_adv'):
             adv = keymap.get_adv_map_list()
-            print("[DEBUG boot] configure_c_keyboard: got adv map list")
             cpu_core.keyboard_config_adv(adv)
-            print("[DEBUG boot] configure_c_keyboard: keyboard_config_adv done")
             del adv
             gc.collect()
             print("C advanced keyboard map synchronized.")
         if hasattr(cpu_core, 'keyboard_config_base'):
             base = keymap.get_base_map_list()
-            print("[DEBUG boot] configure_c_keyboard: got base map list")
             cpu_core.keyboard_config_base(base)
-            print("[DEBUG boot] configure_c_keyboard: keyboard_config_base done")
             del base
             gc.collect()
             print("C base keyboard map synchronized.")

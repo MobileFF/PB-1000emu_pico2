@@ -1,5 +1,3 @@
-import hd61700
-
 REG_NAMES = [f"${i}" for i in range(32)]
 REG8_NAMES = ["PE", "PD", "IB", "UA", "IA", "IE", "TM", "TM2"]
 COND_NAMES = ["Z", "NC", "LZ", "UZ", "NZ", "C", "NLZ", "AL"]
@@ -90,8 +88,7 @@ def _parse_optional_jr(b, idx, arg, pc, inst_len, allow_jr=True):
             return ", JR ?", idx
         # with PC we can indicate target is unknown
         return ", JR ? -> &H????", idx
-    # signed = _fmt_signed7(off)
-    signed = -off if (arg & 0x80) else off
+    signed = _fmt_signed7(off)
     if pc is None:
         return f", JR {signed:+d}", idx + skip + 1
     pc_after = _advance_fetch_addr(pc, idx + skip + 1)
@@ -776,20 +773,3 @@ def decode_basic(b, pc=None):
         return SPCMD_NAMES[op & 0x07]
 
     return f"DB   &H{op:02X}"
-
-
-def step_debug():
-    pc = hd61700.get_pc()
-    op_bytes = hd61700.step()
-    if not op_bytes:
-        return
-
-    hex_str = "".join(f"{x:02X}" for x in op_bytes)
-    try:
-        mnemonic = decode_basic(op_bytes, pc)
-    except Exception as e:
-        mnemonic = f"Parse Error: {e}"
-        import sys
-        sys.print_exception(e)
-
-    print(f"[{pc:04X}] {hex_str:<10} | {mnemonic}")

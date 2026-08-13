@@ -51,6 +51,7 @@ def step_with_input_service(system, steps, *, chunk=64, extra_svc=None):
     _svc = getattr(system, 'service_pio_uart', None)
     _step = system.step
     ran = 0
+
     while ran < steps:
         if _svc:
             _svc()

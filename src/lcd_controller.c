@@ -105,6 +105,21 @@ static void write_vram_pixel_byte(lcd_state_t *lcd, int chip, int x_local,
   }
 }
 
+/* LCDC bitimage/character graphic-write command byte packs the combine mode
+   into bits 7 and 5 (see D_GRAPHIC.TXT's D_CPRINT_FILL/D_CPRINT/D_FILL_PTN:
+   $15 = &H80 NORM / &HA0 OR / &H20 XOR before being OR'd into the command's
+   low bits). NORM must overwrite VRAM outright; OR/XOR must combine with the
+   byte already there. Bit pattern 00 (neither bit set) is unused by this
+   ROM's callers but decodes to AND for symmetry with the real chip. */
+static uint8_t combine_pixel_byte(uint8_t attr, uint8_t old, uint8_t new_byte) {
+  bool norm_bit = (attr & 0x80) != 0;
+  bool comb_bit = (attr & 0x20) != 0;
+  if (norm_bit && !comb_bit) return new_byte;
+  if (norm_bit && comb_bit)  return (uint8_t)(old | new_byte);
+  if (!norm_bit && comb_bit) return (uint8_t)(old ^ new_byte);
+  return (uint8_t)(old & new_byte);
+}
+
 static uint8_t read_vram_pixel_byte(lcd_state_t *lcd, int chip, int x_local,
                                     int y_page) {
   if (y_page < 0 || y_page >= (int)lcd->active_pages)
@@ -206,11 +221,57 @@ static void apply_lcdc_command(lcd_state_t *lcd, const uint8_t *cmd,
     if (row >= lcd->active_pages) row = lcd->active_pages - 1;
     int block_off = (col & 0x80) ? 48 : 0;
     int col7 = col & 0x7F;
-    st->y = row;
-    if (cmd_id == LCDC_CMD_DRAW_CHAR) {
-      st->x = block_off + ((col7 / 16) * lcd->char_width);
+    /* FOREX_PB "missing characters" investigation, 2026-08-09: DRAW_CHAR
+     * used to decode the column field as (col7/16)*char_width — only
+     * correct when char_width==8, since callers (e.g. D_TEXT in FOREX_PB's
+     * GRAPHIC.TXT/D_GRAPHIC.TXT) encode col as X*2*char_width (see its own
+     * "X座標を12(2*6)倍する" comment, i.e. col=X*12 for char_width=6). With
+     * the old /16 divisor, that encoding aliases multiple source columns
+     * onto the same decoded LCD position for any char_width != 8 (e.g. 6,
+     * FOREX_PB's stage-clear text), silently overwriting characters roughly
+     * every 4 columns — confirmed via [DTEXT_LOOP_DBG]: the CPU-side X/idx
+     * loop was proven correct on real HW, isolating the bug to this
+     * decode. Unified with the general col7/2 formula below, which stays
+     * correct for char_width==8 too (col=X*16, col7/2=X*8) and is
+     * char-width-independent like the sender's own encoding. Present
+     * unchanged in the pre-C-port Python original
+     * (backup/mp_20260506/py/lcd_controller.py), so this is a long-standing
+     * latent bug in the rarely-exercised direct-LCDC text path, not a
+     * porting regression.
+     *
+     * 2026-08-09 (continued): a second real-HW test after the above fix
+     * showed exactly one remaining dropped character per message, always
+     * at the first column of the LCD2 chip (absolute column 16 — 'R' in
+     * "STAGE CLEAR!", 'T' in "TO THE NEXT STAGE!"). D_TEXT's own source
+     * documents this exact spot as a deliberate hardware-quirk workaround
+     * (D_TEXT_BLOCK0's "X=0の書き込み" case in D_GRAPHIC.TXT): for
+     * character-column 0 of EITHER chip, it sends the poison column value
+     * 0xDE (222, comment: "x=222 (for 1 line shift)") instead of the
+     * normal formula's col=0, and pre-adjusts the row by -1 mod 4 itself
+     * before sending — e.g. "X=16,Y=2 -> X=222,Y=1 ($0=&H93:LCD2)". Fed
+     * through the general col7/2 formula, 0xDE decodes to block_off(48) +
+     * col7(0x5E=94)/2(47) = 95 — the LAST pixel of the 96-wide chip, so
+     * the glyph's remaining columns land out of range and get clipped by
+     * write_vram_pixel_byte()'s 0<=x_local<96 check, leaving the character
+     * almost entirely blank.
+     *
+     * 2026-08-09 (continued further): fixing only st->x above made the
+     * character visible but one row too high (e.g. STAGE_CLEAR_DISP's
+     * `R`, sent for row=1, rendered at row=0). The sender's own comment
+     * ("1 line shift") says the real hardware auto-advances to the next
+     * row as a side effect of writing this poison column value — D_TEXT
+     * pre-subtracts 1 (mod 4) from its row before sending specifically to
+     * cancel that out. Our emulator never modeled the auto-advance, so it
+     * was taking the sender's already-decremented row literally instead of
+     * letting it cancel out. Re-adding 1 (mod active_pages, matching the
+     * sender's own mod-4 wraparound assumption — real for the 32-dot/4-page
+     * mode this text is drawn in) restores the intended row. */
+    if (cmd_id == LCDC_CMD_DRAW_CHAR && col == 0xDE) {
+      st->x = 0;
+      st->y = (uint8_t)((row + 1) % lcd->active_pages);
     } else {
       st->x = block_off + (col7 / 2);
+      st->y = row;
     }
   }
 }
@@ -473,6 +534,12 @@ void lcd_write(lcd_state_t *lcd, uint8_t data) {
       uint8_t pixel_byte = data;
       if (mode == LCDC_CMD_DRAW_BITIMAGE) {
         pixel_byte = reverse_bits8(data);
+      }
+      if (st->attr != 0x80) {
+        /* OR/XOR/AND: combine with VRAM's current byte instead of
+           overwriting (NORM, attr==0x80, keeps the plain-write fast path). */
+        uint8_t old = read_vram_pixel_byte(lcd, chip, st->x, st->y);
+        pixel_byte = combine_pixel_byte(st->attr, old, pixel_byte);
       }
       write_vram_pixel_byte(lcd, chip, st->x, st->y, pixel_byte);
       advance_xy(
@@ -854,6 +921,16 @@ void lcd_render_to_display(lcd_state_t *lcd) {
     : 0;
   for (int page = first_page; page <= last_page; page++) {
     if (!lcd->dirty_pages[page]) continue;
+    /* Pages beyond active_pages (e.g. a 64->32 dot shrink leaves 4-7 dirty
+       so their SPI window gets a final pass) must not be physically drawn
+       here: _pixel_color()'s clamp returns color_off for them, but that is
+       the LCD panel's own OFF-pixel tint (e.g. olive green), not the
+       surrounding physical screen's background — painting it would leave a
+       stray colored band where the vacated bezel area should stay whatever
+       the caller (e.g. the emulator menu's full-screen clear) already put
+       there. Simply skip these pages; the LCD-OFF whole-area fill branch
+       above (using fill_pages) is the only path meant to touch that area. */
+    if (page >= (int)lcd->active_pages) continue;
 
     uint16_t pg_dy_start, pg_dy_end;
     if (frac_scale) {

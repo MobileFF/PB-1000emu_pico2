@@ -63,15 +63,16 @@ Every item here flips ON/OFF immediately on EXE; none of these are saved to a co
 | Item | What it does |
 | :--- | :--- |
 | **FD Swap** | Switch the virtual floppy disk's image file |
-| **RAM Save** | Snapshot the current RAM contents to the SD card (`/sd/rams/`) |
-| **RAM Load** | Restore RAM from a previously saved snapshot |
+| **RAM Save** | Snapshot the current RAM contents and CPU state (PC/registers) to the SD card (`/sd/rams/`) |
+| **RAM Load** | Restore RAM and CPU state from a previously saved snapshot, resuming execution from exactly where it was saved |
 | **VRAM Save** | Save the current screen contents (LCD VRAM) to a file — same as the PrintScreen key |
 | **Full Capture** | Save the entire physical screen, including the bezel and function key bar, as a single image (PPM) |
 
 > [!WARNING]
-> **Running RAM Load immediately triggers a reset and reboot, and the EMULATOR MENU closes
-> automatically.** Whatever program is currently running is discarded, so use RAM Save first if
-> you need to keep it.
+> **Running RAM Load immediately overwrites the current RAM and execution state, and the
+> EMULATOR MENU closes automatically.** It does NOT reset the CPU (PC is not forced back to
+> 0x0000) — execution resumes right from the PC/registers captured by RAM Save. Whatever
+> program is currently running is discarded, so use RAM Save first if you need to keep it.
 
 Both **RAM Save** and **RAM Load** open a screen for picking the destination/source folder name
 (when saving a new one, you can type a name using letters, digits, and hyphens).
@@ -84,9 +85,18 @@ Both **RAM Save** and **RAM Load** open a screen for picking the destination/sou
 | :--- | :--- |
 | **Foreground Color** | Change the color of "lit" LCD pixels |
 | **Background Color** | Change the color of "unlit" LCD pixels |
+| **LCD Height** | Toggle the LCD's vertical resolution between 32-dot and 64-dot |
 
-Selecting either opens a numeric entry screen (RGB332 value, 0–255) followed by a color preview
-screen. Confirming with EXE saves the value to `pb1000.ini`, so it persists across reboots.
+Selecting **Foreground Color** / **Background Color** opens a numeric entry screen (RGB332
+value, 0–255) followed by a color preview screen. Confirming with EXE saves the value to
+`pb1000.ini`, so it persists across reboots.
+
+**LCD Height** flips between 32-dot and 64-dot immediately on each EXE press (no sub-screen).
+Like the other toggle-style items, it is session-only and is NOT saved to `pb1000.ini` — it
+reverts to the `[display] lcd_height` setting on the next boot. Right after switching to
+64-dot mode, the newly-added rows (5-8) may still show whatever was previously sitting in VRAM
+until the running program redraws them — this matches real PB-1000 hardware behavior and is
+not a bug.
 
 ---
 
@@ -95,6 +105,7 @@ screen. Confirming with EXE saves the value to `pb1000.ini`, so it persists acro
 | Item | What it does |
 | :--- | :--- |
 | **Hook Status** | A read-only screen listing which extensions (modules under `mp/ext/`, etc.) are currently active |
+| **CPU Status** | A read-only screen showing the current CPU registers (PC, flags, UA, IA/IB/IE, IX-KY, $0-$31) plus a raw byte dump and disassembly around PC |
 | **Reset** | Perform a hardware-style reset on the spot — the same as pressing NumLock on a real keyboard |
 | **NEW ALL (clear memory)** | Run the PB-1000's NEW ALL function, which erases all user memory |
 
@@ -106,8 +117,8 @@ screen. Confirming with EXE saves the value to `pb1000.ini`, so it persists acro
 **Reset** runs immediately with no confirmation screen, and the EMULATOR MENU closes
 automatically afterward (matching the real hardware's NumLock key).
 
-Inside the **Hook Status** screen, Up/Down scrolls the list; BREAK returns to the System
-sub-menu.
+Inside the **Hook Status** / **CPU Status** screens, Up/Down scrolls the list; BREAK returns to
+the System sub-menu.
 
 ---
 

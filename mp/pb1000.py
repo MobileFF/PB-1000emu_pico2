@@ -503,9 +503,6 @@ class PB1000System:
     def _mem_write(self, segment, offset, data):
         pass
 
-    def _is_lcd_vram_addr(self, offset):
-        return (0x6100 <= offset <= 0x61FF) or (0x6201 <= offset <= 0x6850)
-
     def _port_read(self):
         # Called by C only when FDD interface is powered (PD_PWR bit=0).
         # Return STR-based ACK for the MD-100 transfer protocol.
@@ -624,13 +621,16 @@ class PB1000System:
             if not _in_fdd_mode:
                 if self.pio_uart:
                     self.pio_uart.write(data)
-            # console_uart (UART1, GP4/GP5) is on independent pins and must
-            # always receive BASIC PRINT output regardless of FDD power state.
-            char = chr(data & 0x7F)
-            if self.console_uart:
-                self.console_uart.write(char)
-            else:
-                print(char, end="")
+                # console_uart (UART1, GP4/GP5) is on independent pins and must
+                # always receive BASIC PRINT output regardless of FDD power state.
+                # Skipped during an active FDD transfer: those bytes are FDD
+                # protocol data, not console text, and must not leak to the
+                # debug REPL (was flooding the log with raw retry bytes).
+                char = chr(data & 0x7F)
+                if self.console_uart:
+                    self.console_uart.write(char)
+                else:
+                    print(char, end="")
 
     def _fdd_read_bridge_fn(self, segment, offset):
         return self._read_io_register(offset)
@@ -697,6 +697,11 @@ class PB1000System:
         同名モジュールが両方にある場合は /sd/ext/ 側を優先し、
         /ext/ 側は無視する(sys.path も /sd/ext を先に登録するため、
         import 解決自体が自然に SD 優先になる)。
+        .py と .mpy の両方を候補として認識する(.mpy のみを認識しない
+        既存実装は 2026-08-13 の不具合報告で判明)。同一ディレクトリに
+        両方存在する場合は __import__() 自身の解決規則がそのまま働き、
+        MicroPython は常に .py を .mpy より優先するため、ここで
+        拡張子ごとの優先順位を別途実装する必要はない。
         各モジュールは register(system) 関数を持つこと。
         """
         import os, sys, gc
@@ -709,9 +714,14 @@ class PB1000System:
             if ext_dir not in sys.path:
                 sys.path.insert(0, ext_dir)
             for fname in sorted(files):
-                if not fname.endswith(".py") or fname.startswith("_"):
+                if fname.startswith("_"):
                     continue
-                mod_name = fname[:-3]
+                if fname.endswith(".py"):
+                    mod_name = fname[:-3]
+                elif fname.endswith(".mpy"):
+                    mod_name = fname[:-4]
+                else:
+                    continue
                 if mod_name not in mod_sources:
                     mod_sources[mod_name] = ext_dir
 
@@ -753,7 +763,11 @@ class PB1000System:
         res_released_now = (current & PD_RES) == 0 and (previous & PD_RES) != 0
 
         if (current & PD_PWR) != (previous & PD_PWR):
-            print(f"[VFDD] Power: {'ON' if powered_now else 'OFF'}")
+            try:
+                _pc_dbg = f" PC={cpu_core.get_pc():#06x}"
+            except Exception:
+                _pc_dbg = ""
+            print(f"[VFDD] Power: {'ON' if powered_now else 'OFF'}{_pc_dbg}")
             if powered_now:
                 # Power just turned ON: pre-load 0x55 so boot detection works
                 # even before any RES/STR pulse occurs
@@ -1148,6 +1162,17 @@ class PB1000System:
                 "regmain": [int(cpu_core.get_reg(i)) for i in range(32)],
                 "regsir": [int(cpu_core.get_sreg(i)) for i in range(3)],
                 "reg16": [int(cpu_core.get_reg16(i)) for i in range(6)],
+                # irq_status/state: which interrupt handler (if any) is active,
+                # and CPU_SLP/CPU_FAST — see get_irq_status()/get_state() in
+                # modhd61700.c. A save taken mid-interrupt-handler (interrupts
+                # fire on their own schedule regardless of what the loaded
+                # program does, e.g. the periodic keyboard-scan interrupt) has
+                # PC/UA pointing into ROM handler code that only makes sense
+                # with these restored too, or resume can crash via a stale/
+                # inconsistent fetch-bank state. Guarded with hasattr() so old
+                # firmware without these C exports still round-trips the rest.
+                "irq_status": int(cpu_core.get_irq_status()) if hasattr(cpu_core, "get_irq_status") else 0,
+                "cpu_flow_state": int(cpu_core.get_state()) if hasattr(cpu_core, "get_state") else 0,
             }
             with open(reg_path, "w") as f:
                 json.dump(regs, f)
@@ -1181,15 +1206,6 @@ class PB1000System:
         self._call_hook_enabled[address] = True  # new entries are enabled by default
         if hasattr(cpu_core, "set_call_hook"):
             cpu_core.set_call_hook(address, fn)
-
-    def unregister_call_hook(self, address):
-        """Unregister the hook for the given CAL destination address."""
-        if hasattr(self, "_call_hook_refs"):
-            self._call_hook_refs.pop(address, None)
-            self._call_hook_owner.pop(address, None)
-            self._call_hook_enabled.pop(address, None)
-        if hasattr(cpu_core, "clear_call_hook"):
-            cpu_core.clear_call_hook(address)
 
     def enable_call_hook(self, address):
         """Enable a previously registered hook. No-op if not registered."""
@@ -1239,30 +1255,6 @@ class PB1000System:
         if hasattr(cpu_core, "set_mem_write_hook"):
             cpu_core.set_mem_write_hook(addr_start, addr_end, fn)
 
-    def unregister_mem_write_hook(self, addr_start):
-        """Unregister the hook registered with the given start address."""
-        if hasattr(self, "_mem_write_hook_refs"):
-            self._mem_write_hook_refs.pop(addr_start, None)
-            self._mem_write_hook_range.pop(addr_start, None)
-            self._mem_write_hook_owner.pop(addr_start, None)
-            self._mem_write_hook_enabled.pop(addr_start, None)
-        if hasattr(cpu_core, "clear_mem_write_hook"):
-            cpu_core.clear_mem_write_hook(addr_start)
-
-    def enable_mem_write_hook(self, addr_start):
-        """Enable a previously registered hook. No-op if not registered."""
-        if hasattr(self, "_mem_write_hook_enabled") and addr_start in self._mem_write_hook_enabled:
-            self._mem_write_hook_enabled[addr_start] = True
-        if hasattr(cpu_core, "set_mem_write_hook_enabled"):
-            cpu_core.set_mem_write_hook_enabled(addr_start, True)
-
-    def disable_mem_write_hook(self, addr_start):
-        """Disable a registered hook without unregistering it."""
-        if hasattr(self, "_mem_write_hook_enabled") and addr_start in self._mem_write_hook_enabled:
-            self._mem_write_hook_enabled[addr_start] = False
-        if hasattr(cpu_core, "set_mem_write_hook_enabled"):
-            cpu_core.set_mem_write_hook_enabled(addr_start, False)
-
     def list_mem_write_hooks(self):
         """Return [(addr_start, addr_end, owner, enabled), ...] sorted by
         addr_start, for diagnostic display (e.g. the emulator menu's Hook
@@ -1276,7 +1268,18 @@ class PB1000System:
             for addr in refs
         )
 
-    def load_state(self, path=None):
+    def load_state(self, path=None, restore_cpu_state=True):
+        """restore_cpu_state=True (default): full resume, including PC/UA/
+        all registers, as captured by save_state() — used by the emulator
+        menu's user-initiated "RAM Load".
+        restore_cpu_state=False: RAM contents only, CPU forced to a clean
+        reset (PC=0x0000, IB/IE/IA/UA cleared) — the old, conservative
+        behavior. Used for the automatic boot-time restore (main.py), since
+        an unattended boot must never be able to get stuck resuming a bad/
+        inconsistent save with no way to reach the menu to recover (see
+        2026-08-11 FOREX_PB boot-hang report: a save taken mid-VFDD-access
+        resumed into a TRP whose 0x6FFA jump table pointed into the unmapped
+        dead zone, hanging every subsequent boot until this split existed)."""
         import json
         if path is None:
             path0 = self._get_storage_path("ram0.bin")
@@ -1361,15 +1364,79 @@ class PB1000System:
                 if reg_path.endswith(".json"):
                     with open(reg_path, "r") as f:
                         regs = json.load(f)
-                    # Saved execution registers do not mix safely with a forced PC=0x0000.
-                    # Start from a clean CPU state and keep the restored RAM only.
+                    # cpu_core.reset() first regardless of restore_cpu_state:
+                    # hd61700_init() zeroes the whole C struct including callback
+                    # pointers/bank buffers that must be re-wired either way.
                     cpu_core.reset(self.debug_cfg["sys"])
-                    cpu_core.set_pc(0x0000)
-                    cpu_core.set_reg8(2, 0)  # Clear IB
-                    cpu_core.set_reg8(5, 0)  # Clear IE
-                    cpu_core.set_reg8(4, 0)  # Clear IA
-                    cpu_core.set_reg8(3, 0)  # Clear UA
-                    print("CPU reset after RAM load (saved registers ignored, PC=0x0000)")
+                    if not restore_cpu_state:
+                        cpu_core.set_pc(0x0000)
+                        cpu_core.set_reg8(2, 0)  # Clear IB
+                        cpu_core.set_reg8(5, 0)  # Clear IE
+                        cpu_core.set_reg8(4, 0)  # Clear IA
+                        cpu_core.set_reg8(3, 0)  # Clear UA
+                        print("CPU reset after RAM load (saved registers ignored, PC=0x0000)")
+                    else:
+                        # Full resume: restore the exact CPU state save_state()
+                        # captured (pc/flags/ia/ib/ie/ua/regmain/regsir/reg16), not
+                        # just the RAM contents.
+                        #
+                        # set_reg8(3, ua) (UA) already re-syncs the internal fetch_ua/
+                        # prev_ua fetch-bank pipeline as a side effect (see the comment
+                        # on mod_set_reg8 in modhd61700.c, written specifically for this
+                        # save-state-restore case) — without that, the first instruction
+                        # executed after resume would fetch from bank 0 regardless of
+                        # the restored UA (reset() leaves fetch_ua/prev_ua at 0), which
+                        # is exactly the class of UA-bank corruption bug this project
+                        # spent a long investigation on for FOREX_PB (see
+                        # 調査用/FOREX_PB/investigation_notes.md) — so UA must be
+                        # restored via set_reg8, not written directly into a save
+                        # format that bypasses it.
+                        #
+                        # 2026-08-11 FOREX_PB boot-hang report: a menu-triggered RAM
+                        # Load resumed at PC=0x9318/UA=0x50 — ROM handler code, not
+                        # FOREX_PB's own (FOREX_PB does no disk access, ruling out
+                        # the game itself having caused the VFDD activity seen right
+                        # after resume) — straight into a TRP whose 0x6FFA jump table
+                        # resolved to 0x3720 (unmapped dead zone). The likely
+                        # explanation: the save was taken while a periodic interrupt
+                        # handler (e.g. keyboard-scan, which fires on its own schedule
+                        # regardless of the loaded program) was mid-flight, temporarily
+                        # in ROM/UA=0x50 territory — but irq_status wasn't part of the
+                        # saved format, so resume left it at 0 (reset() default) even
+                        # though PC was sitting inside what was an active handler,
+                        # leaving fetch_bank_ua()'s "force bank 0 while a handler is
+                        # active" protection incorrectly disengaged for any interrupt
+                        # nesting/RTNI bookkeeping that follows. get_irq_status()/
+                        # get_state() (added same day) close this gap; hasattr() guards
+                        # keep old saves (and old firmware without these C exports)
+                        # loading fine, just without this restored.
+                        cpu_core.set_reg8(2, int(regs.get("ib", 0)))   # IB
+                        cpu_core.set_reg8(5, int(regs.get("ie", 0)))   # IE
+                        cpu_core.set_reg8(4, int(regs.get("ia", 0)))   # IA
+                        cpu_core.set_reg8(3, int(regs.get("ua", 0)))   # UA (syncs fetch_ua/prev_ua)
+                        cpu_core.set_flags(int(regs.get("flags", 0)))
+                        for i, v in enumerate(regs.get("regmain", [])):
+                            cpu_core.set_reg(i, int(v))
+                        for i, v in enumerate(regs.get("regsir", [])):
+                            cpu_core.set_sreg(i, int(v))
+                        for i, v in enumerate(regs.get("reg16", [])):
+                            cpu_core.set_reg16(i, int(v))
+                        if hasattr(cpu_core, "set_irq_status"):
+                            cpu_core.set_irq_status(int(regs.get("irq_status", 0)))
+                        if hasattr(cpu_core, "set_state"):
+                            cpu_core.set_state(int(regs.get("cpu_flow_state", 0)))
+                        cpu_core.set_pc(int(regs.get("pc", 0)))
+                        print("CPU state restored from RAM load (PC=0x%04X UA=0x%02X irq_status=0x%02X)" %
+                              (int(regs.get("pc", 0)), int(regs.get("ua", 0)),
+                               int(regs.get("irq_status", 0))))
+                        # Known limitation: peripheral-side state driven by the
+                        # emulated program (e.g. an in-progress virtual-FDD transfer)
+                        # is still not captured — a save taken mid-transfer can resume
+                        # into a CPU state that no longer matches what the peripheral
+                        # emulation expects. Unlike irq_status this isn't CPU state,
+                        # so it isn't something get_irq_status()/get_state() can help
+                        # with; a full fix would need VFDD's own controller state
+                        # snapshotted too.
                 else:
                     self._restore_registers_from_dump()
             else:
@@ -1605,9 +1672,6 @@ class PB1000System:
         self.lcd.lcd_ctrl(0xDE) # OP=0
 
 
-    def set_on_int(self, state):
-        cpu_core.set_input(cpu_core.ON_INT, 1 if state else 0)
-
     @property
     def pc(self):
         return cpu_core.get_pc()
@@ -1717,187 +1781,6 @@ class PB1000System:
             return bool(cpu_core.get_reg8(5) & 0x40)
         return True
 
-    def debug_step(self,pause=True,trace=True,prt=True,trace_index=None,out=None):
-        """Execute one instruction and print disassembly."""
-        if trace==False:
-            return cpu_core.step()
-
-        if out is None:
-            out = print
-        
-        pc = cpu_core.get_pc()
-        flags = cpu_core.get_flags()
-        
-        # Decode flags: Z(80), C(40), LZ(20), UZ(10), SW(08), APO(04)
-        f_str = ""
-        f_str += "Z" if flags & 0x80 else "-"
-        f_str += "C" if flags & 0x40 else "-"
-        f_str += "L" if flags & 0x20 else "-"
-        f_str += "U" if flags & 0x10 else "-"
-        f_str += "S" if flags & 0x08 else "-"
-        f_str += "A" if flags & 0x04 else "-"
-
-        op_bytes = cpu_core.step()
-        if not op_bytes:
-            #print("not op_bytes")
-            return None
-
-        hex_str = "".join(f"{x:02X}" for x in op_bytes)
-        try:
-            from debug import decode_basic
-            mnemonic = decode_basic(op_bytes, pc)
-        except Exception as e:
-            mnemonic = f"Parse Error: {e}"
-
-        prefix = f"{trace_index:05d} : " if trace_index is not None else ""
-
-        def _read_bank0_u8(addr):
-            if hasattr(cpu_core, "read_mem"):
-                return cpu_core.read_mem(addr, 0) & 0xFF
-            return 0
-
-        def _read_bank0_u16(addr):
-            lo = _read_bank0_u8(addr)
-            hi = _read_bank0_u8(addr + 1)
-            return lo | (hi << 8)
-
-        def _read_bank0_hex(addr, count):
-            return " ".join(
-                f"{_read_bank0_u8((addr + i) & 0xFFFF):02X}" for i in range(count)
-            )
-
-        extra_lines = []
-        if pc in (0x9A2F, 0x9A3C):
-            sbot = _read_bank0_u16(0x6933)
-            forsk = _read_bank0_u16(0x6935)
-            extra_lines.append(
-                f"BSAVE-OM {pc:04X}: SBOT={sbot:04X} FORSK={forsk:04X} FREE={(forsk - sbot) & 0xFFFF:04X}"
-            )
-        elif pc in (0xB2A3, 0xB2AB):
-            memen = _read_bank0_u16(0x6945)
-            datdi = _read_bank0_u16(0x6947)
-            r01 = (cpu_core.get_reg(1) << 8) | cpu_core.get_reg(0)
-            r45 = (cpu_core.get_reg(5) << 8) | cpu_core.get_reg(4)
-            r67 = (cpu_core.get_reg(7) << 8) | cpu_core.get_reg(6)
-            extra_lines.append(
-                f"BSAVE-OM {pc:04X}: MEMEN={memen:04X} DATDI={datdi:04X} FREE={(datdi - memen) & 0xFFFF:04X} REQ={r01:04X} R45={r45:04X} R67={r67:04X}"
-            )
-        elif pc in (0xB34A, 0xB353):
-            memen = _read_bank0_u16(0x6945)
-            datdi = _read_bank0_u16(0x6947)
-            basdi = _read_bank0_u16(0x6949)
-            r23 = (cpu_core.get_reg(3) << 8) | cpu_core.get_reg(2)
-            extra_lines.append(
-                f"BSAVE-OM {pc:04X}: MEMEN={memen:04X} DATDI={datdi:04X} BASDI={basdi:04X} DIRFREE={(r23 - 0x0021) & 0xFFFF:04X} R23={r23:04X}"
-            )
-        elif pc in (0xB201, 0xB203, 0xB205, 0xB215):
-            r01 = (cpu_core.get_reg(1) << 8) | cpu_core.get_reg(0)
-            r23 = (cpu_core.get_reg(3) << 8) | cpu_core.get_reg(2)
-            r3031 = (cpu_core.get_reg(31) << 8) | cpu_core.get_reg(30)
-            sy = cpu_core.get_sreg(1) & 0x1F
-            extra_lines.append(
-                f"BSAVE-OM {pc:04X}: SY={sy:02X} R01={r01:04X} R23={r23:04X} R30_31={r3031:04X} R30={cpu_core.get_reg(30):02X} R31={cpu_core.get_reg(31):02X}"
-            )
-        elif pc in (0xB720, 0xB724, 0xB726, 0xDCBC, 0xDCBF):
-            nowfl = _read_bank0_u16(0x6F54)
-            ix = cpu_core.get_reg16(0)
-            if pc == 0xB720:
-                extra_lines.append(
-                    f"BSAVE-OM {pc:04X}: NOWFL={nowfl:04X} IX={ix:04X} RAM[6F54:6F5B]={_read_bank0_hex(0x6F54, 8)}"
-                )
-            elif pc == 0xB724:
-                r12 = (cpu_core.get_reg(2) << 8) | cpu_core.get_reg(1)
-                extra_lines.append(
-                    f"BSAVE-OM {pc:04X}: NOWFL={nowfl:04X} IX={ix:04X} R1_2={r12:04X} RAM[6F54:6F5B]={_read_bank0_hex(0x6F54, 8)}"
-                )
-            elif pc == 0xB726:
-                r12 = (cpu_core.get_reg(2) << 8) | cpu_core.get_reg(1)
-                extra_lines.append(
-                    f"BSAVE-OM {pc:04X}: NOWFL={nowfl:04X} IX={ix:04X} R1_2={r12:04X} RAM[6F54:6F5B]={_read_bank0_hex(0x6F54, 8)}"
-                )
-            else:
-                sy = cpu_core.get_sreg(1) & 0x1F
-                addr = (ix + cpu_core.get_reg(sy)) & 0xFFFF
-                m0 = _read_bank0_u8(addr)
-                m1 = _read_bank0_u8((addr + 1) & 0xFFFF)
-                m2 = _read_bank0_u8((addr + 2) & 0xFFFF)
-                m3 = _read_bank0_u8((addr + 3) & 0xFFFF)
-                r2526 = (cpu_core.get_reg(26) << 8) | cpu_core.get_reg(25)
-                r2728 = (cpu_core.get_reg(28) << 8) | cpu_core.get_reg(27)
-                extra_lines.append(
-                    f"BSAVE-OM {pc:04X}: NOWFL={nowfl:04X} IX={ix:04X} SY={sy:02X} SRC={addr:04X} MEM={m0:02X} {m1:02X} {m2:02X} {m3:02X} R25_26={r2526:04X} R27_28={r2728:04X} RAM[6F54:6F5B]={_read_bank0_hex(0x6F54, 8)}"
-                )
-        elif pc in (0xD23F, 0xD242):
-            iz = cpu_core.get_reg16(2)
-            r01 = (cpu_core.get_reg(1) << 8) | cpu_core.get_reg(0)
-            extra_lines.append(
-                f"BSAVE-OM {pc:04X}: IZ={iz:04X} R01={r01:04X} RAM[6FCC:6FD3]={_read_bank0_hex(0x6FCC, 8)}"
-            )
-        elif pc in (0xD2BB, 0xD2C9, 0xD2CD, 0xD2D7, 0xD2E7):
-            r01 = (cpu_core.get_reg(1) << 8) | cpu_core.get_reg(0)
-            r23 = (cpu_core.get_reg(3) << 8) | cpu_core.get_reg(2)
-            r2021 = (cpu_core.get_reg(21) << 8) | cpu_core.get_reg(20)
-            extra_lines.append(
-                f"BSAVE-OM {pc:04X}: R01={r01:04X} R23={r23:04X} R20_21={r2021:04X} RAM[6FAF:6FB4]={_read_bank0_hex(0x6FAF, 6)} RAM[6FCC:6FD3]={_read_bank0_hex(0x6FCC, 8)}"
-            )
-            if pc in (0xD2CD, 0xD2D7):
-                extra_lines.append(
-                    f"BSAVE-OM {pc:04X}: RAM[6E1D:6E24]={_read_bank0_hex(0x6E1D, 8)} RAM[6F74:6F7B]={_read_bank0_hex(0x6F74, 8)}"
-                )
-        elif pc in (0xB1C2, 0xB1E8, 0xB1EB, 0xB1F4, 0xB201, 0xB210):
-            ix = cpu_core.get_reg16(0)
-            r0102 = (cpu_core.get_reg(2) << 16) | (cpu_core.get_reg(1) << 8) | cpu_core.get_reg(0)
-            r34 = (cpu_core.get_reg(4) << 8) | cpu_core.get_reg(3)
-            r5 = cpu_core.get_reg(5)
-            extra_lines.append(
-                f"BSAVE-OM {pc:04X}: IX={ix:04X} R0={cpu_core.get_reg(0):02X} R1={cpu_core.get_reg(1):02X} R2={cpu_core.get_reg(2):02X} R3={cpu_core.get_reg(3):02X} R4={cpu_core.get_reg(4):02X} R5={r5:02X} R34={r34:04X} RAM[6F74:6F7B]={_read_bank0_hex(0x6F74, 8)}"
-            )
-            if ix:
-                extra_lines.append(
-                    f"BSAVE-OM {pc:04X}: IXMEM[{ix:04X}]={_read_bank0_hex(ix, 8)}"
-                )
-        elif pc in (0xDCE4, 0xDCE7, 0xE00B, 0xE011, 0xE013, 0xE019):
-            r01 = (cpu_core.get_reg(1) << 8) | cpu_core.get_reg(0)
-            r2324 = (cpu_core.get_reg(24) << 8) | cpu_core.get_reg(23)
-            r2526 = (cpu_core.get_reg(26) << 8) | cpu_core.get_reg(25)
-            r2728 = (cpu_core.get_reg(28) << 8) | cpu_core.get_reg(27)
-            r3031 = (cpu_core.get_reg(31) << 8) | cpu_core.get_reg(30)
-            sy = cpu_core.get_sreg(1) & 0x1F
-            extra_lines.append(
-                f"BSAVE-OM {pc:04X}: SY={sy:02X} R01={r01:04X} R23_24={r2324:04X} R25_26={r2526:04X} R27_28={r2728:04X} R30_31={r3031:04X}"
-            )
-        elif pc == 0xABBD:
-            r01 = (cpu_core.get_reg(1) << 8) | cpu_core.get_reg(0)
-            r45 = (cpu_core.get_reg(5) << 8) | cpu_core.get_reg(4)
-            r67 = (cpu_core.get_reg(7) << 8) | cpu_core.get_reg(6)
-            r3031 = (cpu_core.get_reg(31) << 8) | cpu_core.get_reg(30)
-            extra_lines.append(
-                f"BSAVE-OM TRAP {pc:04X}: R01={r01:04X} R45={r45:04X} R67={r67:04X} R30_31={r3031:04X} IX={cpu_core.get_reg16(0):04X} IZ={cpu_core.get_reg16(2):04X}"
-            )
-
-        line = f"{prefix}[{pc:04X}] {hex_str:<10} | F:{f_str} | {mnemonic} "
-        if pause:
-            print(f"{line}| ",end="")
-            for extra in extra_lines:
-                print()
-                print(extra, end="")
-            while True:
-                cmd = input(">")
-                if cmd and cmd.strip().upper().startswith("R"):
-                    self.print_registers()
-                elif cmd and cmd.strip().upper().startswith("D"):
-                    addr = int(input("address:"),16)
-                    from main import dump_mem
-                    dump_mem(addr,1,self)
-                else:
-                    break
-        else:
-            if prt:
-                out(line)
-                for extra in extra_lines:
-                    out(extra)
-        return line
-            
     def print_registers(self, printer=print):
         regs = [cpu_core.get_reg(i) for i in range(32)]
         printer("Registers:")
@@ -1919,10 +1802,6 @@ class PB1000System:
         pair_values = [cpu_core.get_reg16(i) for i in range(6)]
         pairs = " ".join(f"{pair_names[i]}={pair_values[i]:04X}" for i in range(len(pair_names)))
         printer(f"16-bit: {pairs}")
-
-#     def set_pc(self, addr):
-#             """Set CPU PC (debug helper)."""
-#             cpu_core.set_pc(addr & 0xFFFF)
 
     def dump_mem_range(self, start, end, bytes_per_line=16, printer=print):
         """Dump linear memory bytes [start..end] in hex."""

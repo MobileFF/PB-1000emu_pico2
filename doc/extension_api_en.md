@@ -112,6 +112,11 @@ On the Pico 2, place files under `/ext/` or `/sd/ext/` (SD card takes priority).
 
 At startup, `_ext_load_modules()` scans the `ext/` directory and imports each file with `__import__`. If a module defines `register(system)`, that function is called. That is all.
 
+Both `.py` and precompiled `.mpy` (via `mpy-cross`) files are recognized for auto-loading. If
+both exist for the same module name, `.py` always wins, per MicroPython's own import
+resolution order. Larger extension modules benefit from shipping as `.mpy` to skip the
+compile-at-boot cost.
+
 ### Creating a New Extension Module
 
 Create `mp/ext/myext.py` and define `register(system)`:
@@ -356,3 +361,4 @@ described above are unaffected. See the `dotds64` module entry in `dev_guide_en.
 | 2026-07-10 | `dotds_64dot.py`: now disables its call_hooks unconditionally in 32-dot mode (previously gated only on DSPMD, so it was incorrectly left active in 32-dot mode too). Reads `[display] lcd_height` from `system._config` at `register(system)` time |
 | 2026-07-13 | `dotds_64dot.py`: moved the DOTDS / single-char quick display hot paths to native C for faster rendering, implemented as a standalone `dotds64` module (`src/moddotds64.c`) kept out of the `hd61700` core. Automatically falls back to the Python implementation on older firmware |
 | 2026-07-13 | `moddotds64.c`: fixed DOTDS's LEDTP bulk copy calling `hd61700_mem_read()` (which has a UART-RX interrupt/sleep-wake side effect) up to 1536 times per call. Added side-effect-free `hd61700_ram_read()` and switched to it |
+| 2026-08-13 | `_ext_load_modules()` now also recognizes `.mpy` files, not just `.py`, as auto-load candidates (`.py` still wins when both exist) |

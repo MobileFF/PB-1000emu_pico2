@@ -23,7 +23,7 @@ Responsibilities:
 - Execution flow entry point
 - Boot sequence assembly
 - Main loop dispatch to each helper
-- Special key handling (NumLock / GUI+F6 / GUI+F7)
+- Special key handling (NumLock / GUI+F7)
 - Exception handling and shutdown cleanup
 
 Not responsible for:
@@ -264,7 +264,7 @@ pb1000.py
 10. The main loop executes in order:
     - PIO UART bridge
     - CPU execution slice
-    - Special key handling (NumLock=reset / GUI+F6=disk swap / GUI+F7=emulator menu)
+    - Special key handling (NumLock=reset / GUI+F7=emulator menu, disk swap now lives under that menu's "FD Swap" item)
     - Keyboard / touch / joystick / cursor-repeat input
     - Status handling / screenshots / save-state
     - Frame update

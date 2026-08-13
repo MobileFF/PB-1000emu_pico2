@@ -14,6 +14,7 @@ import time
 import hd61700 as cpu_core
 from ili9341 import ILI9341
 from pb1000 import PB1000System
+from debug import decode_basic
 
 
 # ---- Hardware Pin Configuration (same as main.py) ----
@@ -137,7 +138,15 @@ def run_outac_once(system,update_step=100):
     print(f"Running stub at 0x{stub_addr:04X} until 0x{stop_pc:04X}...")
     while total_steps < max_total_steps:
 
-        system.debug_step(pause=False,trace=True)
+        pc = cpu_core.get_pc()
+        op_bytes = cpu_core.step()
+        if op_bytes:
+            hex_str = "".join(f"{x:02X}" for x in op_bytes)
+            try:
+                mnemonic = decode_basic(op_bytes, pc)
+            except Exception as e:
+                mnemonic = f"Parse Error: {e}"
+            print(f"[{pc:04X}] {hex_str:<10} | {mnemonic}")
         total_steps +=1
         # Periodic display update
         if total_steps%update_step==0:

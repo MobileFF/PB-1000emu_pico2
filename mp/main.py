@@ -27,7 +27,7 @@ from main_runtime import (
     service_timer_realtime,
     update_frame_if_due,
 )
-from main_actions import handle_key_status_and_capture, handle_disk_swap
+from main_actions import handle_key_status_and_capture
 from main_cleanup import dump_shutdown_state
 
 
@@ -214,7 +214,15 @@ def main():
     print("[MEM] before load_state: free=%d alloc=%d  banks=%s" %
           (gc.mem_free(), gc.mem_alloc(),
            ''.join(str(i) for i in range(1, 4) if system.has_bank[i])))
-    system.load_state()  # Restore RAM + registers from profile dir (or default path)
+    # restore_cpu_state=False: unattended boot must never be able to get stuck
+    # resuming a bad/inconsistent save with no way to reach the menu to
+    # recover — restore RAM only and reset the CPU (PC=0x0000), same as
+    # before full-resume support existed. Full CPU-state resume (PC/UA/
+    # registers included) is only available via the emulator menu's
+    # user-initiated "RAM Load", which the user can retry with a different
+    # save or interrupt with a power cycle if it goes wrong. See load_state()
+    # in pb1000.py.
+    system.load_state(restore_cpu_state=False)  # Restore RAM from profile dir (or default path)
     gc.collect()
     print("[MEM] after  load_state: free=%d alloc=%d" %
           (gc.mem_free(), gc.mem_alloc()))
@@ -378,10 +386,6 @@ def main():
                     raise KeyboardInterrupt
                 elif system.pio_uart is not None:
                     system.pio_uart.flush_rx()
-            elif sc == 0x3F:  # F6 → disk swap
-                if time.ticks_diff(gui_active_until, now) > 0:
-                    gui_active_until = 0
-                    handle_disk_swap(system, display, fkbar)
             elif sc == 0x40:  # F7 → emulator menu
                 if time.ticks_diff(gui_active_until, now) > 0:
                     gui_active_until = 0

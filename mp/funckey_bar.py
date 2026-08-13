@@ -40,6 +40,12 @@ class FuncKeyBar:
         self._x_offset = max(0, min(x_offset, disp_w - _IMG_W))
         self._active_key = None
 
+    def set_y_top(self, y):
+        """Reposition the bar (e.g. after an LCD height toggle changes the
+        LCD area's on-screen height). Caller is responsible for clearing the
+        old area and calling draw() again."""
+        self._y_top = y
+
     def draw(self):
         """Blit the image to the display; fall back to plain boxes if file missing."""
         for path in _IMG_PATHS:

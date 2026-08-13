@@ -7,7 +7,8 @@ blocks on this function.  All changes take effect immediately at runtime;
 persistence (writing back to pb1000.ini) is intentionally out of scope here.
 
 Dangerous operations:
-  RAM Load  — loads state then forces reset+power_on
+  RAM Load  — restores the full saved CPU state (RAM + PC/registers) and
+              resumes execution from there; does not reset to PC=0x0000
   vFDD off  — refused while FDD interface is powered
   RS-232C   — warns but allows toggle while mid-transfer is unlikely
   NEW ALL   — erases all user memory; requires confirmation
@@ -128,11 +129,13 @@ def _build_display_items(system):
     return [
         {'id': 'fg_color', 'label': 'Foreground Color', 'badge': "%02X" % fg_c, 'badge_color': _FG},
         {'id': 'bg_color', 'label': 'Background Color', 'badge': "%02X" % bg_c, 'badge_color': _FG},
+        {'id': 'lcd_height', 'label': 'LCD Height', 'badge': "%d dot" % system._lcd_height, 'badge_color': _FG},
     ]
 
 
 def _build_system_items():
     return [
+        {'id': 'cpu_status',  'label': 'CPU Status'},
         {'id': 'hook_status', 'label': 'Hook Status'},
         {'id': 'reset',       'label': 'Reset'},
         {'id': 'newall',      'label': 'NEW ALL (clear memory)'},
@@ -564,6 +567,40 @@ def _do_bg_color(system, display):
     return "BG:0x%02X -> %s" % (val, result)
 
 
+def _do_lcd_height(system, fkbar):
+    """Toggle 32-dot <-> 64-dot LCD mode at runtime.
+
+    Updates system._lcd_height itself (not just the page count) so the new
+    mode survives a later BASIC-program-triggered reset_emulator(), which
+    always resets the page count back to system._lcd_height.
+
+    Session-only: does not persist to pb1000.ini (matches Serial Console /
+    RS-232C / VDP / Beep / Joystick — only fg/bg color are saved to ini).
+
+    Rows 4-7 will show whatever is currently sitting in VRAM until the
+    running program redraws them — this matches how a real PB-1000 behaves
+    right after entering 64-dot mode, not a bug in this toggle.
+    """
+    new_height = 64 if system._lcd_height == 32 else 32
+    system._lcd_height = new_height
+    system.lcd.set_num_pages(new_height // 8)
+
+    # Re-sync the DOTDS/02BD 64-dot row-4+ fix (see mp/ext/dotds_64dot.py) —
+    # its enable state does not otherwise track a live page-count change.
+    try:
+        import dotds_64dot
+        if hasattr(dotds_64dot, 'set_mode'):
+            dotds_64dot.set_mode(new_height == 64)
+    except ImportError:
+        pass
+
+    if fkbar is not None:
+        new_fkbar_y = system._disp_y + int(new_height * system.lcd.scale) + 24
+        fkbar.set_y_top(new_fkbar_y)
+
+    return "LCD Height: %d dot" % new_height
+
+
 # ── Cursor navigation helpers ─────────────────────────────────────────────────
 
 def _next_cursor(items, cur, direction):
@@ -685,11 +722,17 @@ def _dispatch_storage(item_id, system, display, fkbar):
     return "", False
 
 
-def _dispatch_display(item_id, system, display):
+def _dispatch_display(item_id, system, display, fkbar):
     if item_id == 'fg_color':
         return _do_fg_color(system, display), False
     if item_id == 'bg_color':
         return _do_bg_color(system, display), False
+    if item_id == 'lcd_height':
+        # close_all=True: the physical bezel/LCD/FuncKeyBar layout changed
+        # size, so unwind to show_emulator_menu()'s tail redraw (full clear +
+        # force_full_redraw + fkbar.draw()) rather than trying to patch just
+        # the submenu area.
+        return _do_lcd_height(system, fkbar), True
     return "", False
 
 
@@ -697,6 +740,10 @@ def _dispatch_system(item_id, system, display, keyboard_input):
     if item_id == 'hook_status':
         from emulator_menu_ext import _do_hook_status
         _do_hook_status(system, display)
+        return "", False
+    if item_id == 'cpu_status':
+        from emulator_menu_ext import _do_cpu_status
+        _do_cpu_status(system, display)
         return "", False
     if item_id == 'reset':
         # main loop must resume stepping from PC=0
@@ -730,7 +777,7 @@ def _dispatch_top(item_id, system, display, fkbar, keyboard_input, cfg, state):
         closed = _run_menu(
             display, "-- DISPLAY --", "EXE:select  BRK:back",
             lambda: _build_display_items(system),
-            lambda iid, items, cur: _dispatch_display(iid, system, display),
+            lambda iid, items, cur: _dispatch_display(iid, system, display, fkbar),
         )
         return "", closed
     if item_id == 'cat_system':

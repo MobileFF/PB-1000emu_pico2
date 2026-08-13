@@ -244,6 +244,20 @@ A PC check is inserted at the top of the `hd61700_execute()` loop (before instru
 2. The return address is popped from the stack (×2) and incremented by 1 (word-address carry); the PC is set to that value (simulating RTN).
 3. 15 cycles are consumed and execution continues.
 
+> **Note**: the steps above describe the generic path — "PC equals a hooked address right
+> before instruction fetch." Separately, the `CAL IM16` (0x70-0x77), `JP IM16` (0x30-0x37),
+> and `JR` (0xB0-0xB7) opcodes each also check `call_hook` directly against their target
+> address *before* the jump happens, and their interception behavior differs (CAL: skips the
+> push entirely; JP/JR: skips the jump only, never touching the stack). If the same registered
+> address is instead reached via some other path — e.g. `JP $` (register-indirect) — it falls
+> through to the generic path above (pop 2 bytes off SS) instead. **So the same hooked address
+> can have different stack side effects depending on which instruction reached it.** This
+> mechanism also never looks at the Python function's return value — once registered, an
+> address is always intercepted (there's no way to "pass through" selectively). To target one
+> specific call site only (e.g. when a target address has exactly one known, fixed caller),
+> hook the *caller's* address instead and have the hook function manually push onto the stack
+> to redirect into the real routine.
+
 ### Python API
 
 ```python

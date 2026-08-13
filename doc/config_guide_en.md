@@ -1,0 +1,254 @@
+# Configuration File Guide (pb1000.ini)
+
+This guide is a reference for every section and key in `pb1000.ini`. For setup
+instructions and feature-by-feature explanations, see `usage_guide_en.md`.
+
+---
+
+## 1. Load Order and Merge Rules
+
+Files are loaded in the following order (low → high priority) and merged
+**per key, not per section**. Only the keys you write are overridden; any key
+you omit falls back to the next lower layer, ultimately the built-in default.
+
+```
+built-in defaults (mp/config.py _DEFAULTS)
+  < /pb1000.ini             (root of Pico flash)
+  < /sd/pb1000.ini           (SD card)
+  < <profile>/pb1000.ini     (/sd/rams/<name>/pb1000.ini)
+```
+
+Implementation: `load_config()` in `mp/config.py`. Comments start with `;` or `#`.
+
+### Exception: keys read once at boot, from internal flash only
+
+A few keys are needed to initialize the display/touch hardware, so they are
+read **before the SD card is mounted**. They therefore do not follow the
+priority chain above — only `/pb1000.ini` and `/roms/pb1000.ini` (internal
+flash) are honored. Writing them to `/sd/pb1000.ini` or a per-profile ini has
+no effect.
+
+- `[display]`: `driver` / `spi_baudrate` / `rotation`
+- `[touch]`: `swap_xy` / `x_inv` / `y_inv` (including their driver-prefixed forms)
+
+Every other `[display]` key (`scale` / `lcd_height` / `x_offset` / `y_offset` /
+`fg_color` / `bg_color`) and the `[touch]` offset keys (`x_offset` / `y_offset`
+/ `funckey_x_offset` / `funckey_y_offset`) follow the normal priority chain and
+can be overridden from the SD card or a per-profile ini.
+
+Implementation: `_read_early_ini_sections()` / `init_display()` in `mp/pb1000.py`.
+
+---
+
+## 2. `[display]`
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `driver` | `ILI9341` | `ILI9341` (320×240) or `ST7796` (480×320, e.g. MSP4021). `display =` is accepted as an alias. *Internal-flash-only key.* |
+| `spi_baudrate` | ILI9341: `26000000` / ST7796: `40000000` | LCD SPI baud rate (Hz). *Internal-flash-only key.* |
+| `scale` | ILI9341: `1.5` / ST7796: `2.0` | On-screen magnification. The default follows ST7796 sizing whenever the actual display width is 480px or more. |
+| `lcd_height` | `32` | `32` = original PB-1000, `64` = extended mode (enables row-address bit\<2\>, allowing writes to pages 4-7 / rows 32-63). Falls back to `32` for any value other than 32/64. |
+| `x_offset` | auto (horizontal center) | X position of the LCD's left edge, in pixels. Auto-computed as `(display width - 192*scale) / 2` when omitted. |
+| `y_offset` | auto (vertical center) | Y position of the top of the LCD+FuncKeyBar group, in pixels. Auto-centers the whole group when omitted; smaller values move it up. |
+| `rotation` | `0` | `0` = normal, `180` = upside down (to match how the board is physically mounted). Touch coordinates are flipped automatically to match. Falls back to `0` for any value other than 0/180. *Internal-flash-only key.* |
+| `fg_color` | `0` | Foreground (lit-pixel) color, RGB332 format, 0–255. Changing it via **Foreground Color** in the emulator menu writes it back automatically to `/sd/pb1000.ini` (or `/pb1000.ini` if no SD card). |
+| `bg_color` | `180` | Background (unlit-pixel) color, RGB332 format, 0–255. Write-back behaves the same as `fg_color`. |
+
+RGB332 (8-bit) layout: bits 7-5 = R (3 bit), bits 4-2 = G (3 bit), bits 1-0 = B (2 bit).
+Representative values: `0` = black, `255` = white, `180` (0xB4) = slightly bluish gray, `7` = blue.
+
+Implementation: `init_display()` in `mp/pb1000.py` (driver/spi_baudrate/rotation),
+`create_system()` in `mp/main_boot.py` (scale/lcd_height/x_offset/y_offset/fg_color/bg_color).
+
+---
+
+## 3. `[keyboard]`
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `enable_usb_kbd` | `true` | Enable the USB keyboard. |
+| `enable_uart_kbd` | `false` | Enable the UART keyboard (GP4/GP5, etc.). |
+| `uart_baudrate` | `9600` | UART keyboard baud rate. |
+| `uart_tx_pin` | `4` | UART keyboard TX pin (GPIO number). |
+| `uart_rx_pin` | `5` | UART keyboard RX pin (GPIO number). |
+| `uart_enter_always_exe` | `true` | Always treat the UART keyboard's Enter key as EXE. |
+| `key_pulse_interval_ms` | `25` | KEY_INT pulse interval (ms). The real hardware's Key/Pulse ISR runs every 3.9ms (256Hz). Lower values shorten how long the ROM's keyboard debounce takes to register a key. Other time-based tuning (cursor-key repeat, `dev_guide_en.md` §13) assumes this interval too, so re-check normal typing and cursor repeat behavior after changing it. Also settable live via REPL: `hd61700.set_key_pulse_interval_ms(ms)`. |
+| `key_hold_ms` | `120` | Key-press hold duration (ms). |
+| `key_release_hard_timeout_ms` | `1200` | Hard timeout for forcing a key release (ms). |
+| `inter_key_gap_ms` | `80` | Gap between successive key presses (ms). |
+
+Implementation: boot sequence in `mp/main.py`; defaults in `mp/config.py` `_DEFAULTS["keyboard"]`.
+
+---
+
+## 4. `[emulator]`
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `enable_repl_uart` | `true` | Set to `false` to have `boot.py` stop the UART0 REPL wired to GP0/GP1 (does not affect the USB CDC REPL). |
+| `frame_interval_ms` | `33` | Display refresh interval (ms); 33ms ≈ 30fps. |
+| `active_step_count` | `12000` | CPU steps executed per outer-loop slice. |
+| `sleep_poll_ms` | `10` | Polling interval while the CPU is asleep (ms). |
+| `step_timer_tick_steps` | `40000` | CPU steps per timer-tick unit. |
+| `timer_tick_ms` | `1000` | Real-time timer tick interval (ms). Set to `0` or below to disable this tick processing. |
+| `loop_idle_ms` | `0` | Main-loop idle wait (ms). |
+| `step_chunk` | `2048` | Inner chunk size (in steps) used within a CPU execution slice; also paces how often the UART keyboard RX buffer is drained and the PIO UART bridge is serviced. |
+
+Implementation: main-loop constant loading/usage in `mp/main.py`; `run_cpu_slice()` in `mp/main_runtime.py`.
+
+---
+
+## 5. `[disk]` (Virtual FDD)
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `enabled` | `false` | Enable the virtual FDD. |
+| `backend` | `raw` | Storage backend. |
+| `path` | (empty) | Disk image file path (e.g. `/sd/disks/disk1.img`). |
+| `readonly` | `false` | Mount read-only. |
+
+Implementation: virtual-FDD init in `PB1000System`, `mp/pb1000.py` (reads `self._config["disk"]` directly).
+
+---
+
+## 6. `[profile]`
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `default_profile` | `default` | Default profile name at boot (`/sd/rams/<name>/`). |
+| `ui_timeout_ms` | `30000` | Timeout for the profile-selection UI (ms). The UI is skipped entirely when only one profile exists. |
+
+Implementation: `mp/main.py`; `select_profile_ui()` in `mp/boot_session.py`.
+
+---
+
+## 7. `[joystick]`
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `enable` | `false` | Enable an Atari-compatible 9-pin joystick (PULL_UP inputs). |
+| `enable_fire2` | `true` | Enable the FIRE2 button. |
+| `debounce_ms` | `20` | Debounce time (ms). |
+| `poll_interval_ms` | `10` | Poll interval (ms). |
+| `key_up` / `key_down` / `key_left` / `key_right` / `key_fire1` / `key_fire2` | (empty = built-in default) | PB-1000 key sent by each button. Accepts a named constant (`exe`, `ans`, `shift`, `up`, `down`, `left`, `right`, `bs`, `ins`, `brk`, `newall`, `menu`, `cal`, `cls`, `kana`, `a`-`z`, `0`-`9`) or a raw `row,col` coordinate (e.g. `10,4`). Built-in defaults: UP=cursor up, DOWN=cursor down, LEFT=cursor left, RIGHT=cursor right, FIRE1=EXE, FIRE2=SHIFT. |
+
+Pin assignments (GP18/19/20/21/26/27) cannot be changed via ini. Edit
+`JoystickInputManager.DEFAULT_PIN_MAP` in `mp/main_input.py` instead.
+
+Implementation: `_parse_joystick_key()` in `mp/main.py`; `JoystickInputManager` in `mp/main_input.py`.
+
+---
+
+## 8. `[beep]`
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `enable` | `true` | Enable the beeper. |
+| `gpio_pin` | `14` | Beeper output pin (GPIO number). |
+| `freq_hz` | `1000` | Beep frequency (Hz). |
+| `duty` | `50` | PWM duty cycle (%). |
+
+Implementation: `_beep_set()` etc. in `mp/pb1000.py`; freq/duty changes from the menu in `mp/emulator_menu.py`.
+
+---
+
+## 9. `[touch]` (XPT2046 Touch Panel)
+
+Because the touch film is mounted differently on each LCD module, axis
+swap/invert and pixel-offset tuning are sometimes needed. Settings for
+ILI9341 and ST7796 can **coexist in the same `[touch]` section**: prefix a key
+with `ili9341.` or `st7796.` to scope it to whichever driver is active via
+`[display] driver`. An unprefixed key applies to either driver unless
+overridden by a driver-scoped one.
+
+| Key (supports `ili9341.` / `st7796.` prefix) | ILI9341 default | ST7796 default | Description | Overridable from SD/profile ini |
+| --- | --- | --- | --- | --- |
+| `swap_xy` | `true` | `true` | Swap the X/Y touch axes. | No (internal-flash only) |
+| `x_inv` | `false` | `true` | Invert the X axis. | No (internal-flash only) |
+| `y_inv` | `false` | `true` | Invert the Y axis. | No (internal-flash only) |
+| `x_offset` | `0` | `8` | X-axis pixel correction for the LCD touch area (TK1..16). | Yes |
+| `y_offset` | `-10` | `0` | Y-axis pixel correction for the LCD touch area. | Yes |
+| `funckey_x_offset` | `0` | `2` | X-axis pixel correction for the FuncKeyBar. | Yes |
+| `funckey_y_offset` | `24` | `-8` | Y-axis pixel correction for the FuncKeyBar. | Yes |
+
+Example (override only ST7796's Y offset):
+
+```ini
+[touch]
+st7796.y_offset = -4
+```
+
+**Notes:**
+
+- `swap_xy`/`x_inv`/`y_inv` are read only from the internal-flash `/pb1000.ini`
+  (and `/roms/pb1000.ini`) at boot, before the SD card is mounted — see §1.
+- Flipping `y_inv`/`x_inv` changes what the raw coordinate means, so the
+  `x_offset`/`y_offset` correction values may need re-tuning too (a good
+  starting point is to flip their sign, then fine-tune on real hardware).
+- The LCD touch area (TK1..16) hit-test region is **always fixed at
+  32 dots × `scale`**, regardless of `[display] lcd_height`. The real
+  hardware's physical touch pad only ever covers 32 dots, so the hit-test
+  area does not grow in 64-dot extended mode.
+
+Implementation: `init_display()`, `_read_early_ini_sections()`, `_early_bool()`
+in `mp/pb1000.py`; `_setup_touch_offsets()` in `mp/main_boot.py`;
+`TouchInputManager.poll_coords()` in `mp/main_input.py`.
+
+---
+
+## 10. `[pio_uart]`
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `baudrate` | `9600` | Baud rate for the PIO UART (RS-232C, GP6=TX / GP13=RX). |
+
+Implementation: `mp/main.py`; `mp/pio_uart.py`.
+
+---
+
+## 11. `[wifi]`
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `ssid` | (empty) | WiFi SSID. Leave empty to skip NTP sync entirely. |
+| `password` | (empty) | WiFi password. |
+
+Implementation: `mp/main.py` (only consulted when `[ntp] enable=true`); `mp/ntp_sync.py`.
+
+---
+
+## 12. `[ntp]`
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `enable` | `true` | Enable NTP time sync at boot (requires a WiFi connection). |
+| `server` | `pool.ntp.org` | NTP server address. |
+| `tz_offset_h` | `9` | Timezone offset in hours (JST is 9). |
+| `timeout_ms` | `15000` | Connection timeout (ms). |
+
+Implementation: `mp/main.py`; `mp/ntp_sync.py`.
+
+---
+
+## 13. `[debug]`
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `cpu_debug` | `false` | CPU instruction trace (only emitted at specific PC breakpoints). |
+| `key_debug` | `false` | Key-input trace (KEYSCAN GRE, etc.). Very verbose — follows the ROM's key-scan loop continuously. |
+| `lcd_debug` | `false` | LCD write trace. |
+| `newall_debug` | `false` | Trace only the NEW ALL key (Win+F12) press/release. |
+
+Setting any of these to `true` emits `[HD61700] ...`-prefixed trace lines on
+the serial console. See `dev_guide_en.md` §11 "Debugging and Tracing" for details.
+
+Implementation: `mp/main.py`.
+
+---
+
+## See Also
+
+- Feature-by-feature usage: `usage_guide_en.md`
+- Touch panel / FuncKeyBar behavior: `usage_guide_en.md` §4
+- Changing settings from the emulator menu: `emulator_menu_guide_en.md`
+- Debugging and tracing: `dev_guide_en.md` §11

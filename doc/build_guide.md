@@ -82,17 +82,22 @@ export CFLAGS='-Wno-error=unused-parameter -Wno-error=unused-variable
   -DMICROPY_HW_USB_CDC=0
   -DMICROPY_HW_USB_MSC=0
   -DMICROPY_HW_USB_HID=0
-  -DDEBUG_SKIP_CORE_INIT
   -DMICROPY_PY_PIO_USB=1
   -I/home/<user>/projects/hd61700/src'
 make BOARD=RPI_PICO2_W USER_C_MODULES="$USER_C_MODULES" clean
 make BOARD=RPI_PICO2_W USER_C_MODULES="$USER_C_MODULES" WERROR=0 -j$(nproc)
 ```
 
+**注意:** `-DDEBUG_SKIP_CORE_INIT` を CFLAGS に含めないこと。`src/micropython.cmake`
+の `USB_HOST_SKIP_INIT` オプション（デフォルト OFF）を迂回してしまい、実際の
+USB ホスト初期化 (`tuh_init()`) が常にスキップされる。この状態でもビルドと
+起動は成功するため気付きにくいが、USB キーボードが一切認識されなくなる。
+
 Windows ネイティブビルドは上記 CFLAGS の関係で非推奨です。WSL2 上で上記コマンドを実行してください。
 
 出力されるファームウェアは `build-RPI_PICO2_W/firmware.uf2` に配置されます。これをそのまま
-`RPI-RP2` ドライブへコピーするか、`firmware/firmware.uf2` へコピーしておきます。
+`RPI-RP2` ドライブへコピーするか、他プロジェクトと見分けがつくよう
+`firmware/firmware_pb1000.uf2` という名前でコピーしておきます。
 
 > 実際のビルドスクリプトの例は `/home/flex/projects/micropython/ports/rp2/bldfrm.sh`
 >（このプロジェクト固有の作業環境向け）を参照してください。
@@ -101,7 +106,7 @@ Windows ネイティブビルドは上記 CFLAGS の関係で非推奨です。W
 
 1.  **BOOTSEL モードへの移行**: Pico 2 の BOOTSEL ボタンを押しながら、USB で PC に接続します。
 2.  **マウント**: Pico 2 が `RPI-RP2` という名前の USB マスストレージとして認識されます。
-3.  **コピー**: `firmware.uf2` を `RPI-RP2` ドライブにドラッグ＆ドロップします。コピー後に Pico 2 は自動的に再起動します。
+3.  **コピー**: `firmware_pb1000.uf2` を `RPI-RP2` ドライブにドラッグ＆ドロップします。コピー後に Pico 2 は自動的に再起動します。
 
 ## ビルド後のセットアップ
 
@@ -120,10 +125,12 @@ Windows ネイティブビルドは上記 CFLAGS の関係で非推奨です。W
     pip install mpremote
     ```
 2.  **Python ファイルのアップロード**:
+
     ```bash
     cd PB-1000_emu_AG2/mp
     mpremote connect /dev/ttyUSB0 fs cp * :
     ```
+
 3.  **ROM のアップロード**:
     ```bash
     # Pico 側に roms ディレクトリを作成

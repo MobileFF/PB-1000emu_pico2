@@ -95,6 +95,18 @@ def _on_dspmd_write(addr, data, bank):
     return False
 
 
+def set_mode(is_64dot):
+    """Runtime mode switch, called by the emulator menu's LCD Height toggle
+    (GUI+F7 -> Display -> LCD Height). Unlike the register()-time detection
+    above (which must read config directly due to an ordering constraint —
+    see module docstring), this can safely re-check the DSPMD value via
+    cpu_core, since it always runs well after register()."""
+    global _is_64dot_mode
+    _is_64dot_mode = bool(is_64dot)
+    if _system is not None:
+        _sync_hook_enabled(cpu_core.read_mem(_DSPMD_ADDR))
+
+
 def register(system):
     global _ram_mv, _system, _is_64dot_mode
     _system = system

@@ -28,13 +28,18 @@ static void cpu_log(hd61700_state_t *cpu, const char *fmt, ...) {
 
 static inline void set_pc(hd61700_state_t *cpu, int32_t new_pc) {
   uint16_t old_pc = cpu->pc;
-  cpu->pc = (uint16_t)(new_pc & 0xffff);
+  uint16_t masked_new_pc = (uint16_t)(new_pc & 0xffff);
+  cpu->pc = masked_new_pc;
   if (cpu->pc < INT_ROM)
     cpu->fetch_addr = (uint32_t)cpu->pc << 1;
   else
     cpu->fetch_addr = (uint32_t)cpu->pc;
   cpu->curpc = cpu->pc;
   cpu->ppc = cpu->curpc;
+
+  cpu->pc_history_from[cpu->pc_history_idx] = old_pc;
+  cpu->pc_history_to[cpu->pc_history_idx] = cpu->pc;
+  cpu->pc_history_idx = (uint8_t)((cpu->pc_history_idx + 1) % HD61700_PC_HISTORY_SIZE);
 
   if (cpu->debug_log && (cpu->pc == 0x00F9 || old_pc == 0xE40C)) {
     cpu_log(cpu, "SET_PC: 0x%04X -> 0x%04X (fetch: 0x%08X)", old_pc, cpu->pc, cpu->fetch_addr);
@@ -244,10 +249,46 @@ static uint8_t prog_readbyte(hd61700_state_t *cpu, uint8_t segment,
 /* Forward declaration */
 static uint8_t read_op(hd61700_state_t *cpu);
 
+/* FOREX_PB hang investigation, 2026-08-08: confirmed root cause of the
+ * "FOREX_PB.EXE hangs eventually" bug via real-HW trace
+ * (forex_pb_log_20260808_172808.txt, see investigation_notes.md). Fixed
+ * internal ROM interrupt vector stubs (e.g. 0x0042 "jp &HFFCD", one-minute
+ * timer) live in bank-independent ROM, but the addresses they jump TO
+ * (e.g. 0xFFCD, the real jump-table entry) are in the banked region
+ * (0x8000-0xFFFF). check_irqs() only saves/restores PC on interrupt
+ * entry/exit — it never touches UA. If the interrupted program's own
+ * steady-state UA selects a non-bank0 segment (FOREX_PB.EXE runs with
+ * UA=0x51 throughout play), that stale UA is still in effect when the
+ * fixed-ROM vector stub's own jp target is fetched, so the CPU reads
+ * garbage from the wrong bank instead of the real ROM jump table —
+ * confirmed via [SETPC_JMPTABLE_BADUA_DBG] landing at 0xFFCD with UA=0x51,
+ * immediately followed by a TRP on whatever stray 0xFF happened to be
+ * there.
+ *
+ * MAME's hd61700.cpp read_op() guards exactly this: while m_irq_status is
+ * non-zero (interrupt handler active, i.e. from check_irqs() entry until
+ * the matching RTNI — confirmed by reading case 0xfd here, which only
+ * clears the corresponding irq_status bit at RTNI time), instruction
+ * fetches are forced to bank0 regardless of UA's value:
+ * make_18bit_addr(m_irq_status ? 0 : prev_ua, m_pc). This was evaluated
+ * earlier in the investigation and judged insufficient on its own (it
+ * can't protect code that runs AFTER RTNI, e.g. an interrupt handler that
+ * changes UA and forgets to restore it before returning) — but for the
+ * mechanism actually confirmed here, the corrupted fetch happens squarely
+ * inside the irq_status-active window, so this guard is a precise fix for
+ * it. Applied only to the instruction-fetch path (read_program_byte /
+ * read_internal_rom_byte, both reachable only from read_op()) — register-
+ * indexed data access (IX/IY/IZ-based reads/writes) is untouched, matching
+ * MAME's scope. */
+static uint8_t fetch_bank_ua(hd61700_state_t *cpu) {
+  return cpu->irq_status ? 0 : cpu->fetch_ua;
+}
+
 static uint8_t read_internal_rom_byte(hd61700_state_t *cpu, uint32_t addr) {
   uint32_t base = addr & ~1u;
-  uint8_t hi = prog_readbyte(cpu, cpu->prev_ua, base);
-  uint8_t lo = prog_readbyte(cpu, cpu->prev_ua, base + 1);
+  uint8_t ua = fetch_bank_ua(cpu);
+  uint8_t hi = prog_readbyte(cpu, ua, base);
+  uint8_t lo = prog_readbyte(cpu, ua, base + 1);
   return (addr & 1) ? lo : hi;
 }
 
@@ -255,7 +296,7 @@ static uint8_t read_program_byte(hd61700_state_t *cpu, uint32_t addr) {
   if (addr < ((uint32_t)INT_ROM << 1)) {
     return read_internal_rom_byte(cpu, addr);
   }
-  return prog_readbyte(cpu, cpu->prev_ua, addr);
+  return prog_readbyte(cpu, fetch_bank_ua(cpu), addr);
 }
 
 /* Read a 16-bit immediate operand following an opcode.
@@ -286,7 +327,6 @@ static uint8_t read_op(hd61700_state_t *cpu) {
     cpu->last_opcodes[cpu->last_op_len++] = data;
   }
 
-  cpu->prev_ua = REG_UA;
   cpu->fetch_addr += 1;
   if (cpu->pc < INT_ROM)
     cpu->pc = (uint16_t)(cpu->fetch_addr >> 1);
@@ -490,6 +530,7 @@ void hd61700_reset(hd61700_state_t *cpu) {
   cpu->state = 0;
   cpu->irq_status = 0;
   cpu->prev_ua = 0;
+  cpu->fetch_ua = 0;
   memset(cpu->regsir, 0, sizeof(cpu->regsir));
   memset(cpu->reg8bit, 0, sizeof(cpu->reg8bit));
   memset(cpu->reg16bit, 0, sizeof(cpu->reg16bit));
@@ -584,12 +625,22 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
       check_irqs(cpu);
       uint16_t instr_pc = cpu->pc;
       cpu->last_op_len = 0; /* reset per instruction for reliable trace snapshots */
+      /* UA-bank fetch delay (references/HD61700.TXT 147-152, see prev_ua/
+       * fetch_ua comment in hd61700.h): freeze the bank used for every byte
+       * read of THIS instruction (opcode and any operand bytes alike) to the
+       * value pending from before it, then capture the current REG_UA for
+       * the instruction after this one. Matches pb1000es's
+       * FetchOpcode/delayed_ua (whole-instruction granularity), not the
+       * previous per-byte-in-read_op() version. */
+      cpu->fetch_ua = cpu->prev_ua;
+      cpu->prev_ua = REG_UA;
       /* Execution trap: fire before fetch if PC == a registered hook address.
        * Handles BASIC's CALL which uses push+JP (HD61700 has no indirect CAL). */
       if (cpu->call_hook && cpu->call_hook(cpu->cb_ctx, instr_pc)) {
         uint8_t lo = pop(cpu, &REG_SS);
         uint8_t hi = pop(cpu, &REG_SS);
-        set_pc(cpu, (uint16_t)(((hi << 8) | lo) + 1));
+        uint16_t hook_target = (uint16_t)(((hi << 8) | lo) + 1);
+        set_pc(cpu, hook_target);
         cpu->icount -= 15;
         continue;
       }
@@ -1052,7 +1103,8 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
         cpu->icount -= 8;
       } break;
       case 0x26: { /* PHS */
-        push(cpu, &REG_SS, READ_REG(read_op(cpu)));
+        uint8_t arg = read_op(cpu);
+        push(cpu, &REG_SS, READ_REG(arg));
         cpu->icount -= 9;
       } break;
       case 0x27: { /* PHU */
@@ -1120,8 +1172,6 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
       case 0x36:   /* JP NLZ,IM16 */
       case 0x37: { /* JP IM16 */
         uint16_t addr = read_imm16_aligned(cpu);
-        if (cpu->debug_log)
-          cpu_log(cpu, "JP 0x%04X executed at 0x%04X", addr, instr_pc);
         if (check_cond(cpu, op)) {
           /* CAL hook: JP (unlike CAL) never pushes a return address, so on
              interception we must NOT touch the stack — just let PC continue
@@ -1538,7 +1588,7 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
         WRITE_REG(arg, mem_readbyte_iz(cpu, REG_UA, REG_IZ));
         cpu->icount -= 6;
       } break;
-      case 0x6e: {
+      case 0x6e: { /* Compatible with 2EH but 3byte instruction : PPS$ */
         uint8_t arg = read_op(cpu);
         (void)read_op(cpu);
         WRITE_REG(arg, pop(cpu, &REG_SS));
@@ -2425,7 +2475,8 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
       } break;
       case 0xde: { /* JP $ */
         uint8_t arg = read_op(cpu);
-        set_pc(cpu, REG_GET16(arg));
+        uint16_t target = REG_GET16(arg);
+        set_pc(cpu, target);
         cpu->icount -= 5;
       } break;
       case 0xdf: { /* JP ($) */
@@ -2433,7 +2484,8 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
         uint16_t off = REG_GET16(arg);
         uint8_t lo = mem_readbyte(cpu, REG_UA, off);
         uint8_t hi = mem_readbyte(cpu, REG_UA, (uint16_t)(off + 1));
-        set_pc(cpu, (uint16_t)(lo | (hi << 8)));
+        uint16_t target = (uint16_t)(lo | (hi << 8));
+        set_pc(cpu, target);
         cpu->icount -= 5;
       } break;
 
@@ -2629,7 +2681,8 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
         if (check_cond(cpu, op)) {
           uint8_t lo = pop(cpu, &REG_SS);
           uint8_t hi = pop(cpu, &REG_SS);
-          set_pc(cpu, (uint16_t)(((hi << 8) | lo) + 1));
+          uint16_t target = (uint16_t)(((hi << 8) | lo) + 1);
+          set_pc(cpu, target);
         }
         cpu->icount -= 3;
       } break;
@@ -2661,7 +2714,8 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
       case 0xfd: { /* RTNI : Return from Interrupt */
         uint8_t lo = pop(cpu, &REG_SS);
         uint8_t hi = pop(cpu, &REG_SS);
-        set_pc(cpu, (hi << 8) | lo);
+        uint16_t target = (uint16_t)((hi << 8) | lo);
+        set_pc(cpu, target);
         cpu->icount -= 5;
         /* Equivalent to CANI: cancel the highest priority interrupt */
         for (uint8_t bit = 0x10; bit > 0; bit >>= 1) {
@@ -2688,7 +2742,30 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
       case 0xff: { /* TRP : Trap*/
         push(cpu, &REG_SS, (uint8_t)(cpu->pc >> 8));
         push(cpu, &REG_SS, (uint8_t)cpu->pc);
-        set_pc(cpu, 0x6ffa);
+        /* FOREX_PB hang investigation, 2026-08-08: was `set_pc(cpu,
+         * 0x6ffa)` — a hardcoded shortcut to the FINAL destination of the
+         * real 3-hop chain confirmed against pb1000es (`exec.pas` Trp_FF:
+         * `pc := $0022`) and MAME (`case 0xff: set_pc(0x0022)`):
+         * TRP -> 0x0022 (fixed internal ROM, bank-independent: "jp
+         * &HFFC7") -> 0xFFC7 (BANKED ROM: "jp &H6FFA") -> 0x6FFA. The
+         * shortcut was judged equivalent under the assumption that UA is
+         * always correct (0x50) at the moment TRP executes, since a
+         * correct UA makes the 0xFFC7 hop read the real ROM content and
+         * land on 0x6FFA either way. That assumption no longer holds: the
+         * whole point of this investigation is TRP firing with UA=0x51
+         * (wrong) — e.g. the new stage-2-transition hang
+         * (instr_pc=0x9E67, UA=0x51). Under real hardware behavior, that
+         * 0xFFC7 fetch would happen through whatever bank UA selects at
+         * that moment, same as any other banked-region code fetch — a
+         * bug class we just fixed for the one-minute-timer path via
+         * fetch_bank_ua(), but TRP is a software trap, not a hardware
+         * interrupt, so cpu->irq_status (and thus that protection) does
+         * NOT apply here. The shortcut was silently hiding this exact
+         * behavior. Restored to the real 2-instruction path per
+         * pb1000es/MAME so bank-dependent TRP misbehavior reproduces
+         * faithfully instead of always landing at 0x6FFA regardless of
+         * UA. */
+        set_pc(cpu, 0x0022);
         cpu->icount -= 9;
       } break;
       default:

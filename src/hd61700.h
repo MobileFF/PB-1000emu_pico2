@@ -57,7 +57,7 @@ static const uint16_t irq_vector[] = {0x0032, 0x0042, 0x0052, 0x0062, 0x0072};
 #define REG_SS cpu->reg16bit[4]
 #define REG_KY cpu->reg16bit[5]
 
-/* Main register read/write */
+/* Main register read/write. */
 #define READ_REG(a) (cpu->regmain[(a) & 0x1f])
 #define WRITE_REG(a, d) (cpu->regmain[(a) & 0x1f] = (d))
 #define COPY_REG(d, s) (cpu->regmain[(d) & 0x1f] = cpu->regmain[(s) & 0x1f])
@@ -172,7 +172,34 @@ typedef struct {
   uint32_t curpc;
   uint32_t ppc;
   uint32_t fetch_addr;
+  /* prev_ua/fetch_ua implement the real HD61700's documented 1-instruction-
+   * cycle delay for UA's PC-bank bits (references/HD61700.TXT 147-152: a PST
+   * to UA's PC-bank bits only takes effect starting from the SECOND
+   * instruction after it, since the very next instruction — typically a
+   * JP/JR/RTN placed there deliberately per that doc — must still fetch
+   * from the pre-PST bank). fetch_ua is frozen once per instruction (at the
+   * top of the hd61700_execute() loop, matching pb1000es's exec.pas
+   * FetchOpcode/delayed_ua, which locks the WHOLE instruction — opcode and
+   * any operand bytes — to one snapshot) and is what every byte read during
+   * that instruction actually uses; prev_ua only holds the pending snapshot
+   * for the NEXT instruction. 2026-08-07: previously this repo updated the
+   * bank snapshot after every single byte read (inside read_op()), so a
+   * multi-byte instruction right after a UA-changing PST (e.g. JP IM16's
+   * 2-byte target) could read its opcode with the old bank but its operand
+   * bytes with the new one — MAME does the same per-byte thing, but
+   * pb1000es freezes per-instruction; switched to match pb1000es since a
+   * PST UA is always meant to protect the very next instruction as a whole
+   * (see the FOREX_PB hang investigation, 調査用/FOREX_PB/investigation_notes.md). */
   uint8_t prev_ua;
+  uint8_t fetch_ua;
+
+  /* Ring buffer of recent PC jumps (JP/CAL/RTN/interrupt/reset — every
+     set_pc() call, NOT sequential fetch advance) for hang post-mortems:
+     lets the host find which jump/return sent PC into unmapped memory. */
+#define HD61700_PC_HISTORY_SIZE 16
+  uint16_t pc_history_from[HD61700_PC_HISTORY_SIZE];
+  uint16_t pc_history_to[HD61700_PC_HISTORY_SIZE];
+  uint8_t pc_history_idx;
 
   /* Flags & state */
   uint8_t flags;

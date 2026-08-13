@@ -237,11 +237,18 @@ def tests_f8_ff(t, check):
         hd61700.set_reg8(3,0x10)     # UA
     check("FE OFF sleep", [0xFE], s,
           [cslp(True), cr16(0,0), cr16(1,0), cr16(2,0)])
-    # --- 0xFF TRP (trap to 0x6ffa) ---
+    # --- 0xFF TRP (traps to 0x0022, the fixed internal-ROM chain entry.
+    # 2026-08-08: previously asserted a direct jump to 0x6FFA, a hardcoded
+    # shortcut for the real hardware chain 0x0022 ("jp &HFFC7") -> 0xFFC7
+    # ("jp &H6FFA") -> 0x6FFA, confirmed against pb1000es/MAME. The shortcut
+    # was removed (see TRP case in hd61700.c) so bank-dependent TRP
+    # misbehavior reproduces faithfully; this synthetic test has no ROM
+    # content loaded at 0xFFC7 to complete the remaining hops, so it only
+    # asserts the opcode's own immediate effect.) ---
     def s():
         hd61700.set_reg16(4,0x7F00)
-    check("FF TRP -> 6FFA", [0xFF], s,
-          [cp(0x6FFA)], stop=0x6FFA)
+    check("FF TRP -> 0022", [0xFF], s,
+          [cp(0x0022)], stop=0x0022)
     # --- 0xFC CANI (clear and interrupt acknowledge) ---
     def s():
         hd61700.set_reg8(2, 0x1F)  # IB = all IRQ bits set

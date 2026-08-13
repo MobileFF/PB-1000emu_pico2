@@ -12,7 +12,7 @@ import hd61700
 
 def handle_disk_swap(system, display, fkbar=None):
     """
-    GUI+F6 で呼ばれるディスク差し替えハンドラ。
+    ディスク差し替えハンドラ。emulator_menu.py の "FD Swap" 項目(GUI+F7)から呼ばれる。
     CPU スライスはメインループが UI に入ることで自然に停止する。
     """
     try:

@@ -1463,6 +1463,25 @@ static MP_DEFINE_CONST_FUN_OBJ_0(mod_timer_tick_obj, mod_timer_tick);
 static mp_obj_t mod_get_pc(void) { return MP_OBJ_NEW_SMALL_INT(cpu_state.pc); }
 static MP_DEFINE_CONST_FUN_OBJ_0(mod_get_pc_obj, mod_get_pc);
 
+/* hd61700.get_pc_history() -> list of (from_pc, to_pc) tuples, oldest first.
+ * Recorded on every set_pc() (JP/CAL/RTN/interrupt/reset) — NOT on plain
+ * sequential fetch advance — so this shows the actual control-flow jumps
+ * that led to the current PC. Hang-investigation aid: when PC is found
+ * stuck in unmapped memory, this reveals which jump/return put it there. */
+static mp_obj_t mod_get_pc_history(void) {
+  mp_obj_t list = mp_obj_new_list(0, NULL);
+  for (int i = 0; i < HD61700_PC_HISTORY_SIZE; i++) {
+    int idx = (cpu_state.pc_history_idx + i) % HD61700_PC_HISTORY_SIZE;
+    mp_obj_t tup[2] = {
+      MP_OBJ_NEW_SMALL_INT(cpu_state.pc_history_from[idx]),
+      MP_OBJ_NEW_SMALL_INT(cpu_state.pc_history_to[idx]),
+    };
+    mp_obj_list_append(list, mp_obj_new_tuple(2, tup));
+  }
+  return list;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(mod_get_pc_history_obj, mod_get_pc_history);
+
 /* hd61700.set_pc(addr) */
 static mp_obj_t mod_set_pc(mp_obj_t pc_obj) {
   int pc = mp_obj_get_int(pc_obj) & 0xffff;
@@ -1489,6 +1508,48 @@ static mp_obj_t mod_is_sleeping(void) {
   return mp_obj_new_bool(cpu_state.state & CPU_SLP);
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(mod_is_sleeping_obj, mod_is_sleeping);
+
+/* hd61700.get_irq_status() -> int / hd61700.set_irq_status(val)
+ * cpu_state.irq_status is a per-interrupt-line bitmask (bit i set while
+ * that line's handler is active, from check_irqs() entry until the
+ * matching RTNI clears it — see hd61700.c) and also gates the fetch_bank_ua()
+ * "force bank 0 while an interrupt handler is active" protection. Save
+ * state (pb1000.py save_state()/load_state()) must round-trip this: a save
+ * taken while the CPU is mid-handler (e.g. the periodic keyboard-scan
+ * interrupt, which runs regardless of what the loaded program does) has
+ * PC/UA pointing into ROM handler code that only makes sense with
+ * irq_status still marked active, and RTNI later needs the correct bit set
+ * to clear. Without this restored, resuming such a save leaves irq_status=0
+ * (reset() default) despite PC sitting inside what was an active handler —
+ * see the 2026-08-11 FOREX_PB boot-hang report (PC=0x9318/UA=0x50 after a
+ * RAM Load, hanging via a bad TRP dispatch) for a case this was suspected
+ * to matter for. */
+static mp_obj_t mod_get_irq_status(void) {
+  return MP_OBJ_NEW_SMALL_INT(cpu_state.irq_status);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(mod_get_irq_status_obj, mod_get_irq_status);
+
+static mp_obj_t mod_set_irq_status(mp_obj_t val_obj) {
+  cpu_state.irq_status = (uint8_t)mp_obj_get_int(val_obj);
+  return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(mod_set_irq_status_obj, mod_set_irq_status);
+
+/* hd61700.get_state() -> int / hd61700.set_state(val)
+ * Raw cpu_state.state byte (CPU_SLP=0x02 sleep flag, CPU_FAST=0x01) — see
+ * get_irq_status()/set_irq_status() above for why save-state restore needs
+ * this alongside irq_status: a save taken while SLP (HALT-equivalent) was
+ * pending should resume still sleeping, not running. */
+static mp_obj_t mod_get_state(void) {
+  return MP_OBJ_NEW_SMALL_INT(cpu_state.state);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(mod_get_state_obj, mod_get_state);
+
+static mp_obj_t mod_set_state(mp_obj_t val_obj) {
+  cpu_state.state = (uint8_t)mp_obj_get_int(val_obj);
+  return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(mod_set_state_obj, mod_set_state);
 
 /* hd61700.get_reg(index) -> int (main register) */
 static mp_obj_t mod_get_reg(mp_obj_t idx_obj) {
@@ -1524,8 +1585,14 @@ static mp_obj_t mod_set_reg8(mp_obj_t idx_obj, mp_obj_t val_obj) {
   }
   cpu_state.reg8bit[idx] = (uint8_t)mp_obj_get_int(val_obj);
   if (idx == 3) {
-    /* Keep fetch bank source in sync when UA is changed via API. */
+    /* Keep fetch bank source in sync when UA is changed via API (e.g.
+     * save-state restore). This bypasses the normal 1-instruction-cycle
+     * fetch delay (hd61700.h prev_ua/fetch_ua) on purpose — an out-of-band
+     * register write isn't a real PST executing mid-stream, so both the
+     * pending snapshot (prev_ua) and the value used for whatever
+     * instruction executes next (fetch_ua) should reflect it immediately. */
     cpu_state.prev_ua = cpu_state.reg8bit[3];
+    cpu_state.fetch_ua = cpu_state.reg8bit[3];
   }
   return mp_const_none;
 }
@@ -2202,10 +2269,15 @@ static const mp_rom_map_elem_t hd61700_module_globals_table[] = {
     {MP_ROM_QSTR(MP_QSTR_set_input), MP_ROM_PTR(&mod_set_input_obj)},
     {MP_ROM_QSTR(MP_QSTR_timer_tick), MP_ROM_PTR(&mod_timer_tick_obj)},
     {MP_ROM_QSTR(MP_QSTR_get_pc), MP_ROM_PTR(&mod_get_pc_obj)},
+    {MP_ROM_QSTR(MP_QSTR_get_pc_history), MP_ROM_PTR(&mod_get_pc_history_obj)},
     {MP_ROM_QSTR(MP_QSTR_set_pc), MP_ROM_PTR(&mod_set_pc_obj)},
     {MP_ROM_QSTR(MP_QSTR_get_flags), MP_ROM_PTR(&mod_get_flags_obj)},
     {MP_ROM_QSTR(MP_QSTR_set_flags), MP_ROM_PTR(&mod_set_flags_obj)},
     {MP_ROM_QSTR(MP_QSTR_is_sleeping), MP_ROM_PTR(&mod_is_sleeping_obj)},
+    {MP_ROM_QSTR(MP_QSTR_get_irq_status), MP_ROM_PTR(&mod_get_irq_status_obj)},
+    {MP_ROM_QSTR(MP_QSTR_set_irq_status), MP_ROM_PTR(&mod_set_irq_status_obj)},
+    {MP_ROM_QSTR(MP_QSTR_get_state), MP_ROM_PTR(&mod_get_state_obj)},
+    {MP_ROM_QSTR(MP_QSTR_set_state), MP_ROM_PTR(&mod_set_state_obj)},
     {MP_ROM_QSTR(MP_QSTR_get_reg), MP_ROM_PTR(&mod_get_reg_obj)},
     {MP_ROM_QSTR(MP_QSTR_get_reg8), MP_ROM_PTR(&mod_get_reg8_obj)},
     {MP_ROM_QSTR(MP_QSTR_get_reg16), MP_ROM_PTR(&mod_get_reg16_obj)},

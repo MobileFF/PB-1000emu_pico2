@@ -155,8 +155,3 @@ class PioUart:
         self._rx_total = 0
         while self._sm_rx.rx_fifo() > 0:
             self._sm_rx.get()
-
-    def deinit(self):
-        """Stop PIO state machines."""
-        self._sm_tx.active(0)
-        self._sm_rx.active(0)

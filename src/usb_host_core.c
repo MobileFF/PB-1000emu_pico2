@@ -118,7 +118,13 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
 }
 
 void usb_host_core_init(void) {
-  set_sys_clock_khz(144000, true);
+  /* 240MHz = 12MHz x 20, a clean multiple required for PIO-USB's
+     full-speed(12Mbit)/low-speed(1.5Mbit) bit timing. Raised from the
+     previous 144MHz (12MHz x 12) after confirming on a sibling MSX-emulator
+     project (same RP2350 target) that 240MHz runs stably and meaningfully
+     speeds up CPU emulation, since this sys_clock is shared by the whole
+     chip, not just the USB host PIO state machines. */
+  set_sys_clock_khz(240000, true);
   sleep_ms(10);
   stdio_uart_init();
 

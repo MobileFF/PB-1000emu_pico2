@@ -197,12 +197,17 @@ PIO ソフト UART（デフォルト GP6 TX / GP13 RX）で CASIO PB-1000 の RS
 **RAM Save** / **RAM Load** でスナップショット単位の保存・復元ができます。
 
 - 保存先は `/sd/rams/<フォルダ名>/`。
-- RAM Load 成功後はリセット＋起動シーケンスが自動実行されます。
+- **RAM Load はリセットを行わず、RAM Save を実行した時点の PC・レジスタから実行を再開します。**
+  リセット（PC=0x0000）はしないので、ゲームやプログラムの実行途中からそのまま続きが遊べます。
+- ロード対象のセーブが壊れている場合に備え、この完全復元は EMULATOR MENU から明示的に
+  RAM Load を選んだ場合のみ行われます（下記「自動ロード」は安全のため RAM のみ復元します）。
 
 ### 自動ロード
 
 起動時に選択したプロファイルディレクトリ内のステートファイルを自動ロードします。
-ファイルが存在しない場合はコールドブート。
+ファイルが存在しない場合はコールドブート。こちらは無人起動時に壊れたセーブでハングし
+続けることがないよう、RAM の内容のみを復元して PC=0x0000（リセット）から起動します
+（EMULATOR MENU の RAM Load のような完全な実行再開はしません）。
 
 ---
 
@@ -235,68 +240,24 @@ PIO ソフト UART（デフォルト GP6 TX / GP13 RX）で CASIO PB-1000 の RS
 
 ## 10. 設定ファイル（pb1000.ini）
 
-INI 形式の設定ファイルで動作をカスタマイズできます。
+INI 形式の設定ファイルで動作をカスタマイズできます。全セクション・全キーの詳細な
+リファレンス（デフォルト値、SD カード／プロファイル別 ini での上書き可否など）は
+**[config_guide.md](config_guide.md)** を参照してください。
 
 ```ini
-[keyboard]
-enable_uart_kbd = true
-uart_baudrate   = 115200
-uart_tx_pin     = 4
-uart_rx_pin     = 5
-
-[emulator]
-frame_interval_ms  = 33     ; 表示更新間隔（ms）
-active_step_count  = 12000  ; 1スライスあたりの CPU ステップ数
-
-[disk]
-enabled  = true
-path     = /sd/disks/disk1.img
-
-[profile]
-default_profile = default
-ui_timeout_ms   = 30000    ; プロファイル選択タイムアウト（ms）
-
-[joystick]
-enable = true
-
-[beep]
-enable   = true
-gpio_pin = 14
-freq_hz  = 4470
-duty     = 30
-
-[pio_uart]
-baudrate = 9600
-
 [display]
 driver   = ILI9341          ; ILI9341 (320x240) または ST7796 (480x320)
 scale    = 1.5               ; エミュレータ画面の拡大倍率（ILI9341=1.5, ST7796=2.0 推奨）
 lcd_height = 32              ; 32=オリジナル / 64=拡張モード
-fg_color = 0               ; 前景色（点灯ピクセル）RGB332 形式 0–255
-bg_color = 180             ; 背景色（消灯ピクセル）RGB332 形式 0–255
 rotation = 0                ; 0=通常 / 180=上下反転（基板の実装向きに合わせる）
 
 [touch]
-ili9341.y_offset = -10      ; ドライバ別プレフィックス付き key（§4 参照）
+ili9341.y_offset = -10      ; ドライバ別プレフィックス付き key（§4・config_guide.md §9 参照）
+
+[disk]
+enabled  = true
+path     = /sd/disks/disk1.img
 ```
 
-**RGB332 カラー形式（`[display]` セクション）**
-
-`fg_color` / `bg_color` はカラー VRAM と同じ **RGB332（8 ビット）** 形式で指定します。
-エミュレータメニューの **Foreground Color** / **Background Color** 項目から変更でき、
-設定値は `pb1000.ini` に書き戻されます。
-
-**画面の回転（`[display]` セクション）**
-
-`rotation` に `180` を指定すると、画面全体（LCD・ベゼル・ファンクションキーバー）が
-180度回転した状態で表示されます。基板を実装の都合で上下逆に取り付ける場合に使用します。
-タッチパネルの座標もこの設定に合わせて自動的に反転されるため、追加のキャリブレーションは不要です。
-この設定は起動時に一度だけ読み込まれるため、変更後は再起動が必要です。
-
-| ビット | 7–5 | 4–2 | 1–0 |
-| --- | --- | --- | --- |
-| 内容 | R (3 bit) | G (3 bit) | B (2 bit) |
-
-代表的な値: `0` = 黒, `255` = 白, `180` = 0xB4 = やや青みがかった灰, `7` = 青
-
-設定の詳細はファイル内のコメントを参照してください。
+設定値の意味・省略時のデフォルト・記述例は `pb1000.ini` 内のコメントおよび
+[config_guide.md](config_guide.md) を参照してください。

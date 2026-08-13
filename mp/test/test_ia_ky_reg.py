@@ -95,8 +95,7 @@ def run_outac_once(system):
     next_auto_at = AUTO_KEY_PERIOD_STEPS
     while True:
         #print(f"{i}:",end="")
-        #system.debug_step(dbg)
-        system.debug_step(pause=False,trace=False)
+        cpu_core.step()
         if system.pc == stub_addr+0xE:
         #if system.pc == stub_addr:
             break

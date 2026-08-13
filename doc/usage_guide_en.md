@@ -193,11 +193,18 @@ Press **F11** to save the current session state to the active profile directory.
 **RAM Save** / **RAM Load** save and restore snapshot sets independently of the profile.
 
 - Target directory: `/sd/rams/<folder name>/`
-- After a successful RAM Load, a reset and boot sequence run automatically.
+- **RAM Load does not reset the CPU — execution resumes from the exact PC/registers captured
+  by RAM Save.** Since PC is not forced back to 0x0000, a game or program continues right
+  where it left off.
+- This full-state resume only happens when RAM Load is explicitly chosen from the EMULATOR
+  MENU. Auto-Load (below) intentionally stays conservative in case a save turns out corrupt.
 
 ### Auto-Load
 
-On startup, the emulator loads the state files from the selected profile directory automatically. If no files are present, a cold boot is performed.
+On startup, the emulator loads the state files from the selected profile directory
+automatically. If no files are present, a cold boot is performed. This path only restores RAM
+contents and always resets to PC=0x0000 (unlike the emulator menu's RAM Load), so an
+unattended boot can never get stuck resuming a bad save with no way to reach the menu.
 
 ---
 
@@ -230,63 +237,28 @@ To capture the **entire physical screen**, including the bezel and function key 
 
 ## 10. Configuration File (pb1000.ini)
 
-Behaviour can be customised with an INI configuration file.
+Behaviour can be customised with an INI configuration file. For a complete
+reference of every section and key (default values, whether it can be
+overridden from the SD card or a per-profile ini, etc.), see
+**[config_guide_en.md](config_guide_en.md)**.
 
 ```ini
-[keyboard]
-enable_uart_kbd = true
-uart_baudrate   = 115200
-uart_tx_pin     = 4
-uart_rx_pin     = 5
-
-[emulator]
-frame_interval_ms  = 33     ; display refresh interval (ms)
-active_step_count  = 12000  ; CPU steps per execution slice
-
-[disk]
-enabled  = true
-path     = /sd/disks/disk1.img
-
-[profile]
-default_profile = default
-ui_timeout_ms   = 30000    ; profile selection timeout (ms)
-
-[joystick]
-enable = true
-
-[beep]
-enable   = true
-gpio_pin = 14
-freq_hz  = 4470
-duty     = 30
-
-[pio_uart]
-baudrate = 9600
-
 [display]
 driver   = ILI9341          ; ILI9341 (320x240) or ST7796 (480x320)
 scale    = 1.5               ; on-screen magnification (ILI9341=1.5, ST7796=2.0 recommended)
 lcd_height = 32              ; 32=original / 64=extended mode
-fg_color = 0               ; foreground (lit pixel) colour, RGB332 format 0–255
-bg_color = 180             ; background (unlit pixel) colour, RGB332 format 0–255
 rotation = 0                ; 0=normal / 180=upside down (match how the board is mounted)
 
 [touch]
-ili9341.y_offset = -10      ; driver-scoped key prefix (see §4)
+ili9341.y_offset = -10      ; driver-scoped key prefix (see §4 and config_guide_en.md §9)
+
+[disk]
+enabled  = true
+path     = /sd/disks/disk1.img
 ```
 
-**RGB332 Colour Format (`[display]` section)**
-
-`fg_color` / `bg_color` use the same **RGB332 (8-bit)** format as the colour VRAM.
-Values can be changed interactively from **Foreground Color** / **Background Color** in the emulator menu and are written back to `pb1000.ini` automatically.
-
-**Display Rotation (`[display]` section)**
-
-Setting `rotation` to `180` renders the entire screen (LCD, bezel, and function key bar)
-rotated 180 degrees. Use this when the board has to be mounted upside down for physical
-reasons. Touch panel coordinates are automatically flipped to match, so no extra
-calibration is needed. This setting is only read once at boot, so a restart is required
-after changing it.
+See the comments in `pb1000.ini` and [config_guide_en.md](config_guide_en.md)
+for what each key means, its default value, and usage examples.
 
 | Bits | 7–5 | 4–2 | 1–0 |
 | --- | --- | --- | --- |

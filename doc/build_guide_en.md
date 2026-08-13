@@ -84,16 +84,23 @@ export CFLAGS='-Wno-error=unused-parameter -Wno-error=unused-variable
   -DMICROPY_HW_USB_CDC=0
   -DMICROPY_HW_USB_MSC=0
   -DMICROPY_HW_USB_HID=0
-  -DDEBUG_SKIP_CORE_INIT
   -DMICROPY_PY_PIO_USB=1
   -I/home/<user>/projects/hd61700/src'
 make BOARD=RPI_PICO2_W USER_C_MODULES="$USER_C_MODULES" clean
 make BOARD=RPI_PICO2_W USER_C_MODULES="$USER_C_MODULES" WERROR=0 -j$(nproc)
 ```
 
+**Do not add `-DDEBUG_SKIP_CORE_INIT` to CFLAGS.** It bypasses the
+`USB_HOST_SKIP_INIT` cmake option in `src/micropython.cmake` (default OFF,
+i.e. real USB host init runs by default), forcing `usb_host.init()` to always
+skip the actual `tuh_init()` call. The build and boot still succeed, so this
+is easy to miss, but no USB keyboard will ever be recognized.
+
 Native Windows builds are not recommended given the CFLAGS above — use WSL2 with the commands shown.
 
-The output firmware will be located at `build-RPI_PICO2_W/firmware.uf2`.
+The output firmware will be located at `build-RPI_PICO2_W/firmware.uf2`. When
+copying it out for flashing, rename it to `firmware_pb1000.uf2` so it's not
+confused with builds from other parallel projects.
 
 > See `/home/flex/projects/micropython/ports/rp2/bldfrm.sh` for this project's actual (environment-specific) build script.
 
@@ -101,7 +108,7 @@ The output firmware will be located at `build-RPI_PICO2_W/firmware.uf2`.
 
 1.  **Enter BOOTSEL mode**: Hold the BOOTSEL button on your Pico 2 while connecting it to your PC via USB.
 2.  **Mount**: The Pico 2 will appear as a USB mass storage device named `RPI-RP2`.
-3.  **Copy**: Drag and drop `firmware.uf2` onto the `RPI-RP2` drive. The Pico 2 will reboot automatically.
+3.  **Copy**: Drag and drop `firmware_pb1000.uf2` onto the `RPI-RP2` drive. The Pico 2 will reboot automatically.
 
 ## Post-Build Setup
 
@@ -120,10 +127,12 @@ Once the firmware is flashed, you need to upload the Python logic and ROM files.
     pip install mpremote
     ```
 2.  **Upload Python files**:
+
     ```bash
     cd PB-1000_emu_AG2/mp
     mpremote connect /dev/ttyUSB0 fs cp * :
     ```
+
 3.  **Upload ROMs**:
     ```bash
     # Create roms directory on Pico
