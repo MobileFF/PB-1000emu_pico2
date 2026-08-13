@@ -24,37 +24,16 @@ date heading instead of a version number or "Unreleased" marker.
     into a mismatched state.
 - Added a **CPU Status** screen to the EMULATOR MENU (register dump: PC, flags, UA, IA/IB/IE,
   IX-KY, $0-$31; a raw byte dump around PC; and a disassembly view — read-only).
-- Added an **LCD Height** toggle (32-dot / 64-dot, session-only) to the EMULATOR MENU's Display
-  sub-menu.
 - `_ext_load_modules()` now also recognizes `.mpy` files (precompiled via `mpy-cross`), not just
   `.py`, for auto-loading. When both exist for the same module name, `.py` still wins, as before.
-
-### Fixed
-
-- Regressions introduced and resolved within the same development session (never reached an
-  actual release):
-  - `mp/pb1000.py`'s `_debug_log_io3_write()` fired on every byte of BASIC `PRINT` output,
-    effectively stalling PRINT rendering.
-  - A debug "PC stuck" heuristic added to the CPU step loop in `mp/main_runtime.py` did an O(n)
-    list operation on every PC-region transition, disrupting keyboard input and display timing.
-  - Debug tracking added to the `WRITE_REG`/`COPY_REG` macros in `src/hd61700.h` added
-    unconditional overhead to every register write in the CPU core — the hottest possible path.
-  - All resolved by removing the offending debug instrumentation entirely.
-
-### Removed / Cleanup
-
-- Removed ~20 debug log traps that had accumulated in `src/hd61700.c` / `hd61700.h`
-  (`JMPTABLE_TRACE_DBG`, `DTEXT_LOOP_DBG`, `CPRINT_ENTRY_DBG`, the `SETPC_*_DBG` /
-  `TRP_FIRST*_DBG` / `RTN*_DBG` / `JP*_DBG` families, etc.), along with their backing counter/flag
-  struct fields. No longer needed.
-- Removed the `[DEBUG boot]` boot-log traces (JSON search tracing in `keymap.py`, per-step tracing
-  inside `configure_c_keyboard` in `main_boot.py`).
 
 ### Documentation
 
 - `doc/emulator_menu_guide.md` / `_en.md`: corrected the description of RAM Load (it no longer
-  resets — execution resumes from the saved point); documented the new CPU Status and LCD Height
-  items.
+  resets — execution resumes from the saved point); documented the newly-added CPU Status item.
+  Also documented **LCD Height** (32-dot/64-dot toggle, Display sub-menu) — this feature
+  already existed from an earlier session but was missing from the docs; this is a
+  documentation fix, not a feature added in this session.
 - `doc/usage_guide.md` / `_en.md`: updated the RAM Load / auto-load descriptions to match the
   current implementation.
 - `doc/extension_api.md` / `_en.md`: documented `.mpy` support in the ext loader.
@@ -87,4 +66,13 @@ date heading instead of a version number or "Unreleased" marker.
 ## Format Notes
 
 Add a new date heading at the top of this file each time there's a meaningful batch of changes.
-Record changes that matter to users and developers, not a commit-by-commit diff.
+Record only what a user can actually perceive as a difference from the previous release
+(the version actually distributed/announced) — not a commit-by-commit diff.
+
+- **Do record**: functional, behavioral, or documentation changes visible from the previous
+  release (new features, bugs that were actually fixed, corrected documentation errors, etc.).
+- **Don't record**: a bug introduced and fixed within the same development session / same
+  unreleased period, or internal-only implementation churn that was never part of a release
+  (e.g. investigation-only debug logging that was added and later removed). No user ever
+  experienced these, so they carry no meaning as a "diff from the previous release." If you
+  want a record of that work for its own sake, put it in commit messages instead.
