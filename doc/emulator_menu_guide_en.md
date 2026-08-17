@@ -34,7 +34,7 @@ sub-menu.
 == EMULATOR MENU ==
 ├─ Toggles   (turn various features on/off)
 ├─ Storage   (save/load disk, RAM, and screen state)
-├─ Display   (change on-screen colors)
+├─ Display   (colors, resolution, and HDMI output)
 ├─ System    (system info and reset-related actions)
 └─ Exit      (close the menu)
 ```
@@ -86,6 +86,7 @@ Both **RAM Save** and **RAM Load** open a screen for picking the destination/sou
 | **Foreground Color** | Change the color of "lit" LCD pixels |
 | **Background Color** | Change the color of "unlit" LCD pixels |
 | **LCD Height** | Toggle the LCD's vertical resolution between 32-dot and 64-dot |
+| **HDMI** | Toggle mirror output to a second Pico 2 + HDMI addon on/off ([hardware_guide_en.md](hardware_guide_en.md) §9) |
 
 Selecting **Foreground Color** / **Background Color** opens a numeric entry screen (RGB332
 value, 0–255) followed by a color preview screen. Confirming with EXE saves the value to
@@ -97,6 +98,15 @@ reverts to the `[display] lcd_height` setting on the next boot. Right after swit
 64-dot mode, the newly-added rows (5-8) may still show whatever was previously sitting in VRAM
 until the running program redraws them — this matches real PB-1000 hardware behavior and is
 not a bug.
+
+**HDMI** flips ON/OFF immediately on each EXE press, and — unlike the other Toggles-style
+items — is saved to `[hdmi] enable` in `pb1000.ini` right away, so it persists across reboots.
+**Turning it ON stops all drawing to the physical LCD — the screen, including the EMULATOR MENU
+itself, is shown exclusively on HDMI from that point on** (LCD and HDMI are exclusive outputs;
+see [usage_guide_en.md](usage_guide_en.md) §11). Turning it on without an HDMI addon wired up
+causes no harm to the hardware, but the screen then goes nowhere (neither LCD nor a connected
+monitor), since it's just writing to an SPI bus nothing is listening on — wire up the addon
+before turning this on if you want to verify it.
 
 ---
 

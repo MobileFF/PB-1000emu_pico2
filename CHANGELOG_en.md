@@ -7,6 +7,53 @@ date heading instead of a version number or "Unreleased" marker.
 
 ---
 
+## 2026-08-17
+
+### Added
+
+- **HDMI mirror output** (headline feature): with a second Raspberry Pi Pico 2 plus an HDMI
+  output addon (e.g. PICO-HDMI-PLUS), the main unit's LCD contents can now be mirrored to an
+  HDMI monitor in real time. Opt-in by design — has zero effect on anyone without the addon
+  (new `[hdmi]` section in `pb1000.ini`, default `enable=false`).
+  - Wiring only adds one new CS pin (GP28 recommended — the only spare GPIO for external SPI
+    devices) onto the existing SPI1 bus (already shared with LCD/SD, GP10=SCK/GP11=MOSI).
+    `baudrate`/`frame_skip` are also tunable from `pb1000.ini`.
+  - Can be toggled on/off (and saved) from the EMULATOR MENU (GUI+F7 > Display > HDMI).
+  - Beyond the game screen (LCD VRAM / the Color VRAM extension), the boot-time RAM profile
+    picker, the EMULATOR MENU, and the bezel (frame decoration) are each mirrored to HDMI as
+    independent layers. Each layer manages its own window centering and its own "clear the
+    previously drawn area" tracking entirely independently on the receiver side, so multiple
+    layers with different canvas sizes can coexist without drifting out of alignment or
+    accidentally erasing each other. Text/rectangle-heavy screens (menus, etc.) are sent as a
+    compact stream of "fill rect" / "draw text" commands rather than raw pixels, keeping the
+    sender's processing load and transfer volume down.
+  - The receiver firmware (runs on the second Pico 2, generates the HDMI/DVI signal via HSTX)
+    is generic enough to be shared with the sibling MSX_emu_pico2 project, so it's published as
+    an independent project,
+    [`hdmi_bridge_receiver`](https://github.com/MobileFF/hdmi_bridge_receiver) (MIT license).
+    See that project's documentation (Japanese/English) for the protocol spec, wiring, and
+    build instructions (also linked from this project's `hdmi_bridge/README.md`).
+
+### Documentation
+
+- `doc/hardware_guide_en.md` / JA: added a new section 9 covering HDMI mirror output wiring
+  (main unit Pico 2 W ↔ receiver Pico 2, the new GP28 CS pin) and a link to the receiver
+  project.
+- `doc/config_guide_en.md` / JA: added a new section 14 documenting every `[hdmi]` key
+  (`enable`/`cs_pin`/`baudrate`/`frame_skip`).
+- `doc/usage_guide_en.md` / JA: added a new section 11 covering how to enable it and the
+  LCD/HDMI exclusivity behavior (while HDMI is enabled, the game screen, bezel, RAM profile
+  picker, and EMULATOR MENU are all shown exclusively on HDMI, never on the physical LCD).
+- `doc/emulator_menu_guide_en.md` / JA: added an **HDMI** row to the Display sub-menu table.
+  Also fixed the menu-layout diagram's stale Display description ("change on-screen colors" —
+  it was never updated when LCD Height was added in an earlier session) to
+  "colors, resolution, and HDMI output" (a pre-existing documentation gap, not something
+  introduced by this session's feature work).
+- `mp/pb1000.ini`: updated the `[hdmi]` section's comment to reference the new section 9 in
+  `hardware_guide.md`.
+
+---
+
 ## 2026-08-13
 
 ### Added

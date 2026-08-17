@@ -140,6 +140,13 @@ typedef struct {
   /* Display offset */
   uint16_t disp_x_offset;
   uint16_t disp_y_offset;
+
+  /* Optional HDMI bridge output (second Pico 2 + PICO-HDMI-PLUS, shares
+     the same spi_inst as the LCD via a dedicated CS pin). Disabled
+     (hdmi_ready=false) unless lcd_init_hdmi_output() has been called. */
+  uint8_t pin_hdmi_cs;
+  uint32_t hdmi_baudrate;
+  bool hdmi_ready;
 } lcd_state_t;
 
 /* API Functions */
@@ -181,5 +188,59 @@ void lcd_setup_display(lcd_state_t *lcd, void *spi_inst, uint8_t pin_cs,
 void lcd_set_scale_ratio(lcd_state_t *lcd, uint8_t num, uint8_t den);
 void lcd_render_to_display(lcd_state_t *lcd);
 void lcd_wait_for_idle(lcd_state_t *lcd);
+
+/* Optional HDMI bridge output — see doc/hardware_guide.md §7 (GP28 external
+ * SPI device). Reuses the existing spi_inst set up by lcd_setup_display();
+ * must be called after that. No-op (skipped) until this has been called. */
+void lcd_init_hdmi_output(lcd_state_t *lcd, uint8_t cs_pin, uint32_t baudrate);
+void lcd_render_to_hdmi(lcd_state_t *lcd);
+
+/* Send an arbitrary caller-supplied RGB332 buffer (1 byte/pixel, row-major,
+ * width*height bytes) to the HDMI bridge, bypassing the emulated VRAM/
+ * _pixel_color() path lcd_render_to_hdmi() uses. For non-emulated-screen
+ * content generated on the MicroPython side (e.g. the EMULATOR MENU's
+ * HDMIMirrorDisplay in mp/hdmi_menu_mirror.py) that has no representation
+ * in lcd->vram/color_vram. No-op if lcd_init_hdmi_output() was never
+ * called. */
+void lcd_send_hdmi_frame(lcd_state_t *lcd, const uint8_t *buf, uint16_t width,
+                          uint16_t height, uint8_t scale, uint8_t bpp);
+
+/* Send a palette (RGB332 entries) as a PKT_PALETTE packet, for use with
+ * lcd_send_hdmi_frame() at bpp < 8 (palette-indexed pixels). Must be sent
+ * before the corresponding lcd_send_hdmi_frame() call whenever the palette
+ * changes; the receiver keeps the last-received palette across frames. */
+void lcd_send_hdmi_palette(lcd_state_t *lcd, const uint8_t *palette_rgb332,
+                            uint8_t count);
+
+/* Send a variable-length command stream (PKT_TEXT_CMDS — see
+ * ../../hdmi_bridge_receiver/main.c's protocol comment) instead of raw pixels:
+ * a compact sequence of "fill rect" and "draw text string" commands that
+ * the receiver interprets using its own embedded 8x8 font, avoiding the
+ * need for a pixel-sized buffer on this (RAM-constrained) side. Used by
+ * mp/hdmi_menu_mirror.py to mirror the EMULATOR MENU, which is composed
+ * entirely of text and solid-color rectangles. width/height describe the
+ * logical canvas the command coordinates are relative to (for the
+ * receiver's centering); payload_len is buf's length in bytes. */
+void lcd_send_hdmi_text_cmds(lcd_state_t *lcd, const uint8_t *buf,
+                              uint16_t payload_len, uint16_t width,
+                              uint16_t height, uint8_t scale);
+
+/* Same wire format as lcd_send_hdmi_text_cmds() (PKT_BEZEL_CMDS, 0x03,
+ * instead of PKT_TEXT_CMDS, 0x02) — the receiver tracks its window-
+ * centering max-size independently from the EMULATOR MENU mirror, so the
+ * bezel can be sent in the same logical coordinate space as the game
+ * screen (see pb1000.py's _draw_bezel_hdmi()) and align with it on
+ * screen, unaffected by the menu's much larger canvas. */
+void lcd_send_hdmi_bezel_cmds(lcd_state_t *lcd, const uint8_t *buf,
+                               uint16_t payload_len, uint16_t width,
+                               uint16_t height, uint8_t scale);
+
+/* Sends PKT_CLEAR_SCREEN (see ../../hdmi_bridge_receiver/main.c's protocol
+ * comment) — clears the whole HDMI screen and resets its window-centering
+ * tracking, independent of any specific content kind. Call as early as
+ * possible in boot (right after init_hdmi_output()) so a receiver left
+ * powered on across a sender reboot doesn't keep showing the previous
+ * session's stale content. */
+void lcd_send_hdmi_clear_screen(lcd_state_t *lcd);
 
 #endif /* LCD_CONTROLLER_H */

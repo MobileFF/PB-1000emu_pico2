@@ -996,6 +996,204 @@ clear_dirty:
     lcd->dirty_pages[i] = false;
   }
 }
+
+/* ======== HDMI Bridge Output (optional second Pico 2 + PICO-HDMI-PLUS) ========
+ * See doc/hardware_guide.md §7 (GP28 external SPI device). Shares the same
+ * spi_inst as the LCD (SPI1: GP10 SCK / GP11 MOSI), with its own dedicated
+ * CS pin (GP28 by convention) so it never contends for the LCD/SD/touch CS
+ * lines. Reuses lcd_render_to_display()'s existing _pixel_color() pixel
+ * source, so mono vs. VDP/Color-VRAM mode and the active_pages boundary
+ * clamp behave identically to the local LCD.
+ *
+ * Packet format (shared with MSX_emu_pico2's sender — see
+ * ../../hdmi_bridge_receiver/main.c's protocol comment for the authoritative
+ * spec): 8-byte header
+ *   [0]=0x01 (PKT_FRAME), [1]=8 (bpp, direct RGB332 no palette),
+ *   [2..3]=width=LCD_WIDTH (big-endian), [4..5]=height=active_pages*8
+ *   (big-endian), [6]=scale (integer upscale factor applied by the
+ *   receiver), [7]=0 (reserved)
+ * followed by height rows of LCD_WIDTH RGB332 bytes (1 byte/pixel,
+ * row-major). The receiver derives the frame height from this header every
+ * frame, so it tracks a live 32<->64 dot toggle automatically — no
+ * reflashing the receiver needed, and the same receiver firmware also
+ * serves MSX_emu_pico2's sender since it self-describes its own geometry.
+ * Sent one row at a time (LCD_WIDTH=192 bytes) rather than buffering a full
+ * frame — RAM is tight on this board (see the RAM-budget lesson in
+ * MSX_emu_pico2/hdmi_bridge/README.md's Phase 5 notes). */
+#define HDMI_RECEIVER_SCALE 3 /* upscale factor the receiver applies (192x32/64 is too small to view 1:1 on a 640x480 screen) */
+void lcd_init_hdmi_output(lcd_state_t *lcd, uint8_t cs_pin, uint32_t baudrate) {
+  lcd->pin_hdmi_cs = cs_pin;
+  lcd->hdmi_baudrate = baudrate ? baudrate : 10000000u;
+  /* Idle high (deasserted), same convention as the LCD/SD/touch CS pins. */
+  gpio_init(cs_pin);
+  gpio_set_dir(cs_pin, GPIO_OUT);
+  gpio_put(cs_pin, 1);
+  lcd->hdmi_ready = true;
+}
+
+void lcd_render_to_hdmi(lcd_state_t *lcd) {
+  if (!lcd->hdmi_ready || !lcd->spi_inst)
+    return;
+
+  spi_inst_t *spi = (spi_inst_t *)lcd->spi_inst;
+
+  /* SPI Bus Arbitration: same SD/touch deselect as lcd_render_to_display(). */
+  gpio_put(15, 1);
+  gpio_put(16, 1);
+
+  /* The HDMI receiver's PL022 SPI slave requires mode 3 (CPOL=1/CPHA=1) —
+   * mode 0 loses sync after a few bytes on real hardware. This differs
+   * from the LCD's own mode 0 (CPOL=0/CPHA=0) on the same bus, so it must
+   * be re-applied here; lcd_render_to_display() re-applies mode 0 at the
+   * start of its own next call, so the two never conflict as long as
+   * lcd_render_to_hdmi() is only called right after
+   * lcd_render_to_display() finishes (never interleaved). */
+  spi_set_baudrate(spi, lcd->hdmi_baudrate);
+  spi_set_format(spi, 8, SPI_CPOL_1, SPI_CPHA_1, SPI_MSB_FIRST);
+
+  uint8_t row[LCD_WIDTH];
+  uint16_t height = (uint16_t)(lcd->active_pages * 8);
+  uint8_t header[8] = {
+      0x01 /* PKT_FRAME */, 8 /* bpp: direct RGB332 */,
+      (uint8_t)(LCD_WIDTH >> 8), (uint8_t)(LCD_WIDTH & 0xFF),
+      (uint8_t)(height >> 8), (uint8_t)(height & 0xFF),
+      HDMI_RECEIVER_SCALE, 0 /* reserved */
+  };
+
+  gpio_put(lcd->pin_hdmi_cs, 0);
+  spi_write_blocking(spi, header, sizeof(header));
+  for (int sy = 0; sy < lcd->active_pages * 8; sy++) {
+    for (int col = 0; col < LCD_WIDTH; col++) {
+      uint16_t c = _pixel_color(lcd, col, sy);
+      /* RGB565 -> RGB332 (top 3/3/2 bits), same formula as lcd_set_colors(). */
+      row[col] = (uint8_t)((((c >> 13) & 0x07) << 5) | (((c >> 8) & 0x07) << 2) |
+                            ((c >> 3) & 0x03));
+    }
+    spi_write_blocking(spi, row, sizeof(row));
+  }
+  gpio_put(lcd->pin_hdmi_cs, 1);
+}
+
+void lcd_send_hdmi_frame(lcd_state_t *lcd, const uint8_t *buf, uint16_t width,
+                          uint16_t height, uint8_t scale, uint8_t bpp) {
+  if (!lcd->hdmi_ready || !lcd->spi_inst)
+    return;
+
+  spi_inst_t *spi = (spi_inst_t *)lcd->spi_inst;
+
+  gpio_put(15, 1);
+  gpio_put(16, 1);
+
+  spi_set_baudrate(spi, lcd->hdmi_baudrate);
+  spi_set_format(spi, 8, SPI_CPOL_1, SPI_CPHA_1, SPI_MSB_FIRST);
+
+  uint8_t header[8] = {
+      0x01 /* PKT_FRAME */, bpp,
+      (uint8_t)(width >> 8), (uint8_t)(width & 0xFF),
+      (uint8_t)(height >> 8), (uint8_t)(height & 0xFF),
+      scale, 0 /* reserved */
+  };
+  size_t payload_len = ((size_t)width * (size_t)height * (size_t)bpp) / 8u;
+
+  gpio_put(lcd->pin_hdmi_cs, 0);
+  spi_write_blocking(spi, header, sizeof(header));
+  spi_write_blocking(spi, buf, payload_len);
+  gpio_put(lcd->pin_hdmi_cs, 1);
+}
+
+void lcd_send_hdmi_palette(lcd_state_t *lcd, const uint8_t *palette_rgb332,
+                            uint8_t count) {
+  if (!lcd->hdmi_ready || !lcd->spi_inst)
+    return;
+
+  spi_inst_t *spi = (spi_inst_t *)lcd->spi_inst;
+
+  gpio_put(15, 1);
+  gpio_put(16, 1);
+
+  spi_set_baudrate(spi, lcd->hdmi_baudrate);
+  spi_set_format(spi, 8, SPI_CPOL_1, SPI_CPHA_1, SPI_MSB_FIRST);
+
+  uint8_t header[8] = {0x00 /* PKT_PALETTE */, count, 0, 0, 0, 0, 0, 0};
+
+  gpio_put(lcd->pin_hdmi_cs, 0);
+  spi_write_blocking(spi, header, sizeof(header));
+  spi_write_blocking(spi, palette_rgb332, count);
+  gpio_put(lcd->pin_hdmi_cs, 1);
+}
+
+/* Shared by lcd_send_hdmi_text_cmds() (PKT_TEXT_CMDS, 0x02, EMULATOR MENU
+ * mirror) and lcd_send_hdmi_bezel_cmds() (PKT_BEZEL_CMDS, 0x03, bezel) —
+ * identical wire format, only pkt_type differs. Receiver main.c tracks
+ * their window-centering max-size independently under the same command
+ * format (see its KIND_* comment) so the bezel can be sent in the same
+ * logical coordinate space as the game screen (see pb1000.py's
+ * _draw_bezel_hdmi()) without the much larger EMULATOR MENU canvas
+ * throwing off its centering. */
+static void lcd_send_hdmi_text_stream(lcd_state_t *lcd, uint8_t pkt_type,
+                                       const uint8_t *buf, uint16_t payload_len,
+                                       uint16_t width, uint16_t height,
+                                       uint8_t scale) {
+  if (!lcd->hdmi_ready || !lcd->spi_inst)
+    return;
+
+  spi_inst_t *spi = (spi_inst_t *)lcd->spi_inst;
+
+  gpio_put(15, 1);
+  gpio_put(16, 1);
+
+  spi_set_baudrate(spi, lcd->hdmi_baudrate);
+  spi_set_format(spi, 8, SPI_CPOL_1, SPI_CPHA_1, SPI_MSB_FIRST);
+
+  /* PKT_TEXT_CMDS/PKT_BEZEL_CMDSはbpp/予約の位置をpayload_lenの上位/下位byte
+   * に転用する(受信側main.cのプロトコルコメント参照)。 */
+  uint8_t header[8] = {
+      pkt_type, (uint8_t)(payload_len >> 8),
+      (uint8_t)(width >> 8), (uint8_t)(width & 0xFF),
+      (uint8_t)(height >> 8), (uint8_t)(height & 0xFF),
+      scale, (uint8_t)(payload_len & 0xFF)
+  };
+
+  gpio_put(lcd->pin_hdmi_cs, 0);
+  spi_write_blocking(spi, header, sizeof(header));
+  spi_write_blocking(spi, buf, payload_len);
+  gpio_put(lcd->pin_hdmi_cs, 1);
+}
+
+void lcd_send_hdmi_text_cmds(lcd_state_t *lcd, const uint8_t *buf,
+                              uint16_t payload_len, uint16_t width,
+                              uint16_t height, uint8_t scale) {
+  lcd_send_hdmi_text_stream(lcd, 0x02 /* PKT_TEXT_CMDS */, buf, payload_len,
+                             width, height, scale);
+}
+
+void lcd_send_hdmi_bezel_cmds(lcd_state_t *lcd, const uint8_t *buf,
+                               uint16_t payload_len, uint16_t width,
+                               uint16_t height, uint8_t scale) {
+  lcd_send_hdmi_text_stream(lcd, 0x03 /* PKT_BEZEL_CMDS */, buf, payload_len,
+                             width, height, scale);
+}
+
+void lcd_send_hdmi_clear_screen(lcd_state_t *lcd) {
+  if (!lcd->hdmi_ready || !lcd->spi_inst)
+    return;
+
+  spi_inst_t *spi = (spi_inst_t *)lcd->spi_inst;
+
+  gpio_put(15, 1);
+  gpio_put(16, 1);
+
+  spi_set_baudrate(spi, lcd->hdmi_baudrate);
+  spi_set_format(spi, 8, SPI_CPOL_1, SPI_CPHA_1, SPI_MSB_FIRST);
+
+  uint8_t header[8] = {0x04 /* PKT_CLEAR_SCREEN */, 0, 0, 0, 0, 0, 0, 0};
+  uint8_t dummy = 0x00; /* ダミーの1byteペイロード(受信側main.c参照) */
+
+  gpio_put(lcd->pin_hdmi_cs, 0);
+  spi_write_blocking(spi, header, sizeof(header));
+  spi_write_blocking(spi, &dummy, 1);
+  gpio_put(lcd->pin_hdmi_cs, 1);
+}
 #else
 /* Stub implementations for non-ARM builds */
 void lcd_wait_for_idle(lcd_state_t *lcd) { (void)lcd; }
@@ -1008,4 +1206,29 @@ void lcd_set_scale_ratio(lcd_state_t *lcd, uint8_t num, uint8_t den) {
   (void)lcd; (void)num; (void)den;
 }
 void lcd_render_to_display(lcd_state_t *lcd) { (void)lcd; }
+void lcd_init_hdmi_output(lcd_state_t *lcd, uint8_t cs_pin, uint32_t baudrate) {
+  (void)lcd; (void)cs_pin; (void)baudrate;
+}
+void lcd_render_to_hdmi(lcd_state_t *lcd) { (void)lcd; }
+void lcd_send_hdmi_frame(lcd_state_t *lcd, const uint8_t *buf, uint16_t width,
+                          uint16_t height, uint8_t scale, uint8_t bpp) {
+  (void)lcd; (void)buf; (void)width; (void)height; (void)scale; (void)bpp;
+}
+void lcd_send_hdmi_palette(lcd_state_t *lcd, const uint8_t *palette_rgb332,
+                            uint8_t count) {
+  (void)lcd; (void)palette_rgb332; (void)count;
+}
+void lcd_send_hdmi_text_cmds(lcd_state_t *lcd, const uint8_t *buf,
+                              uint16_t payload_len, uint16_t width,
+                              uint16_t height, uint8_t scale) {
+  (void)lcd; (void)buf; (void)payload_len; (void)width; (void)height; (void)scale;
+}
+void lcd_send_hdmi_bezel_cmds(lcd_state_t *lcd, const uint8_t *buf,
+                               uint16_t payload_len, uint16_t width,
+                               uint16_t height, uint8_t scale) {
+  (void)lcd; (void)buf; (void)payload_len; (void)width; (void)height; (void)scale;
+}
+void lcd_send_hdmi_clear_screen(lcd_state_t *lcd) {
+  (void)lcd;
+}
 #endif

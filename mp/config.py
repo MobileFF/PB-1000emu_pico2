@@ -82,6 +82,12 @@ _DEFAULTS = {
         "lcd_debug": "false",
         "newall_debug": "false",
     },
+    "hdmi": {
+        "enable":    "false",
+        "cs_pin":    "28",
+        "baudrate":  "10000000",
+        "frame_skip": "1",
+    },
 }
 
 

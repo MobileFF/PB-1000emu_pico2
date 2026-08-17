@@ -34,7 +34,7 @@ EMULATOR MENU は次の4つのカテゴリと **Exit** で構成されていま�
 == EMULATOR MENU ==
 ├─ Toggles   （各種機能のON/OFF切り替え）
 ├─ Storage   （ディスク・RAM・画面のセーブ/ロード）
-├─ Display   （表示色の変更）
+├─ Display   （表示色・解像度・HDMI出力の設定）
 ├─ System    （システム情報・リセット関連）
 └─ Exit      （メニューを閉じる）
 ```
@@ -86,6 +86,7 @@ EMULATOR MENU は次の4つのカテゴリと **Exit** で構成されていま�
 | **Foreground Color** | LCD の「点灯」ピクセルの色を変更する |
 | **Background Color** | LCD の「消灯」ピクセルの色を変更する |
 | **LCD Height** | LCD の縦解像度を 32 ドット / 64 ドットで切り替える |
+| **HDMI** | 第2 Pico 2 ＋ HDMI出力アドオンへのミラー出力の ON/OFF（[hardware_guide.md](hardware_guide.md) §9） |
 
 **Foreground Color** / **Background Color** を選択すると、色の数値（RGB332形式、0〜255）を
 入力する画面 → 実際の色見本を確認する画面、の順に進みます。EXE で確定すると `pb1000.ini` に
@@ -96,6 +97,14 @@ EMULATOR MENU は次の4つのカテゴリと **Exit** で構成されていま�
 再起動すると `[display] lcd_height` の設定値に戻ります。64 ドットへ切り替えた直後は、追加された
 行（5〜8 行目）にプログラムがまだ描画していない古い VRAM の内容が残ることがありますが、これは
 実機の PB-1000 でも同様の挙動であり不具合ではありません。
+
+**HDMI** は EXE を押すたびにその場で ON ⇔ OFF が切り替わり、`pb1000.ini` の `[hdmi] enable` にも
+即座に保存されます（他の Toggles 系項目と異なり、こちらは再起動後も設定が保持されます）。
+**ON にすると物理 LCD への描画が止まり、画面は EMULATOR MENU 自体を含めてすべて HDMI 側に
+表示されるようになります**（LCD と HDMI は排他出力。詳細は
+[usage_guide.md](usage_guide.md) §11）。HDMI出力アドオンを配線していない状態で ON にしても
+実機の動作に害はありませんが、画面が LCD にもHDMIにも表示されなくなる（何も繋がっていない
+SPI へ送信するだけになる）ため、確認用のアドオンを配線してから ON にしてください。
 
 ---
 

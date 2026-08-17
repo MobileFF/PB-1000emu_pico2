@@ -333,38 +333,51 @@ class PB1000System:
         self.profile_dir = profile_dir
         self._config = config
 
-        # Bank presence detection: has_bank[0]=ROM1 (always), [1..3]=RAM banks
+        # Bank presence: [0]=ROM1 (always), [1..3]=RAM banks. Buffer *space*
+        # for all three RAM banks is always reserved below, regardless of
+        # which files exist in the boot-time profile — this is what lets a
+        # later RAM Load switch to a profile with more banks actually load
+        # them (previously the buffer itself didn't exist unless the boot
+        # profile happened to have that bank).
+        #
+        # has_bank[] itself, however, tracks whether the *currently active*
+        # profile has real data for that bank, and is mirrored to the CPU
+        # core via set_bank_present()/set_has_exp_ram() so that programs
+        # probing bank presence (write-then-readback; absent banks read back
+        # 0xFF regardless of what was written — see c_mem_direct_read in
+        # modhd61700.c) see a result consistent with what this profile
+        # actually represents, not a permanently-present fake. load_state()
+        # re-evaluates and re-syncs this on every profile switch.
         self.has_bank = [True, False, False, False]
         for slot in range(1, 4):
             path = self._get_storage_path(f"ram{slot}.bin")
             self.has_bank[slot] = self._file_exists(path)
-        print(f"Bank detection: RAM1={'Y' if self.has_bank[1] else 'N'} "
-              f"RAM2={'Y' if self.has_bank[2] else 'N'} "
-              f"RAM3={'Y' if self.has_bank[3] else 'N'}")
+            print(f"Bank detection: RAM{slot}={'Y' if self.has_bank[slot] else 'N'}")
         if hasattr(cpu_core, "set_has_exp_ram"):
             cpu_core.set_has_exp_ram(self.has_bank[1])
+        if hasattr(cpu_core, "set_bank_present"):
+            cpu_core.set_bank_present(2, self.has_bank[2])
+            cpu_core.set_bank_present(3, self.has_bank[3])
 
         if hasattr(cpu_core, "get_ram_view"):
             raw_view = cpu_core.get_ram_view()
             self.ram = RAMView(cpu_core, memoryview(raw_view), self.RAM_SIZE, self.RAM_START)
-            # Bank 1 (exp_ram): backward-compat view
-            if self.has_bank[1] and hasattr(cpu_core, "get_exp_ram_view"):
+            # Bank 1 (exp_ram): backward-compat view. Always built regardless
+            # of has_bank[1] — the buffer must exist so a later profile
+            # switch that does have ram1.bin can load into it.
+            if hasattr(cpu_core, "get_exp_ram_view"):
                 exp_raw_view = cpu_core.get_exp_ram_view()
                 _b1 = RAMView(cpu_core, memoryview(exp_raw_view), self.EXP_RAM_SIZE, self.SYS_ROM_START, segment=0x10)
-            elif self.has_bank[1]:
-                _b1 = bytearray(self.EXP_RAM_SIZE)
             else:
-                _b1 = bytearray(0)
-            # Banks 2 and 3
+                _b1 = bytearray(self.EXP_RAM_SIZE)
+            # Banks 2 and 3 — same unconditional allocation.
             _bank_views = []
             for slot in range(2, 4):
-                if self.has_bank[slot] and hasattr(cpu_core, "get_bank_view"):
+                if hasattr(cpu_core, "get_bank_view"):
                     rv = cpu_core.get_bank_view(slot)
                     _bank_views.append(RAMView(cpu_core, memoryview(rv), self.EXP_RAM_SIZE, self.SYS_ROM_START, segment=slot << 4))
-                elif self.has_bank[slot]:
-                    _bank_views.append(bytearray(self.EXP_RAM_SIZE))
                 else:
-                    _bank_views.append(bytearray(0))
+                    _bank_views.append(bytearray(self.EXP_RAM_SIZE))
         else:
             self.ram = bytearray(self.RAM_SIZE)
             _b1 = bytearray(self.EXP_RAM_SIZE)
@@ -1309,6 +1322,19 @@ class PB1000System:
                 gc.collect()
             return offset
 
+        def _fill_bank(ram_target, value, chunk_size=1024):
+            """バンクRAMをvalueで埋める(チャンク単位、Pythonヒープ確保は
+            pattern一つ分のみ)。ファイルが無いプロファイルへ切り替えた際、
+            前のプロファイルの内容が残留しないようにするために使う。"""
+            view = ram_target._view if hasattr(ram_target, '_view') else ram_target
+            size = len(ram_target)
+            pattern = bytes([value & 0xFF]) * chunk_size
+            offset = 0
+            while offset < size:
+                n = min(chunk_size, size - offset)
+                view[offset:offset + n] = pattern if n == chunk_size else pattern[:n]
+                offset += n
+
         def _load_to_ram(file_path, ram_target, slot):
             if not self._file_exists(file_path):
                 print(f"RAM file not found: {file_path}")
@@ -1354,10 +1380,26 @@ class PB1000System:
         _load_to_ram(path0, self.ram, 0)
         gc.collect()
         for slot in range(1, 4):
-            if self.has_bank[slot]:
-                rp = (self._get_storage_path(f"ram{slot}.bin") if path is None else f"{path}/ram{slot}.bin")
+            # Bank buffers are always allocated (see __init__), so switching
+            # profiles can always load whichever banks the newly-selected
+            # profile provides. has_bank[slot] (the CPU-visible presence
+            # flag, mirrored into the C core) is re-evaluated per profile:
+            # a profile without ramN.bin means "no card in this slot" for
+            # this session, matching what a bank-presence probe would see
+            # on real hardware — so the bank is filled with 0xFF (the same
+            # value c_mem_direct_read returns for an absent bank) rather
+            # than left with the previous profile's stale contents.
+            rp = (self._get_storage_path(f"ram{slot}.bin") if path is None else f"{path}/ram{slot}.bin")
+            present = self._file_exists(rp)
+            self.has_bank[slot] = present
+            if hasattr(cpu_core, "set_bank_present"):
+                cpu_core.set_bank_present(slot, present)
+            if present:
                 _load_to_ram(rp, self._bank_ram[slot], slot)
-                gc.collect()
+            else:
+                _fill_bank(self._bank_ram[slot], 0xFF)
+                print(f"RAM slot {slot}: no save for this profile, filled 0xFF")
+            gc.collect()
 
         try:
             if self._file_exists(reg_path):
@@ -1508,12 +1550,70 @@ class PB1000System:
     def update_display(self, x_offset=None, y_offset=None):
         if x_offset is not None: self._disp_x = x_offset
         if y_offset is not None: self._disp_y = y_offset
-        self.lcd.render_to_display(self._disp_x, self._disp_y)
-        self._render_status_bar()
+        # LCD and HDMI are exclusive outputs (never both active at once) —
+        # see mp/main.py's [hdmi] setup and mp/hdmi_menu_mirror.py (which
+        # applies the same policy to the EMULATOR MENU). While HDMI is
+        # enabled, the physical LCD (and its status-bar overlay) is left
+        # untouched entirely instead of being mirrored alongside it.
+        if getattr(self, "_hdmi_enabled", False):
+            n = getattr(self, "_hdmi_frame_count", 0) + 1
+            self._hdmi_frame_count = n
+            if n % getattr(self, "_hdmi_frame_skip", 1) == 0:
+                self.lcd.render_to_hdmi()
+        else:
+            self.lcd.render_to_display(self._disp_x, self._disp_y)
+            self._render_status_bar()
+
+    # lcd_render_to_hdmi() (src/lcd_controller.c) always sends the game
+    # screen as a 192 x active_pages*8 canvas at this fixed scale
+    # (HDMI_RECEIVER_SCALE there) — kept in sync manually since one side is
+    # C and the other Python. _draw_bezel_hdmi() below sends the bezel in
+    # that exact same logical coordinate space/scale (not the real LCD
+    # panel's own _disp_x/_disp_y/scale) specifically so the two align on
+    # the HDMI screen: the receiver centers each independently (see its
+    # KIND_* window-centering comment), but since both use width=192,
+    # height=lcd_height as their core size and the same scale, their
+    # windows end up concentric — the bezel's fixed logical padding around
+    # that core becomes a symmetric border around the game screen.
+    _HDMI_SCALE = 3
+
+    def _draw_bezel_hdmi(self, scale):
+        """Mirror draw_bezel() to the HDMI bridge, aligned with the game
+        screen's own window (see _HDMI_SCALE comment above) rather than
+        reusing draw_bezel()'s real-LCD-panel coordinates/scale (which
+        have no correspondence to HDMI's own scaled/centered window).
+        `scale` (the real LCD panel's scale) is intentionally unused here.
+        One-shot: builds a throwaway mirror and flushes it immediately."""
+        if not getattr(self, "_hdmi_enabled", False):
+            return
+        if not hasattr(self.lcd, 'display') or self.lcd.display is None:
+            return
+        try:
+            from hdmi_menu_mirror import create as _create_hdmi_mirror
+            mirror = _create_hdmi_mirror(self.lcd.display, self.lcd, bezel=True)
+            if mirror is None:
+                return
+            padding = 4
+            lw, lh = 192, self._lcd_height
+            mirror.width = lw + padding * 2
+            mirror.height = lh + padding * 2
+            mirror.scale = self._HDMI_SCALE
+            mirror.fill_rect(0, 0, mirror.width, mirror.height, 0x4228)  # outer
+            mid_off = padding - padding // 2
+            mirror.fill_rect(mid_off, mid_off, lw + padding, lh + padding, 0x8410)  # mid
+            mirror.fill_rect(padding, padding, lw, lh, 0xB5E6)  # inner
+            mirror.flush_if_dirty()
+        except Exception:
+            pass
 
     def force_full_redraw(self):
-        """Redraw bezel + LCD after overlaying the screen (e.g. after menu closes)."""
-        if hasattr(self.lcd, 'display') and self.lcd.display is not None:
+        """Redraw bezel + LCD after overlaying the screen (e.g. after menu closes).
+        While HDMI is the active output (see update_display()), the physical
+        LCD is left untouched (exclusive-display policy) but the bezel is
+        still mirrored to HDMI."""
+        if getattr(self, "_hdmi_enabled", False):
+            self._draw_bezel_hdmi(self.lcd.scale)
+        elif hasattr(self.lcd, 'display') and self.lcd.display is not None:
             draw_bezel(self.lcd.display, self.lcd.scale, self._disp_x, self._disp_y, lcd_height=self._lcd_height)
         self.lcd.mark_dirty()
         self._status_rendered_msg = None  # force status bar refresh
@@ -1599,12 +1699,14 @@ class PB1000System:
 
     def _on_lcd_scale_change(self, scale):
         """Callback from LCDController when scale is changed."""
-        if hasattr(self.lcd, 'display') and self.lcd.display:
+        if getattr(self, "_hdmi_enabled", False):
+            self._draw_bezel_hdmi(scale)
+        elif hasattr(self.lcd, 'display') and self.lcd.display:
             # Re-draw the bezel with new scale
             draw_bezel(self.lcd.display, scale, self._disp_x, self._disp_y, lcd_height=self._lcd_height)
-            # Ensure the LCD content itself is marked dirty to fill the new bezel
-            if hasattr(self.lcd, 'dirty'):
-                self.lcd.dirty = True
+        # Ensure the LCD content itself is marked dirty to fill the new bezel
+        if hasattr(self.lcd, 'dirty'):
+            self.lcd.dirty = True
 
     def press_key(self, key):
         if hasattr(cpu_core, 'press_row_ki'):

@@ -51,8 +51,10 @@ def handle_disk_swap(system, display, fkbar=None):
         if hasattr(system.lcd, 'mark_dirty'):
             system.lcd.mark_dirty()
         system.update_display()
-        # 3. FuncKeyBar を再描画（全画面クリアで消えるため）
-        if fkbar is not None:
+        # 3. FuncKeyBar を再描画（全画面クリアで消えるため）。fkbar は常に実LCD
+        #    へ直接描画する(display引数を経由しない)ため、HDMI排他表示中は
+        #    実LCDに触れないという方針(pb1000.py参照)に合わせてスキップする。
+        if fkbar is not None and not getattr(system, "_hdmi_enabled", False):
             fkbar.draw()
     except Exception:
         pass

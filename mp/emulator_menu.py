@@ -15,6 +15,9 @@ Dangerous operations:
 """
 
 import time
+import gc
+
+from hdmi_menu_mirror import create as _create_hdmi_mirror, hdmi_flush
 
 # ── Color palette ─────────────────────────────────────────────────────────────
 _BG     = 0x0000   # background
@@ -43,12 +46,18 @@ def _sw16(c):
 
 
 def _draw_text(display, x, y, text, fg, bg=_BG):
-    import framebuf
     text = str(text)
     max_chars = max(0, (display.width - x) // 8)
     text = text[:max_chars]
     if not text:
         return
+    record = getattr(display, 'record_text', None)
+    if record is not None:
+        # HDMIMirrorDisplay: record a compact text command instead of
+        # rasterizing to pixels (see hdmi_menu_mirror.py).
+        record(x, y, text, fg, bg)
+        return
+    import framebuf
     buf = bytearray(8 * 8 * 2)  # 128 B: one 8x8 character cell
     fb = framebuf.FrameBuffer(buf, 8, 8, framebuf.RGB565)
     cx = x
@@ -126,10 +135,13 @@ def _build_storage_items():
 def _build_display_items(system):
     fg_c = _rgb565_to_rgb332(system.lcd._color_fg)
     bg_c = _rgb565_to_rgb332(system.lcd._color_bg_on)
+    hdmi_on = getattr(system, '_hdmi_enabled', False)
+    hb, hbc = _badge(hdmi_on)
     return [
         {'id': 'fg_color', 'label': 'Foreground Color', 'badge': "%02X" % fg_c, 'badge_color': _FG},
         {'id': 'bg_color', 'label': 'Background Color', 'badge': "%02X" % bg_c, 'badge_color': _FG},
         {'id': 'lcd_height', 'label': 'LCD Height', 'badge': "%d dot" % system._lcd_height, 'badge_color': _FG},
+        {'id': 'hdmi', 'label': 'HDMI', 'badge': hb, 'badge_color': hbc},
     ]
 
 
@@ -254,6 +266,7 @@ def _text_input(display, title, max_len=16):
                 return "".join(text)
             elif sc == 0x29:            # BRK — cancel
                 return None
+        hdmi_flush(display)
         time.sleep_ms(30)
 
 
@@ -291,6 +304,7 @@ def _number_input(display, title, current=0):
                 _draw_text(display, 4, H // 2 - 4, "!! 0-255 only", _WARN)
             elif sc == 0x29:                # BRK
                 return None
+        hdmi_flush(display)
         time.sleep_ms(30)
 
 
@@ -324,6 +338,7 @@ def _show_color_preview(display, title, rgb332):
                 return True
             elif sc == 0x29: # BRK
                 return False
+        hdmi_flush(display)
         time.sleep_ms(30)
 
 
@@ -389,6 +404,21 @@ def _save_display_colors(fg_color, bg_color):
     kv = {"fg_color": str(fg_color), "bg_color": str(bg_color)}
     try:
         _update_ini(path, "display", kv)
+        return path
+    except Exception as e:
+        return "ERR:" + str(e)
+
+
+def _save_hdmi_enable(enabled):
+    """Write [hdmi] enable=true/false to pb1000.ini. Returns save path or error string."""
+    import os
+    try:
+        os.listdir("/sd")
+        path = "/sd/pb1000.ini"
+    except OSError:
+        path = "/pb1000.ini"
+    try:
+        _update_ini(path, "hdmi", {"enable": "true" if enabled else "false"})
         return path
     except Exception as e:
         return "ERR:" + str(e)
@@ -507,6 +537,7 @@ def _confirm(display, title, detail=""):
                 return True
             elif sc == 0x29: # BRK
                 return False
+        hdmi_flush(display)
         time.sleep_ms(30)
 
 
@@ -601,6 +632,33 @@ def _do_lcd_height(system, fkbar):
     return "LCD Height: %d dot" % new_height
 
 
+def _do_hdmi_toggle(system):
+    """Toggle the optional HDMI bridge output (second Pico 2 + PICO-HDMI-PLUS,
+    see doc/hardware_guide.md §7) on/off.
+
+    Persists to pb1000.ini (like fg/bg color) since a user who has wired up
+    the addon expects it to stay on across reboots, unlike the session-only
+    toggles (Beep/Joystick/LCD Height/etc).
+
+    Turning on from off calls lcd.init_hdmi_output() again — idempotent
+    (just re-inits the CS GPIO and sets the ready flag), safe to call more
+    than once. Turning off just stops calling render_to_hdmi() each frame
+    (mp/pb1000.py update_display()); nothing on the C side needs resetting.
+    """
+    new_state = not getattr(system, "_hdmi_enabled", False)
+    if new_state:
+        cs_pin = getattr(system, "_hdmi_cs_pin", 28)
+        baud = getattr(system, "_hdmi_baud", 10_000_000)
+        system.lcd.init_hdmi_output(cs_pin, baud)
+    system._hdmi_enabled = new_state
+
+    result = _save_hdmi_enable(new_state)
+    label = "On" if new_state else "Off"
+    if result.startswith("ERR:"):
+        return "HDMI: %s save %s" % (label, result)
+    return "HDMI: %s -> %s" % (label, result)
+
+
 # ── Cursor navigation helpers ─────────────────────────────────────────────────
 
 def _next_cursor(items, cur, direction):
@@ -645,6 +703,7 @@ def _run_menu(display, title, hint, build_items_fn, dispatch_fn):
     while True:
         sc = hd61700.get_last_key()
         if sc == prev_sc:
+            hdmi_flush(display)
             time.sleep_ms(30)
             continue
         prev_sc = sc
@@ -706,17 +765,21 @@ def _dispatch_storage(item_id, system, display, fkbar):
     if item_id == 'fd_swap':
         return _do_fd_swap(system, display, fkbar), False
     if item_id == 'ram_save':
+        gc.collect()  # emulator_menu_ext.py's on-demand compile needs contiguous heap
         from emulator_menu_ext import _do_ram_save
         return _do_ram_save(system, display), False
     if item_id == 'ram_load':
+        gc.collect()
         from emulator_menu_ext import _do_ram_load
         msg = _do_ram_load(system, display)
         # Load succeeded — exit menu so main loop re-syncs after reset
         return msg, bool(msg) and not msg.startswith("!!")
     if item_id == 'vram_save':
+        gc.collect()
         from emulator_menu_ext import _do_vram_save
         return _do_vram_save(system), False
     if item_id == 'full_capture':
+        gc.collect()
         from emulator_menu_ext import _do_full_capture
         return _do_full_capture(system, display, fkbar), False
     return "", False
@@ -733,15 +796,19 @@ def _dispatch_display(item_id, system, display, fkbar):
         # force_full_redraw + fkbar.draw()) rather than trying to patch just
         # the submenu area.
         return _do_lcd_height(system, fkbar), True
+    if item_id == 'hdmi':
+        return _do_hdmi_toggle(system), False
     return "", False
 
 
 def _dispatch_system(item_id, system, display, keyboard_input):
     if item_id == 'hook_status':
+        gc.collect()  # emulator_menu_ext.py's on-demand compile needs contiguous heap
         from emulator_menu_ext import _do_hook_status
         _do_hook_status(system, display)
         return "", False
     if item_id == 'cpu_status':
+        gc.collect()
         from emulator_menu_ext import _do_cpu_status
         _do_cpu_status(system, display)
         return "", False
@@ -802,25 +869,63 @@ def show_emulator_menu(system, display, fkbar, keyboard_input, joystick_input, c
     The top level lists categories (Toggles / Storage / Display / System);
     each opens as its own sub-menu via _run_menu(), BRK going back one level.
     BRK or Exit at the top level closes the whole menu.
+
+    LCD and HDMI are exclusive (see pb1000.py's update_display()): while
+    HDMI is the active output, the menu draws into an offscreen mirror
+    (HDMIMirrorDisplay) instead of the physical LCD, and the physical LCD
+    is left untouched — matching the game screen's own behavior.
     """
     state = {
         'joystick_input': joystick_input,
         '_joy_saved': None,
     }
 
-    _run_menu(
-        display, "==  EMULATOR MENU  ==", "GUI+F7:open  EXE:select  BRK:exit",
-        _build_top_items,
-        lambda iid, items, cur: _dispatch_top(iid, system, display, fkbar, keyboard_input, cfg, state),
-    )
+    hdmi_mirror = None
+    if getattr(system, '_hdmi_enabled', False):
+        hdmi_mirror = _create_hdmi_mirror(display, system.lcd)
+        if hdmi_mirror is not None:
+            display = hdmi_mirror
+        # else: allocation failed (see hdmi_menu_mirror.create()) — fall
+        # back to the real display for this session, same as HDMI disabled.
 
-    # Restore display: clear menu area, then redraw bezel + LCD + FuncKeyBar
-    display.fill_rect(0, 0, display.width, display.height, 0x0000)
+    try:
+        _run_menu(
+            display, "==  EMULATOR MENU  ==", "GUI+F7:open  EXE:select  BRK:exit",
+            _build_top_items,
+            lambda iid, items, cur: _dispatch_top(iid, system, display, fkbar, keyboard_input, cfg, state),
+        )
+    except MemoryError as e:
+        # A submenu (e.g. System > CPU Status, which on-demand-compiles
+        # emulator_menu_ext.py) can hit a MemoryError deep in a long-running
+        # session — worse odds while the HDMI mirror buffer is also
+        # resident. Close the menu rather than letting this propagate up
+        # and crash the whole main loop (see main.py's MAIN LOOP EXCEPTION
+        # handler — that's a last resort, not a substitute for handling
+        # this here).
+        print("EMULATOR MENU: closing after MemoryError (%s)" % e)
+        gc.collect()
+
+    if hdmi_mirror is not None:
+        # HDMI受信側は種別(ゲーム画面/メニュー/ベゼル)ごとに直前の表示領域を
+        # 独立して覚えており、ゲーム画面側のフレームはメニュー側の領域を
+        # 自動ではクリアしない(互いに重なって共存するレイヤーとして扱って
+        # いるため — ../../hdmi_bridge_receiver/main.c参照)。そのため、メニューを
+        # 閉じる際はここで明示的に全面黒のフレームを送り、メニューの残像が
+        # 残らないようにする(_dirtyフラグに関わらず強制送信)。
+        # 必ずforce_full_redraw()より先に送ること — メニューのキャンバスは
+        # ベゼル/ゲーム画面より大きく、後から送ると黒塗りがベゼル/ゲーム画面
+        # を上書きして消してしまう。
+        hdmi_mirror.fill_rect(0, 0, hdmi_mirror.width, hdmi_mirror.height, 0x0000)
+        hdmi_mirror.flush_if_dirty()
+    else:
+        # Restore display: clear menu area, then redraw bezel + LCD + FuncKeyBar
+        display.fill_rect(0, 0, display.width, display.height, 0x0000)
+        if fkbar is not None:
+            try:
+                fkbar.draw()
+            except Exception:
+                pass
+
     system.force_full_redraw()
-    if fkbar is not None:
-        try:
-            fkbar.draw()
-        except Exception:
-            pass
 
     return {'joystick_input': state['joystick_input']}

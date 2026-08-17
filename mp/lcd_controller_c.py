@@ -338,6 +338,54 @@ class LCDControllerC:
         self._current_cfg = (x_offset, y_offset, scale)
         self._spi_rendering = True
 
+    def init_hdmi_output(self, cs_pin, baudrate):
+        """Optional HDMI bridge output (second Pico 2 + PICO-HDMI-PLUS).
+        Must be called after setup_display() — reuses the same SPI1 bus."""
+        lcd_c.init_hdmi_output(cs_pin, baudrate)
+
+    def render_to_hdmi(self):
+        """Send the current VRAM/color_vram content to the HDMI bridge.
+        No-op if init_hdmi_output() was never called."""
+        lcd_c.render_to_hdmi()
+
+    def send_hdmi_frame(self, buf, width, height, scale=1, bpp=8):
+        """Send an arbitrary buffer (row-major, width*height*bpp/8 bytes)
+        to the HDMI bridge, bypassing the emulated VRAM/color_vram content
+        render_to_hdmi() sends. bpp=8 is direct RGB332; bpp in (1,2,4) is
+        palette-indexed (see send_hdmi_palette()). For non-emulated content
+        generated on the MicroPython side (e.g. the EMULATOR MENU's
+        HDMIMirrorDisplay). No-op if init_hdmi_output() was never called."""
+        lcd_c.send_hdmi_frame(buf, width, height, scale, bpp)
+
+    def send_hdmi_palette(self, buf, count):
+        """Send a palette (count RGB332 entries in buf) ahead of a
+        send_hdmi_frame() call at bpp < 8. No-op if init_hdmi_output() was
+        never called."""
+        lcd_c.send_hdmi_palette(buf, count)
+
+    def send_hdmi_text_cmds(self, buf, payload_len, width, height, scale=1):
+        """Send a compact "fill rect"/"draw text" command stream (buf,
+        payload_len bytes) instead of raw pixels — the receiver renders it
+        using its own embedded font. width/height describe the logical
+        canvas the command coordinates are relative to. No-op if
+        init_hdmi_output() was never called."""
+        lcd_c.send_hdmi_text_cmds(buf, payload_len, width, height, scale)
+
+    def send_hdmi_bezel_cmds(self, buf, payload_len, width, height, scale=1):
+        """Same wire format as send_hdmi_text_cmds(), tracked independently
+        by the receiver so the bezel's window-centering isn't thrown off by
+        the EMULATOR MENU's much larger canvas. No-op if init_hdmi_output()
+        was never called."""
+        lcd_c.send_hdmi_bezel_cmds(buf, payload_len, width, height, scale)
+
+    def send_hdmi_clear_screen(self):
+        """Clears the whole HDMI screen and resets the receiver's window-
+        centering tracking, independent of any content kind. Call as early
+        as possible in boot so a receiver left powered on across a sender
+        reboot doesn't keep showing stale content. No-op if
+        init_hdmi_output() was never called."""
+        lcd_c.send_hdmi_clear_screen()
+
     def save_pbm(self, path):
         with open(path, "w", encoding="ascii") as f:
             f.write(f"P1\n{self.WIDTH} {self.HEIGHT}\n")

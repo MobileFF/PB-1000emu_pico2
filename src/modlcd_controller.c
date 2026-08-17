@@ -179,6 +179,104 @@ static mp_obj_t mod_lcd_set_colors(mp_obj_t fg_obj, mp_obj_t bg_obj) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_2(mod_lcd_set_colors_obj, mod_lcd_set_colors);
 
+/* lcd_c.init_hdmi_output(cs_pin, baudrate) — optional HDMI bridge output
+   (second Pico 2 + PICO-HDMI-PLUS, see doc/hardware_guide.md §7). Must be
+   called after setup_display() since it reuses the same SPI1 instance. */
+static mp_obj_t mod_lcd_init_hdmi_output(mp_obj_t cs_pin_obj, mp_obj_t baud_obj) {
+  uint8_t cs_pin = (uint8_t)mp_obj_get_int(cs_pin_obj);
+  uint32_t baud = (uint32_t)mp_obj_get_int(baud_obj);
+  lcd_init_hdmi_output(&lcd_state, cs_pin, baud);
+  return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(mod_lcd_init_hdmi_output_obj, mod_lcd_init_hdmi_output);
+
+/* lcd_c.render_to_hdmi() — send the current VRAM/color_vram content to the
+   HDMI bridge, if init_hdmi_output() has been called (no-op otherwise). */
+static mp_obj_t mod_lcd_render_to_hdmi(void) {
+  lcd_render_to_hdmi(&lcd_state);
+  return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(mod_lcd_render_to_hdmi_obj, mod_lcd_render_to_hdmi);
+
+/* lcd_c.send_hdmi_frame(buf, width, height, scale, bpp) — send an arbitrary
+   caller-supplied buffer (row-major, width*height*bpp/8 bytes, e.g. a
+   bytearray) to the HDMI bridge, bypassing the emulated VRAM/color_vram
+   content render_to_hdmi() sends. bpp=8 is a direct RGB332 buffer; bpp in
+   {1,2,4} is palette-indexed (see send_hdmi_palette()). Used by
+   mp/hdmi_menu_mirror.py to mirror the EMULATOR MENU (which draws directly
+   to the physical LCD driver, not through the emulated LCDC) to HDMI. */
+static mp_obj_t mod_lcd_send_hdmi_frame(size_t n_args, const mp_obj_t *args) {
+  mp_buffer_info_t bufinfo;
+  mp_get_buffer_raise(args[0], &bufinfo, MP_BUFFER_READ);
+  uint16_t width = (uint16_t)mp_obj_get_int(args[1]);
+  uint16_t height = (uint16_t)mp_obj_get_int(args[2]);
+  uint8_t scale = (uint8_t)mp_obj_get_int(args[3]);
+  uint8_t bpp = (uint8_t)mp_obj_get_int(args[4]);
+  lcd_send_hdmi_frame(&lcd_state, (const uint8_t *)bufinfo.buf, width, height, scale, bpp);
+  return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(mod_lcd_send_hdmi_frame_obj, 5, 5,
+                                            mod_lcd_send_hdmi_frame);
+
+/* lcd_c.send_hdmi_palette(buf, count) — send a PKT_PALETTE packet (count
+   RGB332 entries) ahead of a send_hdmi_frame() call at bpp < 8. */
+static mp_obj_t mod_lcd_send_hdmi_palette(mp_obj_t buf_obj, mp_obj_t count_obj) {
+  mp_buffer_info_t bufinfo;
+  mp_get_buffer_raise(buf_obj, &bufinfo, MP_BUFFER_READ);
+  uint8_t count = (uint8_t)mp_obj_get_int(count_obj);
+  lcd_send_hdmi_palette(&lcd_state, (const uint8_t *)bufinfo.buf, count);
+  return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(mod_lcd_send_hdmi_palette_obj, mod_lcd_send_hdmi_palette);
+
+/* lcd_c.send_hdmi_text_cmds(buf, payload_len, width, height, scale) — send a
+   PKT_TEXT_CMDS packet (a compact "fill rect"/"draw text" command stream,
+   see ../../hdmi_bridge_receiver/main.c's protocol comment) instead of raw
+   pixels. Used by mp/hdmi_menu_mirror.py to mirror the EMULATOR MENU
+   without needing a pixel-sized buffer on this side. */
+static mp_obj_t mod_lcd_send_hdmi_text_cmds(size_t n_args, const mp_obj_t *args) {
+  mp_buffer_info_t bufinfo;
+  mp_get_buffer_raise(args[0], &bufinfo, MP_BUFFER_READ);
+  uint16_t payload_len = (uint16_t)mp_obj_get_int(args[1]);
+  uint16_t width = (uint16_t)mp_obj_get_int(args[2]);
+  uint16_t height = (uint16_t)mp_obj_get_int(args[3]);
+  uint8_t scale = (uint8_t)mp_obj_get_int(args[4]);
+  lcd_send_hdmi_text_cmds(&lcd_state, (const uint8_t *)bufinfo.buf, payload_len,
+                           width, height, scale);
+  return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(mod_lcd_send_hdmi_text_cmds_obj, 5, 5,
+                                            mod_lcd_send_hdmi_text_cmds);
+
+/* lcd_c.send_hdmi_bezel_cmds(buf, payload_len, width, height, scale) — same
+   wire format as send_hdmi_text_cmds() (PKT_BEZEL_CMDS instead of
+   PKT_TEXT_CMDS), tracked independently by the receiver so the bezel's
+   window-centering isn't thrown off by the EMULATOR MENU's much larger
+   canvas. Used by pb1000.py's _draw_bezel_hdmi(). */
+static mp_obj_t mod_lcd_send_hdmi_bezel_cmds(size_t n_args, const mp_obj_t *args) {
+  mp_buffer_info_t bufinfo;
+  mp_get_buffer_raise(args[0], &bufinfo, MP_BUFFER_READ);
+  uint16_t payload_len = (uint16_t)mp_obj_get_int(args[1]);
+  uint16_t width = (uint16_t)mp_obj_get_int(args[2]);
+  uint16_t height = (uint16_t)mp_obj_get_int(args[3]);
+  uint8_t scale = (uint8_t)mp_obj_get_int(args[4]);
+  lcd_send_hdmi_bezel_cmds(&lcd_state, (const uint8_t *)bufinfo.buf, payload_len,
+                            width, height, scale);
+  return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(mod_lcd_send_hdmi_bezel_cmds_obj, 5, 5,
+                                            mod_lcd_send_hdmi_bezel_cmds);
+
+/* lcd_c.send_hdmi_clear_screen() — clears the whole HDMI screen and resets
+   its window-centering tracking, independent of any content kind. Call as
+   early as possible in boot so a receiver left powered on across a sender
+   reboot doesn't keep showing stale content from the previous session. */
+static mp_obj_t mod_lcd_send_hdmi_clear_screen(void) {
+  lcd_send_hdmi_clear_screen(&lcd_state);
+  return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(mod_lcd_send_hdmi_clear_screen_obj, mod_lcd_send_hdmi_clear_screen);
+
 /* lcd_c.set_scale(num, den=1) */
 static mp_obj_t mod_lcd_set_scale(size_t n_args, const mp_obj_t *args) {
   uint8_t num = (uint8_t)mp_obj_get_int(args[0]);
@@ -330,6 +428,13 @@ static const mp_rom_map_elem_t lcd_c_module_globals_table[] = {
     {MP_ROM_QSTR(MP_QSTR_vdp_write_count), MP_ROM_PTR(&mod_lcd_vdp_write_count_obj)},
     {MP_ROM_QSTR(MP_QSTR_render), MP_ROM_PTR(&mod_lcd_render_obj)},
     {MP_ROM_QSTR(MP_QSTR_wait_for_idle), MP_ROM_PTR(&mod_lcd_wait_for_idle_obj)},
+    {MP_ROM_QSTR(MP_QSTR_init_hdmi_output), MP_ROM_PTR(&mod_lcd_init_hdmi_output_obj)},
+    {MP_ROM_QSTR(MP_QSTR_render_to_hdmi), MP_ROM_PTR(&mod_lcd_render_to_hdmi_obj)},
+    {MP_ROM_QSTR(MP_QSTR_send_hdmi_frame), MP_ROM_PTR(&mod_lcd_send_hdmi_frame_obj)},
+    {MP_ROM_QSTR(MP_QSTR_send_hdmi_palette), MP_ROM_PTR(&mod_lcd_send_hdmi_palette_obj)},
+    {MP_ROM_QSTR(MP_QSTR_send_hdmi_text_cmds), MP_ROM_PTR(&mod_lcd_send_hdmi_text_cmds_obj)},
+    {MP_ROM_QSTR(MP_QSTR_send_hdmi_bezel_cmds), MP_ROM_PTR(&mod_lcd_send_hdmi_bezel_cmds_obj)},
+    {MP_ROM_QSTR(MP_QSTR_send_hdmi_clear_screen), MP_ROM_PTR(&mod_lcd_send_hdmi_clear_screen_obj)},
     {MP_ROM_QSTR(MP_QSTR_vdp_write), MP_ROM_PTR(&mod_lcd_vdp_write_obj)},
     {MP_ROM_QSTR(MP_QSTR_get_num_pages), MP_ROM_PTR(&mod_lcd_get_num_pages_obj)},
     {MP_ROM_QSTR(MP_QSTR_set_num_pages), MP_ROM_PTR(&mod_lcd_set_num_pages_obj)},

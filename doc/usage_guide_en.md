@@ -265,3 +265,31 @@ for what each key means, its default value, and usage examples.
 | Content | R (3 bit) | G (3 bit) | B (2 bit) |
 
 Typical values: `0` = black, `255` = white, `180` (0xB4) = bluish grey, `7` = blue
+
+---
+
+## 11. HDMI Mirror Output (Optional)
+
+Connecting a second Raspberry Pi Pico 2 plus an HDMI output addon (e.g. PICO-HDMI-PLUS) lets you
+mirror the main unit's screen to an HDMI monitor in real time. Has no effect if you don't have
+the addon. See [hardware_guide_en.md](hardware_guide_en.md) §9 for wiring and
+[config_guide_en.md](config_guide_en.md) §14 for the settings.
+
+**Enabling it**: set `[hdmi] enable = true` in `pb1000.ini`, or toggle it ON/OFF from the
+EMULATOR MENU's **Display > HDMI** item ([emulator_menu_guide_en.md](emulator_menu_guide_en.md)
+§5). The EMULATOR MENU toggle takes effect immediately and is also saved to `pb1000.ini`.
+
+**LCD and HDMI are exclusive outputs.** While HDMI is enabled, nothing is drawn to the physical
+LCD (or its status bar) at all — the following are shown exclusively on HDMI instead:
+
+- The game screen (PB-1000's LCD VRAM / the Color VRAM extension) and the bezel
+- The boot-time RAM profile picker
+- The EMULATOR MENU
+
+On the HDMI side, the game screen, bezel, menu, and profile picker are each centered as
+independent layers, so switching between these differently-sized screens never causes them to
+drift out of position relative to each other.
+
+> [!NOTE]
+> For how to obtain/build the receiver firmware, see the independent project
+> [`hdmi_bridge_receiver`](https://github.com/MobileFF/hdmi_bridge_receiver).

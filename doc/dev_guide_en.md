@@ -83,7 +83,8 @@ The central module for CPU control and all peripheral I/O.
 | `load_ram(slot, data)` | Load a RAM binary into the specified slot (0=main RAM, 1..3=expansion RAM banks) |
 | `read_mem(addr)` / `write_mem(addr, val)` | Single-shot memory access at any address (debugging) |
 | `get_ram_view()` / `get_bank_view(n)` / `get_exp_ram_view()` / `get_ext_work_view()` | Zero-copy `bytearray` views onto the corresponding static buffers |
-| `set_has_exp_ram(bool)` | Tell the CPU core whether expansion RAM is present |
+| `set_has_exp_ram(bool)` | Tell the CPU core whether Bank 1 is present (legacy name) |
+| `set_bank_present(bank, bool)` | Tell the CPU core whether Bank 1..3 is present. Once called, subsequent `reset()` calls no longer run the fixed-path auto-detect (`detect_all_banks()`) |
 | `is_sleeping()` | Return whether the CPU is currently in SLP (sleep) state |
 | `set_port_callbacks(read_fn, write_fn)` | Register port I/O callbacks |
 | `set_mem_callbacks(read_fn, write_fn)` | Register memory access callbacks |

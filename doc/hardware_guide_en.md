@@ -153,6 +153,40 @@ def _callback(system, cs):
 
 - Connect the USB keyboard to the Pico's Micro-USB port via a **USB OTG adapter**.
 
+### 9. HDMI Mirror Output (Optional, Second Pico 2)
+
+The main unit's LCD contents can be mirrored to an HDMI monitor using a second Raspberry Pi
+Pico 2 (RP2350) plus an HDMI output addon (e.g. PICO-HDMI-PLUS). It reuses the §7 "External SPI
+Device" mechanism as-is — just add one new CS pin (GP28) onto the SPI1 bus. If you don't have
+the addon, leaving `[hdmi] enable=false` (the default) in `pb1000.ini` has zero effect.
+
+> [!NOTE]
+> The receiver (the second Pico 2) is an independent project, not included in this repo. See
+> [`hdmi_bridge_receiver`](https://github.com/MobileFF/hdmi_bridge_receiver) for how to get/build
+> the firmware and for the receiver's own wiring (HSTX output → HDMI addon).
+> **The receiver requires a Pico 2 (RP2350)** — the HSTX peripheral is RP2350-specific, so a
+> plain Pico/Pico W will not work.
+
+**Wiring (main unit Pico 2 W → receiver Pico 2)**
+
+Shares the same SPI1 bus as the §7 table; only CS is new (GP28).
+
+| Signal | Main Unit Pico 2 W | Receiver Pico 2 | Note |
+| :--- | :--- | :--- | :--- |
+| SCK | GP10 | GP2 | Shared SPI1 |
+| MOSI | GP11 | GP0 | Shared SPI1 (seen as SPI0 RX on the receiver) |
+| CS | **GP28** (new) | GP1 | Receiver's dedicated CS — a new pin that doesn't collide with LCD/SD/touch |
+| GND | GND | GND | Common ground |
+
+For the receiver's own HSTX output (GP12-19) → HDMI addon wiring, see the receiver project's
+documentation.
+
+**Configuration**: the `[hdmi]` section of `pb1000.ini` (see [config_guide_en.md](config_guide_en.md)
+§14), or toggle ON/OFF from the EMULATOR MENU's Display > HDMI item
+([emulator_menu_guide_en.md](emulator_menu_guide_en.md) §5). **LCD and HDMI are exclusive
+outputs** — while HDMI is enabled, the physical LCD stops updating and everything is shown on
+HDMI instead (see [usage_guide_en.md](usage_guide_en.md) §11).
+
 ## Wiring Considerations
 
 - **SPI Sharing**: The CS (Chip Select) pins must be independent for the LCD, SD, and Touch. Ensure all CS pins are pulled HIGH initially in code to avoid bus contention.

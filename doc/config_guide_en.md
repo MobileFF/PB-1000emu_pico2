@@ -246,6 +246,30 @@ Implementation: `mp/main.py`.
 
 ---
 
+## 14. `[hdmi]`
+
+Settings for the optional HDMI mirror output feature, which uses a second Raspberry Pi Pico 2
+plus an HDMI output addon. If you don't have the addon, leaving `enable = false` (the default)
+has zero effect. See [hardware_guide_en.md](hardware_guide_en.md) §9 for wiring and receiver
+firmware details.
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `enable` | `false` | Enable HDMI mirror output. Can also be toggled and saved from the EMULATOR MENU (Display > HDMI). |
+| `cs_pin` | `28` | The extra SPI1 CS pin (GPIO number) used to talk to the receiver. GP28 is recommended (the only free GPIO — see §7). |
+| `baudrate` | `10000000` | SPI communication speed with the receiver (Hz). Can be raised if the wiring is solid. |
+| `frame_skip` | `1` | How many frames pass between sends to the HDMI side. `1` = every frame. PB-1000's transfer volume is small enough that `1` should normally be fine. |
+
+**LCD and HDMI are exclusive outputs** (never both active at once). When `enable=true`, nothing
+is drawn to the physical LCD — the game screen, the EMULATOR MENU, and the boot-time profile
+picker are all shown on HDMI instead. See [usage_guide_en.md](usage_guide_en.md) §11 for details.
+
+Implementation: `mp/main.py` (boot-time init); `mp/emulator_menu.py` (`_do_hdmi_toggle` — live
+ON/OFF toggle and saving to `pb1000.ini`); `mp/pb1000.py` (`update_display()` — LCD/HDMI
+exclusivity); `src/lcd_controller.c` (`lcd_init_hdmi_output()`/`lcd_render_to_hdmi()`).
+
+---
+
 ## See Also
 
 - Feature-by-feature usage: `usage_guide_en.md`

@@ -241,6 +241,29 @@ st7796.y_offset = -4
 
 ---
 
+## 14. `[hdmi]`
+
+第2の Raspberry Pi Pico 2 ＋ HDMI出力アドオンを使った、オプションのHDMIミラー出力機能の設定です。
+アドオンを持たない場合は `enable = false`（デフォルト）のままで一切影響しません。
+配線・受信側ファームウェアの詳細は [hardware_guide.md](hardware_guide.md) §9 を参照してください。
+
+| キー | デフォルト | 説明 |
+| --- | --- | --- |
+| `enable` | `false` | HDMIミラー出力を有効にする。EMULATOR MENU（Display > HDMI）からも切り替え・保存可能 |
+| `cs_pin` | `28` | 受信側との通信に使う追加SPI1 CSピン（GPIO番号）。GP28固定を推奨（唯一の空きGPIO、§7参照） |
+| `baudrate` | `10000000` | 受信側とのSPI通信速度（Hz）。配線がしっかりしていれば上げられる |
+| `frame_skip` | `1` | 何フレームに1回HDMI側へ送信するか。`1`＝毎フレーム。PB-1000の転送量は元々小さいため通常は`1`のままで問題ない |
+
+**LCDとHDMIは排他出力**です（同時に両方へは描画されません）。`enable=true`のとき、物理LCDへの
+描画は行われず、ゲーム画面・EMULATOR MENU・起動時のプロファイル選択画面のすべてがHDMI側に
+表示されます。詳細は [usage_guide.md](usage_guide.md) §11。
+
+実装: `mp/main.py`（起動時の初期化）、`mp/emulator_menu.py`（`_do_hdmi_toggle`、ON/OFFの
+即時切り替えと `pb1000.ini` への保存）、`mp/pb1000.py`（`update_display()`、LCD/HDMI排他制御）、
+`src/lcd_controller.c`（`lcd_init_hdmi_output()`/`lcd_render_to_hdmi()`）。
+
+---
+
 ## 参考
 
 - 個別機能の使い方: `usage_guide.md`

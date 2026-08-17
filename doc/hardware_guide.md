@@ -152,6 +152,41 @@ def _callback(system, cs):
 
 - USB キーボードを **USB OTG アダプタ** を介して Pico の Micro-USB ポートに接続します。
 
+### 9. HDMI ミラー出力（オプション、第2 Pico 2 使用）
+
+本体の LCD 表示内容を、第2の Raspberry Pi Pico 2 (RP2350) ＋ HDMI 出力アドオン
+（PICO-HDMI-PLUS 等）を使ってHDMIモニターへミラー表示できます。§7 の「外部 SPI デバイス」の
+仕組みをそのまま使い、SPI1 バスに新設の CS ピン（GP28）を追加するだけで接続できます。
+アドオンを持たない場合、`pb1000.ini` の `[hdmi] enable=false`（デフォルト）のままにしておけば
+一切影響しません。
+
+> [!NOTE]
+> 受信側（第2 Pico 2）は本プロジェクトに含まれない独立プロジェクトです。ファームウェアの
+> 入手方法・ビルド方法・受信側自体の配線（HSTX 出力 → HDMI アドオン）は
+> [`hdmi_bridge_receiver`](https://github.com/MobileFF/hdmi_bridge_receiver) を参照してください。
+> **受信側は Pico 2 (RP2350) が必須です**（HSTX ペリフェラルが RP2350 専用のため、無印 Pico /
+> Pico W では動作しません）。
+
+**配線（本体側 Pico 2 W → 受信側 Pico 2）**
+
+§7 の表と同じ SPI1 バスを共有し、CS のみ新設の GP28 を使います。
+
+| 信号 | 本体側 Pico 2 W | 受信側 Pico 2 | 備考 |
+| :--- | :--- | :--- | :--- |
+| SCK | GP10 | GP2 | SPI1 共有 |
+| MOSI | GP11 | GP0 | SPI1 共有（受信側からは SPI0 RX として見える） |
+| CS | **GP28**（新設） | GP1 | 受信側専用 CS。LCD/SD/タッチと衝突しない専用ピンを新設 |
+| GND | GND | GND | 共通グランド |
+
+受信側の HSTX 出力（GP12–19）→ HDMI アドオン間の配線は受信側プロジェクトのドキュメントを
+参照してください。
+
+**設定**: `pb1000.ini` の `[hdmi]` セクション（詳細は [config_guide.md](config_guide.md) §14）、
+または EMULATOR MENU の Display > HDMI から ON/OFF を切り替えます
+（[emulator_menu_guide.md](emulator_menu_guide.md) §5）。**LCD と HDMI は排他出力**で、HDMI 有効時は
+物理 LCD への描画が止まり、画面はすべて HDMI 側に表示されます（[usage_guide.md](usage_guide.md)
+§11 参照）。
+
 ## 配線上の注意点
 
 - **SPI 共有**: LCD、SD、タッチパネルの CS (チップセレクト) ピンは独立している必要があります。バスの衝突を避けるために、起動時にすべての CS ピンを HIGH に設定してください。

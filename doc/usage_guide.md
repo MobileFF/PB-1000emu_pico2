@@ -261,3 +261,30 @@ path     = /sd/disks/disk1.img
 
 設定値の意味・省略時のデフォルト・記述例は `pb1000.ini` 内のコメントおよび
 [config_guide.md](config_guide.md) を参照してください。
+
+---
+
+## 11. HDMIミラー出力（オプション）
+
+第2の Raspberry Pi Pico 2 ＋ HDMI出力アドオン（PICO-HDMI-PLUS 等）を接続すると、本体の
+画面表示をHDMIモニターへリアルタイムでミラー表示できます。アドオンを持たない場合は
+影響しません。配線は [hardware_guide.md](hardware_guide.md) §9、設定項目は
+[config_guide.md](config_guide.md) §14 を参照してください。
+
+**有効化**: `pb1000.ini` の `[hdmi] enable = true`、または EMULATOR MENU の
+**Display > HDMI** から ON/OFF を切り替えられます（[emulator_menu_guide.md](emulator_menu_guide.md)
+§5）。EMULATOR MENUからの切り替えはその場で即座に反映され、`pb1000.ini` にも保存されます。
+
+**LCDとHDMIは排他出力**です。HDMIが有効な間、物理LCD（およびステータスバー）への描画は
+一切行われず、次の画面すべてがHDMI側にのみ表示されます:
+
+- ゲーム画面（PB-1000のLCD VRAM・Color VRAM拡張）とベゼル
+- 起動時のRAMプロファイル選択画面
+- EMULATOR MENU
+
+HDMI側では、ゲーム画面・ベゼル・メニュー・プロファイル選択画面がそれぞれ独立したレイヤーとして
+中央寄せ表示されるため、画面サイズの異なるこれらの内容を切り替えても位置がずれることはありません。
+
+> [!NOTE]
+> 受信側ファームウェアの入手・ビルド方法は、独立プロジェクトの
+> [`hdmi_bridge_receiver`](https://github.com/MobileFF/hdmi_bridge_receiver) を参照してください。

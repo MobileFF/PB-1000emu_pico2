@@ -118,10 +118,47 @@ def main():
     ui_timeout_ms = get_int(global_cfg, "profile", "ui_timeout_ms")
 
     display = display_ret[0] if isinstance(display_ret, tuple) else display_ret
-    selected = select_profile_ui(display, profiles, default_profile, ui_timeout_ms)
+
+    # Optional HDMI mirroring for the profile picker (see mp/hdmi_menu_mirror.py
+    # and pb1000.py's update_display() for the exclusive LCD/HDMI policy this
+    # matches). This runs before create_system()/system.lcd exist, so a
+    # throwaway LCDControllerC is constructed just to reach the HDMI bridge —
+    # it only needs `display` (auto-discovers SPI/CS/DC from it), not any
+    # profile/config state. create_system() constructs the real system.lcd
+    # and re-runs init_hdmi_output() afterward regardless (idempotent).
+    # Uses global_cfg (not yet profile-specific — no profile is chosen yet).
+    profile_display = display
+    _early_lcd = None
+    if get_bool(global_cfg, "hdmi", "enable"):
+        try:
+            from lcd_controller_c import LCDControllerC
+            _early_lcd = LCDControllerC(display, debug=False)
+            _early_lcd.init_hdmi_output(
+                get_int(global_cfg, "hdmi", "cs_pin"),
+                get_int(global_cfg, "hdmi", "baudrate"),
+            )
+            # The receiver Pico2 stays powered on independently — if the
+            # main unit was just reset, whatever it last showed is still
+            # sitting in the receiver's framebuf. Clear it here, as early
+            # in boot as HDMI can possibly be reached, before anything else
+            # gets drawn (see lcd_send_hdmi_clear_screen()'s docstring for
+            # why this is a dedicated packet rather than a big rect sent
+            # through the normal text-cmds path).
+            _early_lcd.send_hdmi_clear_screen()
+            from hdmi_menu_mirror import create as _create_hdmi_mirror
+            _mirror = _create_hdmi_mirror(display, _early_lcd)
+            if _mirror is not None:
+                profile_display = _mirror
+        except Exception as _e:
+            print(f"Profile picker HDMI mirror setup failed: {_e}")
+
+    selected = select_profile_ui(profile_display, profiles, default_profile, ui_timeout_ms)
     profile_dir = get_profile_dir(selected) if selected else None
     print(f"Profile: {selected or '(none)'}")
-    display.fill_rect(0, 0, display.width, display.height, 0x0000)
+    if _early_lcd is None:
+        display.fill_rect(0, 0, display.width, display.height, 0x0000)
+    # else: HDMI was the active output for the picker — physical LCD was
+    # never touched, matching the exclusive-display policy; nothing to clear.
 
     # USB keyboard input isn't needed again until the interactive main loop
     # starts — configure_usb_keyboard_routing() (called right after
@@ -196,6 +233,30 @@ def main():
             key_map=_joy_key_map,
         )
         print("Joystick input enabled.")
+
+    # Optional HDMI bridge output (second Pico 2 + PICO-HDMI-PLUS addon).
+    # Opt-in, zero impact on users without the addon — see doc/hardware_guide.md
+    # §7 and pb1000.ini's [hdmi] section. Must come after create_system()
+    # (system.lcd) since it reuses the LCD's already-initialized SPI1 bus.
+    # cs_pin/baud are stashed on system even when disabled so the EMULATOR
+    # MENU's HDMI toggle (emulator_menu.py _do_hdmi_toggle) can turn it on
+    # live later without needing to re-read pb1000.ini.
+    system._hdmi_enabled = get_bool(cfg, "hdmi", "enable")
+    system._hdmi_frame_skip = max(1, get_int(cfg, "hdmi", "frame_skip") or 1)
+    system._hdmi_cs_pin = get_int(cfg, "hdmi", "cs_pin")
+    system._hdmi_baud = get_int(cfg, "hdmi", "baudrate")
+    if system._hdmi_enabled:
+        system.lcd.init_hdmi_output(system._hdmi_cs_pin, system._hdmi_baud)
+        print(f"HDMI bridge output enabled (CS=GP{system._hdmi_cs_pin}, "
+              f"{system._hdmi_baud/1e6:.1f}MHz, frame_skip={system._hdmi_frame_skip})")
+        # create_system() already called system.lcd.set_display_scale(),
+        # which draws the bezel — but that happened before _hdmi_enabled
+        # was known above, so it only reached the real LCD. Draw it to
+        # HDMI now that HDMI is actually ready; otherwise the bezel would
+        # never appear on HDMI until some later event (menu close, LCD
+        # height toggle) happened to call force_full_redraw()/
+        # _on_lcd_scale_change().
+        system._draw_bezel_hdmi(system.lcd.scale)
 
     # Step 9: Hardware setup
     # Release the pre-reserved buffer to create a contiguous 32KB free region

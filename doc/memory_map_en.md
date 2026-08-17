@@ -58,7 +58,15 @@ UA bits 5-4   Bank   Buffer       Access    File
 ```
 
 - **Bank 0** (ROM1) is always present (`has_bank[0] = true`).
-- **Banks 1–3** (expanded RAM) are enabled only when the corresponding `ramN.bin` file exists (`has_bank[N] = true`). If the file is absent, the bank behaves as unmapped (reads 0xFF).
+- **Banks 1–3** (expanded RAM): the buffer space (`bank1_buf`..`bank3_buf`) is always reserved at
+  boot since 2026-08, so switching to a profile that uses more banks can actually load them.
+  `has_bank[1..3]` (the CPU-visible presence flag) is *not* pinned to always-true, though — it's
+  re-evaluated on every profile switch from that profile's `ramN.bin` presence, and mirrored to the C
+  core via `set_bank_present()`/`set_has_exp_ram()`. This matters because a real bank-presence probe
+  (write then read back — an absent bank always reads back 0xFF regardless of what was written, see
+  `c_mem_direct_read`) should see a result consistent with what the loaded profile represents, not a
+  permanently-faked "card present". A profile without `ramN.bin` for a slot gets that bank filled with
+  0xFF (same value an absent bank reads as) rather than leaking the previous profile's contents.
 - Bank selection formula: `bank = (REG_UA >> 4) & 0x03` (consistent in both C and Python).
 
 ---

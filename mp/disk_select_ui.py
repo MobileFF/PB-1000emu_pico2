@@ -5,6 +5,8 @@ Presents a list of .img files on the LCD (ILI9341/ST7796) during emulation.
 import os
 import time
 
+from hdmi_menu_mirror import hdmi_flush
+
 
 # ---- helpers (mirrored from boot_session.py) ---------------------------------
 
@@ -13,12 +15,18 @@ def _swap16(c):
 
 
 def _draw_text(display, x, y, text, fg, bg=0x0000):
-    import framebuf
     W = display.width
     max_chars = (W - x) // 8
     text = text[:max_chars]
     if not text:
         return
+    record = getattr(display, 'record_text', None)
+    if record is not None:
+        # HDMIMirrorDisplay: record a compact text command instead of
+        # rasterizing to pixels (see hdmi_menu_mirror.py).
+        record(x, y, text, fg, bg)
+        return
+    import framebuf
     tw = len(text) * 8
     buf = bytearray(tw * 8 * 2)
     fb = framebuf.FrameBuffer(buf, tw, 8, framebuf.RGB565)
@@ -160,6 +168,7 @@ def select_disk_ui(display, images, current_path):
                 elif sc == 0x29:    # BREAK — cancel
                     return False
 
+            hdmi_flush(display)
             time.sleep_ms(30)
 
     except Exception as e:

@@ -1778,9 +1778,30 @@ static MP_DEFINE_CONST_FUN_OBJ_0(mod_lcd_clear_read_queue_obj, mod_lcd_clear_rea
 static mp_obj_t mod_set_has_exp_ram(mp_obj_t enable_obj) {
   has_bank[1]    = mp_obj_is_true(enable_obj);
   has_bank_forced = true;
+  static uint8_t * const bank_bufs[3] = {bank1_buf, bank2_buf, bank3_buf};
+  cpu_state.bank_ptr[1] = has_bank[1] ? bank_bufs[0] : NULL;
   return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(mod_set_has_exp_ram_obj, mod_set_has_exp_ram);
+
+/* hd61700.set_bank_present(bank, bool)  bank: 1..3 — forces bank presence so
+   the CPU's direct memory path (c_mem_direct_read/write, which gates on the
+   has_bank[] global) and bank_ptr[] fast-path pointer both see the bank as
+   wired, independent of detect_all_banks()'s fixed-path file probe (which
+   only checks /roms or /sd, not per-profile save directories). Setting any
+   bank via this call (or set_has_exp_ram) latches has_bank_forced so a later
+   reset() never re-runs detect_all_banks() and silently reverts banks 2/3. */
+static mp_obj_t mod_set_bank_present(mp_obj_t bank_obj, mp_obj_t enable_obj) {
+  int bank = mp_obj_get_int(bank_obj);
+  if (bank < 1 || bank > 3) return mp_const_none;
+  bool enable = mp_obj_is_true(enable_obj);
+  has_bank[bank] = enable;
+  has_bank_forced = true;
+  static uint8_t * const bank_bufs[3] = {bank1_buf, bank2_buf, bank3_buf};
+  cpu_state.bank_ptr[bank] = enable ? bank_bufs[bank - 1] : NULL;
+  return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(mod_set_bank_present_obj, mod_set_bank_present);
 
 /* ---- CAL hook dispatcher ---- */
 
@@ -2312,6 +2333,8 @@ static const mp_rom_map_elem_t hd61700_module_globals_table[] = {
      MP_ROM_PTR(&mod_get_ext_work_view_obj)},
     {MP_ROM_QSTR(MP_QSTR_set_has_exp_ram),
      MP_ROM_PTR(&mod_set_has_exp_ram_obj)},
+    {MP_ROM_QSTR(MP_QSTR_set_bank_present),
+     MP_ROM_PTR(&mod_set_bank_present_obj)},
     {MP_ROM_QSTR(MP_QSTR_set_call_hook),
      MP_ROM_PTR(&mod_set_call_hook_obj)},
     {MP_ROM_QSTR(MP_QSTR_clear_call_hook),

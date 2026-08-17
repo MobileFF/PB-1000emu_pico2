@@ -83,7 +83,8 @@ CPU コアの制御と周辺 I/O 全般を担う中心モジュール。主な A
 | `load_ram(slot, data)` | RAM バイナリをロード（slot: 0=標準RAM, 1..3=拡張RAMバンク） |
 | `read_mem(addr)` / `write_mem(addr, val)` | 任意アドレスへの単発メモリアクセス（デバッグ用） |
 | `get_ram_view()` / `get_bank_view(n)` / `get_exp_ram_view()` / `get_ext_work_view()` | 各種静的バッファへのゼロコピー `bytearray` ビューを取得 |
-| `set_has_exp_ram(bool)` | 拡張 RAM の有無を CPU コアへ通知 |
+| `set_has_exp_ram(bool)` | Bank 1 の有無を CPU コアへ通知（後方互換名） |
+| `set_bank_present(bank, bool)` | Bank 1..3 の有無を CPU コアへ通知。呼ぶと以後の `reset()` はファイルパス自動検出（`detect_all_banks()`）を行わなくなる |
 | `is_sleeping()` | CPU が SLP（スリープ）状態かを返す |
 | `set_port_callbacks(read_fn, write_fn)` | ポート I/O コールバック登録 |
 | `set_mem_callbacks(read_fn, write_fn)` | メモリアクセスコールバック登録 |

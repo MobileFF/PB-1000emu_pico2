@@ -15,6 +15,7 @@ from emulator_menu import (
     _BG, _FG, _HDR, _FTR, _SEL_BG, _SEL_FG, _WARN, _S_ON, _S_OFF,
     _HDR_H, _FTR_H, _ROW_H,
 )
+from hdmi_menu_mirror import hdmi_flush
 
 _RAM_BASE = "/sd/rams"
 
@@ -83,6 +84,7 @@ def _pick_save_dir(display, dirs, current_dir):
                 return 'existing', _RAM_BASE + "/" + all_items[cursor]
             elif sc == 0x29:
                 return None, None
+        hdmi_flush(display)
         time.sleep_ms(30)
 
 
@@ -177,6 +179,7 @@ def _pick_ram_dir(display, dirs, current_dir):
                 return _RAM_BASE + "/" + dirs[cursor]
             elif sc == 0x29:                            # BRK
                 return None
+        hdmi_flush(display)
         time.sleep_ms(30)
 
 
@@ -535,6 +538,7 @@ def _do_hook_status(system, display):
             elif sc == 0x51 and scroll + max_vis < len(lines):  # DOWN
                 scroll += 1
                 _redraw()
+        hdmi_flush(display)
 
 
 def _do_cpu_status(system, display):
@@ -677,4 +681,5 @@ def _do_cpu_status(system, display):
             elif sc == 0x51 and scroll + max_vis < len(lines):  # DOWN
                 scroll += 1
                 _redraw()
+        hdmi_flush(display)
         time.sleep_ms(30)
