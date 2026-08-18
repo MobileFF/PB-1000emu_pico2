@@ -34,6 +34,22 @@ date heading instead of a version number or "Unreleased" marker.
     See that project's documentation (Japanese/English) for the protocol spec, wiring, and
     build instructions (also linked from this project's `hdmi_bridge/README.md`).
 
+### Fixed
+
+- `mp/sdcard.py` / `mp/xpt2046.py` (touch panel): fixed a bug where the
+  `self.spi.init(baudrate=...)` call made right before SD card / touch panel access only
+  reset the baud rate — the SPI communication mode (CPOL/CPHA) was left however it had last
+  been set. Root cause: a documented-nowhere MicroPython behavior discovered in the sibling
+  MSX_emu_pico2 project's `mp/sdcard.py` — `spi_set_format()` is only called when `polarity`/
+  `phase` are passed explicitly (see `references/sdcard_spi_mode_bug.md` for the full writeup).
+  With the new HDMI mirror output (mode 3) enabled, accessing the SD card or touch panel could
+  hit read timeouts, corrupted data, or garbled touch coordinates due to the mode mismatch.
+  Fixed by explicitly adding `polarity=0, phase=0` at every call site (6 in `sdcard.py`, 2 in
+  `xpt2046.py`). Since the HDMI mirror output feature is itself new in this batch of work and
+  has never shipped in a released build, this code path was never actually reachable in any
+  previous release — so it's recorded here as part of the HDMI feature rather than as a
+  standalone bug fix.
+
 ### Documentation
 
 - `doc/hardware_guide_en.md` / JA: added a new section 9 covering HDMI mirror output wiring

@@ -54,8 +54,13 @@ class SDCard:
         self.init_card(baudrate)
 
     def init_card(self, baudrate):
-        # Set SPI to low-speed mode for initial card handshake (400kHz or less)
-        self.spi.init(baudrate=400000)
+        # Set SPI to low-speed mode for initial card handshake (400kHz or less).
+        # polarity/phase are passed explicitly (not just baudrate) so this always
+        # forces mode 0 regardless of what another SPI1-bus user (e.g. the HDMI
+        # bridge, mode 3) left the hardware in — see
+        # references/sdcard_spi_mode_bug.md for why baudrate-only .init() does
+        # NOT reset CPOL/CPHA on this MicroPython port.
+        self.spi.init(baudrate=400000, polarity=0, phase=0)
         self.cs.init(self.cs.OUT, value=1)
 
         # delay at least 1ms:
@@ -112,7 +117,7 @@ class SDCard:
                 pass
 
         # set to high data rate now that it's initialised
-        self.spi.init(baudrate=self.restore_baudrate)
+        self.spi.init(baudrate=self.restore_baudrate, polarity=0, phase=0)
 
     def init_card_v1(self):
         for i in range(_CMD_TIMEOUT):
@@ -234,7 +239,7 @@ class SDCard:
         self.spi.write(b"\xff")
 
     def readblocks(self, block_num, buf):
-        self.spi.init(baudrate=self.baudrate)
+        self.spi.init(baudrate=self.baudrate, polarity=0, phase=0)
         try:
             nblocks = len(buf) // 512
             assert nblocks and not len(buf) % 512, "Buffer length is invalid"
@@ -262,10 +267,10 @@ class SDCard:
                 if self.cmd(12, 0, 0xFF, skip1=True) != 0:
                     raise OSError(5)  # EIO
         finally:
-            self.spi.init(baudrate=self.restore_baudrate)
+            self.spi.init(baudrate=self.restore_baudrate, polarity=0, phase=0)
 
     def writeblocks(self, block_num, buf):
-        self.spi.init(baudrate=self.baudrate)
+        self.spi.init(baudrate=self.baudrate, polarity=0, phase=0)
         try:
             nblocks = len(buf) // 512
             assert nblocks and not len(buf) % 512, "Buffer length is invalid"
@@ -289,7 +294,7 @@ class SDCard:
                     nblocks -= 1
                 self.write_token(_TOKEN_STOP_TRAN)
         finally:
-            self.spi.init(baudrate=self.restore_baudrate)
+            self.spi.init(baudrate=self.restore_baudrate, polarity=0, phase=0)
 
     def ioctl(self, op, arg):
         if op == 4:  # get number of blocks
