@@ -277,15 +277,21 @@ def main():
     print("[MEM] before load_state: free=%d alloc=%d  banks=%s" %
           (gc.mem_free(), gc.mem_alloc(),
            ''.join(str(i) for i in range(1, 4) if system.has_bank[i])))
-    # restore_cpu_state=False: unattended boot must never be able to get stuck
-    # resuming a bad/inconsistent save with no way to reach the menu to
-    # recover — restore RAM only and reset the CPU (PC=0x0000), same as
-    # before full-resume support existed. Full CPU-state resume (PC/UA/
-    # registers included) is only available via the emulator menu's
-    # user-initiated "RAM Load", which the user can retry with a different
-    # save or interrupt with a power cycle if it goes wrong. See load_state()
-    # in pb1000.py.
-    system.load_state(restore_cpu_state=False)  # Restore RAM from profile dir (or default path)
+    # restore_cpu_state defaults to True (see load_state() in pb1000.py): boot
+    # now does the same full CPU-state resume (PC/UA/registers included) as
+    # the emulator menu's "RAM Load", so selecting a profile at the picker
+    # resumes exactly where RAM Save left off, with no forced reset.
+    #
+    # This was previously hardcoded to restore_cpu_state=False specifically
+    # here, out of concern that an unattended boot (picker times out with
+    # nobody at the keyboard) could resume a bad/inconsistent save with no
+    # way to reach the menu to recover -- see git history around 2026-08-13
+    # for that reasoning if this needs revisiting. Note the separate
+    # "Startup sleep detected" guard a little further below (within the
+    # first 1.5s of the main loop) already provides some protection against
+    # exactly that scenario regardless of this setting: it force-resets if
+    # the CPU comes up stuck sleeping with KEY_INT disabled.
+    system.load_state()  # Restore RAM + registers from profile dir (or default path)
     gc.collect()
     print("[MEM] after  load_state: free=%d alloc=%d" %
           (gc.mem_free(), gc.mem_alloc()))
@@ -375,8 +381,24 @@ def main():
             print("[DEBUG] newall=True (F12 press/release trace only)")
 
     system.power_on()
-    print(f"System initialized. PC={system.pc:#06x}")
+    print(f"System initialized. PC={system.pc:#06x} UA={system.ua:#04x}")
     print("Interactive Mode: USB keyboard input enabled.")
+
+    # Now that load_state() resumes mid-program (see the restore_cpu_state
+    # comment above) instead of always resetting to PC=0x0000, the resumed
+    # program isn't guaranteed to touch VRAM/the LCD control port again
+    # right away -- previously, resuming from PC=0x0000 meant the ROM's own
+    # boot sequence naturally redrew everything as a side effect of running
+    # from the start. The LCD hardware's own pixel VRAM (as opposed to the
+    # ROM's LEDTP text-screen buffer in ram0.bin, which load_state() already
+    # restored) is never part of the save file at all -- see
+    # refresh_lcd_from_ledtp()'s docstring -- so without this, vram would
+    # still be sitting exactly as lcd_init() zeroed it, and the physical
+    # screen would just stay blank until whatever the resumed program
+    # happens to do next touches the display. Rebuild vram from the
+    # (correctly-restored) LEDTP first, then push it out immediately.
+    system.refresh_lcd_from_ledtp()
+    system.force_full_redraw()
 
     # Step 10: FuncKeyBar (LCKEY..CALC image + touch)
     fkbar = None

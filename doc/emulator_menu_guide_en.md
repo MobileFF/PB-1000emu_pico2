@@ -116,7 +116,8 @@ before turning this on if you want to verify it.
 | :--- | :--- |
 | **Hook Status** | A read-only screen listing which extensions (modules under `mp/ext/`, etc.) are currently active |
 | **CPU Status** | A read-only screen showing the current CPU registers (PC, flags, UA, IA/IB/IE, IX-KY, $0-$31) plus a raw byte dump and disassembly around PC |
-| **Reset** | Perform a hardware-style reset on the spot — the same as pressing NumLock on a real keyboard |
+| **Reset** | Reset the **emulated PB-1000** on the spot — the same as pressing NumLock on a real keyboard. The Pico itself does not restart. |
+| **Reboot Emulator (MCU)** | Hardware-reboot **the Pico itself** via `machine.reset()` — see the warning below |
 | **NEW ALL (clear memory)** | Run the PB-1000's NEW ALL function, which erases all user memory |
 
 > [!WARNING]
@@ -124,8 +125,16 @@ before turning this on if you want to verify it.
 > (EXE: yes / BRK: no) is shown first — be careful not to trigger it by accident. This action
 > cannot be undone.
 
+> [!WARNING]
+> **Reboot Emulator (MCU) is not the same as Reset — it actually reboots the Pico itself.** A
+> confirmation screen is shown first, but **any progress not already written out via RAM Save
+> will be lost** (the entire boot sequence re-runs from the profile picker onward). Use **RAM
+> Save** beforehand if you need to keep your progress. This exists as a way to recover when the
+> emulator has frozen or hung badly enough that nothing else works.
+
 **Reset** runs immediately with no confirmation screen, and the EMULATOR MENU closes
-automatically afterward (matching the real hardware's NumLock key).
+automatically afterward (matching the real hardware's NumLock key). **Reboot Emulator (MCU)**
+differs here — it goes through a confirmation screen (EXE: yes / BRK: no) first.
 
 Inside the **Hook Status** / **CPU Status** screens, Up/Down scrolls the list; BREAK returns to
 the System sub-menu.

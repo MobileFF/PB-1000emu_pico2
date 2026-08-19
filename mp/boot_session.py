@@ -120,6 +120,24 @@ def select_profile_ui(display, profiles, default, timeout_ms=30000, sd_mounted=F
                 gc.collect()
                 deadline = time.ticks_add(time.ticks_ms(), timeout_ms)
                 _draw_profile_ui(display, profiles, sel, timeout_ms, scroll)
+            elif sc == 0x45:  # F12 — bail out to the REPL without booting
+                # Recovery escape hatch: a freshly-flashed main.py could have a
+                # bug that hangs later in boot or in the interactive loop,
+                # which would otherwise leave no way back to the REPL short of
+                # a BOOTSEL + flash_nuke.uf2 wipe (main.py auto-runs on every
+                # boot, so a hang there blocks any mpremote reconnect). This
+                # screen runs before ROM/RAM loading or CPU startup, so it's
+                # the safest point to offer a clean way out. Raises
+                # SystemExit (not caught by the `except Exception` below, or
+                # by main()'s own try/except — see its docstring) so it
+                # unwinds straight out of main() to the REPL, running this
+                # function's `finally` block (HDMI clear) on the way.
+                if _confirm_exit_to_repl(display):
+                    print("[Boot] F12: exiting to REPL without booting.")
+                    import sys
+                    sys.exit()
+                deadline = time.ticks_add(time.ticks_ms(), timeout_ms)
+                _draw_profile_ui(display, profiles, sel, timeout_ms, scroll)
 
             hdmi_flush(display)
             time.sleep_ms(50)
@@ -221,7 +239,32 @@ def _draw_profile_ui(display, profiles, sel, timeout_ms, scroll=0):
 
         # Footer
         secs = (timeout_ms + 999) // 1000
-        _draw_text(display, 4, H - 12, f"UP/DN+ENTER  F1:Setup  Auto:{secs}s", 0x7BEF)
+        _draw_text(display, 4, H - 12, f"UP/DN+ENTER F1:Setup F12:Exit Auto:{secs}s", 0x7BEF)
 
     except Exception as e:
         print(f"[Boot] Draw error: {e}")
+
+
+def _confirm_exit_to_repl(display):
+    """F12's Yes/No prompt (EXE=yes, BRK=no). Blocking, like setup_menu.py's
+    _confirm() -- kept as a separate minimal copy here rather than importing
+    setup_menu (which this screen otherwise only loads lazily on F1, see its
+    comment about not paying for that module's heap unless actually used)."""
+    import hd61700
+    W, H = display.width, display.height
+    y0 = H // 2 - 14
+    display.fill_rect(0, 0, W, H, 0x0000)
+    _draw_text(display, 4, y0 + 4, "Exit to REPL without booting?", 0xFFE0)
+    _draw_text(display, 4, y0 + 16, "EXE:yes  BRK:no", 0x7BEF)
+    hdmi_flush(display)
+    prev_sc = -1
+    while True:
+        sc = hd61700.get_last_key()
+        if sc != prev_sc:
+            prev_sc = sc
+            if sc == 0x28:   # EXE
+                return True
+            elif sc == 0x29: # BRK
+                return False
+        hdmi_flush(display)
+        time.sleep_ms(30)

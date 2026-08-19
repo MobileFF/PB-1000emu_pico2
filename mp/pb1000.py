@@ -706,10 +706,16 @@ class PB1000System:
 
     def _ext_load_modules(self):
         """ext/ ディレクトリの拡張モジュールを自動ロードする。
-        /sd/ext/ と /ext/ の両方を対象にマージしてロードする。
-        同名モジュールが両方にある場合は /sd/ext/ 側を優先し、
-        /ext/ 側は無視する(sys.path も /sd/ext を先に登録するため、
-        import 解決自体が自然に SD 優先になる)。
+        <プロファイル>/ext/ (選択中のRAMプロファイル配下、存在する場合のみ)・
+        /sd/ext/ ・/ext/ の3箇所を対象にマージしてロードする。
+        同名モジュールが複数箇所にある場合はこの優先順位（プロファイル別 >
+        /sd/ext/ > /ext/）に従い、他は無視する(sys.path もこの順で登録するため、
+        import 解決自体が自然にこの優先順位になる)。
+        プロファイル別 ext/ は、特定のRAMプロファイルでだけ有効にしたい
+        パッチ的な拡張（例: forex_pb_inkey_patch.py を FOREX_PB プロファイル
+        選択時のみロードする等）のために用意している。他のプロファイルを
+        選んだ場合や、プロファイル未選択（profile_dir なし）の場合は
+        単純にスキャン対象から外れるため、ロードされない。
         .py と .mpy の両方を候補として認識する(.mpy のみを認識しない
         既存実装は 2026-08-13 の不具合報告で判明)。同一ディレクトリに
         両方存在する場合は __import__() 自身の解決規則がそのまま働き、
@@ -719,13 +725,25 @@ class PB1000System:
         """
         import os, sys, gc
         mod_sources = {}  # mod_name -> ext_dir (最初に見つかった = 優先されるディレクトリ)
-        for ext_dir in ("/sd/ext", "/ext"):
+        ext_dirs = []
+        if self.profile_dir:
+            ext_dirs.append(self.profile_dir + "/ext")
+        ext_dirs += ["/sd/ext", "/ext"]
+
+        # sys.path へは優先順位と逆順で insert(0, ...) する -- insert(0,...) は
+        # 呼ぶたびに以前の内容を後ろへ押し出すため、最後に insert したものが
+        # 結果的に sys.path の先頭に来る。ext_dirs をそのままの順で insert すると
+        # 優先順位が逆転してしまう(最下位の /ext が sys.path[0] になる)ため、
+        # reversed() で処理して mod_sources 側の優先順位と一致させる。
+        for ext_dir in reversed(ext_dirs):
+            if ext_dir not in sys.path:
+                sys.path.insert(0, ext_dir)
+
+        for ext_dir in ext_dirs:
             try:
                 files = os.listdir(ext_dir)
             except OSError:
                 continue
-            if ext_dir not in sys.path:
-                sys.path.insert(0, ext_dir)
             for fname in sorted(files):
                 if fname.startswith("_"):
                     continue
@@ -891,7 +909,7 @@ class PB1000System:
         root_path = "/" + filename
 
         if self.sd_mounted:
-            if filename in ("ram0.bin", "ram1.bin", "ram2.bin", "ram3.bin", "regs.json"):
+            if filename in ("ram0.bin", "ram1.bin", "ram2.bin", "ram3.bin", "regs.json", "color_vram.bin"):
                 if self._file_exists(sd_path):
                     return sd_path
                 if self._file_exists(roms_path):
@@ -1164,6 +1182,27 @@ class PB1000System:
                 print(f"Error saving RAM{slot}: {e}")
                 sys.print_exception(e)
 
+        # Color VRAM (VDP extension, src/lcd_controller.c's lcd_state.color_vram)
+        # is, like mono vram, a separate C buffer never touched by ram0.bin/
+        # regs.json -- see refresh_lcd_from_ledtp()'s docstring for the mono-
+        # vram equivalent of this gap. Unlike mono vram there's no ROM routine
+        # that rebuilds it from something already in RAM (it's stamped
+        # incrementally by write_vram_pixel_byte() as the program draws, or
+        # bulk-loaded via the bank-RAM DMA registers / vram_loader.py's SD/FDD
+        # loader), so it has to be captured as its own file. Only written when
+        # VDP is actually active, to avoid a 12KB file for the common case of
+        # a program that never uses it.
+        try:
+            if self.lcd.vdp_enabled and lcd_c is not None:
+                cv_path = self._get_storage_path("color_vram.bin") if path is None else f"{path}/color_vram.bin"
+                cvram = lcd_c.get_color_vram()
+                with open(cv_path, "wb") as f:
+                    f.write(cvram)
+                print(f"Color VRAM saved: {cv_path} ({len(cvram)} bytes)")
+        except Exception as e:
+            print(f"Error saving Color VRAM: {e}")
+            sys.print_exception(e)
+
         try:
             regs = {
                 "pc": int(cpu_core.get_pc()),
@@ -1401,6 +1440,27 @@ class PB1000System:
                 print(f"RAM slot {slot}: no save for this profile, filled 0xFF")
             gc.collect()
 
+        # Color VRAM (VDP extension) -- see save_state()'s comment for why this
+        # needs its own file. Only restored if this profile actually saved one;
+        # otherwise explicitly disable VDP (not just "leave it as-is") so a mid-
+        # session profile switch via RAM Load can't leave a previous profile's
+        # VDP state active over content that never used it.
+        try:
+            cv_path = self._get_storage_path("color_vram.bin") if path is None else f"{path}/color_vram.bin"
+            if lcd_c is not None and self._file_exists(cv_path):
+                cvram = lcd_c.get_color_vram()
+                with open(cv_path, "rb") as f:
+                    n = f.readinto(cvram)
+                self.lcd.set_vdp_enable(True)
+                if hasattr(lcd_c, "set_vdp_init_done"):
+                    lcd_c.set_vdp_init_done(True)
+                print(f"Color VRAM restored: {cv_path} ({n} bytes)")
+            elif lcd_c is not None:
+                self.lcd.set_vdp_enable(False)
+        except Exception as e:
+            print(f"Error loading Color VRAM: {e}")
+            sys.print_exception(e)
+
         try:
             if self._file_exists(reg_path):
                 if reg_path.endswith(".json"):
@@ -1486,6 +1546,58 @@ class PB1000System:
         except Exception as e:
             print(f"Error loading registers: {e}")
             sys.print_exception(e)
+
+    _LEDTP_ADDR = 0x6201     # references/rom0.src: LCD dot-matrix buffer (LEDTP)
+    _LEDTP_RAM_OFF = _LEDTP_ADDR - 0x6000
+    _SCTOP_RAM_OFF = 0x68C9 - 0x6000   # references/sysvars.txt: SCTOP, actual screen top
+
+    def refresh_lcd_from_ledtp(self):
+        """Reconstruct the LCD hardware's own pixel VRAM (lcd_state.vram in
+        src/lcd_controller.c) from LEDTP -- the ROM's software text-screen
+        buffer, which (unlike vram) *is* part of ram0.bin and so *is*
+        correctly restored by load_state().
+
+        Why this is needed: the PB-1000 only ever writes to its LCD through
+        dedicated I/O port instructions (STL/PPO/STLM/etc. in hd61700.c),
+        never through plain memory stores -- so vram lives in a separate C
+        struct (lcd_state_t) that load_state() never touches. Normally the
+        ROM's own boot code (from PC=0x0000) rebuilds vram as a side effect
+        of drawing the boot screen; a full CPU-state resume starts mid-
+        program instead, and unless the resumed code happens to redraw
+        something on its own, vram is left however lcd_init() zeroed it,
+        so nothing appears on screen despite RAM/registers being correct.
+
+        This replicates the ROM's own DOTDS routine (&H022C, see
+        references/rom0.src around 022E and mp/ext/dotds_64dot.py's
+        _dotds_override(), which does the same transfer for a different
+        reason -- its 64-dot-mode override -- and was the reference for
+        this implementation): copy the currently-visible window of LEDTP
+        (LEDTP + 6*SCTOP, get_num_pages()*192 bytes) into vram via
+        blit_reversed() (matching the bit order lcd_write() itself applies),
+        mark it dirty, and send the same LCD-ON sequence power_on() sends
+        (DOTDS always ends with one, and vram starting blank means
+        display_on may not be set yet either).
+
+        Pure data movement -- reads RAM directly (no hd61700.read_mem(),
+        which has UART-visible side effects) and never touches CPU
+        registers/PC, so it's safe to call right after a full-state
+        load_state() without disturbing the resumed program's state."""
+        if lcd_c is None or not hasattr(cpu_core, "get_ram_view"):
+            return
+        try:
+            ram_mv = memoryview(cpu_core.get_ram_view())
+            sctop = ram_mv[self._SCTOP_RAM_OFF]
+            length = lcd_c.get_num_pages() * 192
+            src_off = self._LEDTP_RAM_OFF + 6 * sctop
+            if src_off < 0 or src_off + length > len(ram_mv):
+                return  # out-of-range SCTOP (e.g. a corrupt save) -- leave vram as-is
+            lcd_c.blit_reversed(ram_mv[src_off:src_off + length], 0)
+            lcd_c.mark_dirty()
+            self.lcd.lcd_ctrl(0xDF)   # OP=1 (command mode), CE=3 (both chips)
+            self.lcd.lcd_write(0x14)  # LCD ON
+            self.lcd.lcd_ctrl(0xDE)   # OP=0 (back to data mode)
+        except Exception as e:
+            print(f"refresh_lcd_from_ledtp failed: {e}")
 
     def step(self, cycles=100, stop_pc=-1):
         return cpu_core.execute(int(cycles), int(stop_pc))
@@ -1753,21 +1865,22 @@ class PB1000System:
         cpu_core.set_input(cpu_core.SW, 1)
         if hasattr(cpu_core, "set_pc"):
             current_pc = cpu_core.get_pc()
+            current_ua = cpu_core.get_reg8(3)
             if force_reset and force_power_on:
                 raise ValueError("force_reset and force_power_on cannot both be true")
 
             if force_reset:
                 cpu_core.set_pc(0x0000)
-                print("System forced to reset entry (PC=0x0000)")
+                print(f"System forced to reset entry (PC=0x0000 UA={current_ua:#04x})")
             elif force_power_on:
                 cpu_core.set_pc(0x0001)
-                print("System forced to power-on entry (PC=0x0001)")
+                print(f"System forced to power-on entry (PC=0x0001 UA={current_ua:#04x})")
             elif current_pc == 0x0001:
-                 print("System power on at power-on entry (PC=0x0001)")
+                 print(f"System power on at power-on entry (PC=0x0001 UA={current_ua:#04x})")
             elif current_pc == 0x0000:
-                 print("System power on at reset entry (PC=0x0000)")
+                 print(f"System power on at reset entry (PC=0x0000 UA={current_ua:#04x})")
             else:
-                print(f"System resumed at PC={current_pc:#06x}")
+                print(f"System resumed at PC={current_pc:#06x} UA={current_ua:#04x}")
 
         self.lcd.lcd_ctrl(0xDF) # OP=1, CE=3 (Both chips)
         self.lcd.lcd_write(0x14)

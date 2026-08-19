@@ -103,14 +103,30 @@ near the end of this document for details.
 
 `sample/mp/ext/` contains ready-to-use sample extensions (`dht20.py` — DHT20 temperature/humidity
 sensor, `ram_test.py`, etc.), but these are **not** auto-loaded unless copied into `mp/ext/`
-(`_ext_load_modules()` only scans `/ext/` and `/sd/ext/`; `sample/` is never scanned). These, too,
-are purely optional add-ons that only take effect once copied in.
+(`_ext_load_modules()` only scans `<profile>/ext/`, `/sd/ext/`, and `/ext/`; `sample/` is never
+scanned). These, too, are purely optional add-ons that only take effect once copied in.
 
-On the Pico 2, place files under `/ext/` or `/sd/ext/` (SD card takes priority).
+On the Pico 2, place files under `/ext/` or `/sd/ext/` (see the priority order below).
 
 ### Auto-Load Mechanism
 
-At startup, `_ext_load_modules()` scans the `ext/` directory and imports each file with `__import__`. If a module defines `register(system)`, that function is called. That is all.
+At startup (after profile selection), `_ext_load_modules()` scans the following three
+directories and imports each file with `__import__`. If a module defines `register(system)`,
+that function is called.
+
+| Priority | Directory | Purpose |
+| :--- | :--- | :--- |
+| 1 (highest) | `<selected RAM profile>/ext/` (e.g. `/sd/rams/FOREX_PB/ext/`) | Extensions meant to be active **only for that one profile**. Never scanned at all when no profile is selected or a different profile is active |
+| 2 | `/sd/ext/` | SD card extensions (shared across all profiles) |
+| 3 (lowest) | `/ext/` | Internal flash extensions (shared across all profiles) |
+
+If the same module name exists in more than one of these, this priority order decides which one
+wins; the rest are ignored (`sys.path` is populated in this same priority order too, so plain
+`import` resolution naturally agrees).
+
+A per-profile `ext/` is meant for program-specific patches — e.g. enabling
+`forex_pb_inkey_patch.py` only when the `FOREX_PB` profile is loaded. Unlike placing the same
+file under `/sd/ext/` or `/ext/`, it has zero effect when any other profile is running.
 
 Both `.py` and precompiled `.mpy` (via `mpy-cross`) files are recognized for auto-loading. If
 both exist for the same module name, `.py` always wins, per MicroPython's own import

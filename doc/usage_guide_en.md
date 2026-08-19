@@ -50,9 +50,49 @@ Configuration priority (low → high): flash `/pb1000.ini` → `/sd/pb1000.ini` 
 1. Power on the Pico 2.
 2. The **profile selection UI** appears, listing subdirectories found under `/sd/rams/`.
    - Use Up/Down arrow keys or touch to select a profile, then press Enter/EXE to confirm.
+     If there are more profiles than fit on screen, it scrolls automatically.
    - After a 30-second timeout the `default_profile` value is selected automatically.
+   - **F1**: opens the BIOS-style setup menu (see below).
+   - **F12**: after a confirmation prompt, exits to the MicroPython REPL without booting (see
+     below).
 3. The selected profile's saved state is loaded automatically, and the PB-1000 LCD bezel appears.
 4. If no state files are found, a cold boot (fresh start) is performed.
+
+### BIOS-Style Setup Menu (F1)
+
+Pressing **F1** on the profile selection screen opens a BIOS-style setup menu
+(`mp/setup_menu.py`) that lets you edit `pb1000.ini` directly on the device's own screen. It
+runs at the safest possible point — before any ROM/RAM loading or CPU startup — and is a
+separate, independent menu from the EMULATOR MENU (Win+F7, only reachable while the emulator is
+running).
+
+1. **Pick a target file**: the internal flash's `/pb1000.ini`, the SD card's `/sd/pb1000.ini`
+   (shown only if the SD card is mounted), or any RAM profile's `pb1000.ini`.
+2. **Edit keys**: Up/Down selects a row, EXE edits it (bool keys toggle ON/OFF with EXE; enum
+   keys cycle through choices with EXE or Left/Right; int/str keys open a numeric/text entry
+   screen via EXE). BS clears that key's setting (unset = falls back to the default).
+   - Only the more commonly-used keys are shown by default (toggle `Show ALL keys` to ON to see
+     everything).
+   - Flash-only keys — such as everything under `[hdmi]` (see [config_guide_en.md](config_guide_en.md)
+     §1) — are hidden while editing an SD-card or per-profile ini, since they'd be ignored at
+     load time anyway.
+3. **Save & Exit (reset)**: writes the changes to the chosen ini file and, after a confirmation
+   prompt, calls `machine.reset()` to reboot the device. The boot sequence that follows reads
+   the new configuration from scratch.
+4. **Discard & Back**: discards any changes and returns to the profile selection screen (a
+   confirmation prompt appears if there are unsaved changes).
+
+### F12: Exit to REPL (Development/Recovery)
+
+Pressing **F12** on the profile selection screen brings up a confirmation prompt; choosing Yes
+safely aborts `main.py`'s execution and returns to the MicroPython REPL (no ROM/RAM loading or
+CPU startup happens at all).
+
+This is a development/recovery shortcut. Since `main.py` auto-runs on every boot, a bug lurking
+later in boot or in the interactive loop could freeze or crash there and block REPL access
+entirely — recovery would then require a full wipe via BOOTSEL mode + `flash_nuke.uf2`. F12
+provides an "escape hatch" that's always safe to use as long as you can still reach this screen
+(before any ROM/RAM loading or CPU startup).
 
 ---
 
@@ -187,6 +227,8 @@ Press **F11** to save the current session state to the active profile directory.
 - `ram1.bin`: Expanded RAM1 (when enabled)
 - `ram2.bin` / `ram3.bin`: Expanded RAM2 / RAM3 (Bank2 / Bank3, when enabled)
 - `regs.json`: CPU registers (PC, flags, general-purpose registers)
+- `color_vram.bin`: Color VRAM (VDP, 192x64 = 12,288 B; only saved when the program actually
+  uses VDP)
 
 ### RAM Save / Load (Emulator Menu)
 
@@ -196,15 +238,22 @@ Press **F11** to save the current session state to the active profile directory.
 - **RAM Load does not reset the CPU — execution resumes from the exact PC/registers captured
   by RAM Save.** Since PC is not forced back to 0x0000, a game or program continues right
   where it left off.
-- This full-state resume only happens when RAM Load is explicitly chosen from the EMULATOR
-  MENU. Auto-Load (below) intentionally stays conservative in case a save turns out corrupt.
 
 ### Auto-Load
 
 On startup, the emulator loads the state files from the selected profile directory
-automatically. If no files are present, a cold boot is performed. This path only restores RAM
-contents and always resets to PC=0x0000 (unlike the emulator menu's RAM Load), so an
-unattended boot can never get stuck resuming a bad save with no way to reach the menu.
+automatically. If no files are present, a cold boot is performed. Just like the EMULATOR MENU's
+RAM Load, **this does not reset the CPU — execution resumes from the exact PC/registers that
+were saved.**
+
+> [!NOTE]
+> In earlier versions, Auto-Load alone stayed conservative — restoring RAM contents only and
+> always resetting to PC=0x0000 — specifically to avoid an unattended boot (the profile picker
+> timing out with nobody at the keyboard) getting stuck resuming a bad/inconsistent save with no
+> way to reach the menu. It's now unified with the EMULATOR MENU's RAM Load behavior (full
+> resume). As a safety net for the unattended case, a separate mechanism still exists: within
+> the first 1.5 seconds of the main loop, if the CPU comes up stuck sleeping with KEY_INT
+> disabled, it force-resets (the "Startup sleep detected" guard in `mp/main.py`).
 
 ---
 

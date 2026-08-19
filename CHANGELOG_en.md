@@ -11,6 +11,35 @@ date heading instead of a version number or "Unreleased" marker.
 
 ### Added
 
+- **Extension (ext) module auto-loading now supports per-RAM-profile directories**
+  (`_ext_load_modules()` in `mp/pb1000.py`). Previously only `/sd/ext/` and `/ext/` were
+  scanned; added `<profile>/ext/` (e.g. `/sd/rams/FOREX_PB/ext/`), scanned at the *highest*
+  priority. This lets a program-specific patch extension (e.g. enabling
+  `forex_pb_inkey_patch.py` only when the `FOREX_PB` profile is loaded) ship without affecting
+  any other profile at all. Priority when the same module name appears in more than one place:
+  per-profile > `/sd/ext/` > `/ext/`.
+  Also fixed how that priority gets reflected into `sys.path`: the code called
+  `sys.path.insert(0, ...)` in priority order, but since each `insert(0, ...)` pushes everything
+  already there further back, that actually reversed the intended priority — a latent bug only
+  observable when the same module name exists in more than one location, caught while adding
+  this third directory.
+- Added **Reboot Emulator (MCU)** to the EMULATOR MENU's System sub-menu
+  (`mp/emulator_menu.py`, with a confirmation prompt). The existing **Reset** item only resets
+  the emulated PB-1000 side (equivalent to the real hardware's NumLock key) — the Pico itself
+  (the MCU) never restarts. This new item is a distinctly different, more severe action: it
+  calls `machine.reset()` to actually hardware-reboot the Pico. It exists as a way to recover
+  when the emulator has frozen or hung badly enough that nothing else works. Since any progress
+  not already written out via RAM Save is lost, it goes through a confirmation screen first
+  (the same severity as NEW ALL).
+- Added an **F12: Exit to REPL (don't boot)** shortcut to the boot-time profile picker
+  (`mp/boot_session.py`, with a confirmation prompt). A freshly-flashed `main.py` with a bug
+  that only surfaces later in boot or in the interactive loop would otherwise block REPL access
+  entirely, since `main.py` auto-runs on every boot — leaving no way to recover short of a
+  BOOTSEL + `flash_nuke.uf2` full wipe. (This risk is exactly why `main.py` had, until now,
+  deliberately never been copied to flash — testing always went through `mpremote run` instead.)
+  Pressing F12 on this screen — which runs before ROM/RAM loading or CPU startup, the safest
+  point available — raises `SystemExit` to cleanly unwind out of `main()` back to the REPL. This
+  makes it practical to actually deploy `main.py` to flash for testing.
 - **HDMI mirror output** (headline feature): with a second Raspberry Pi Pico 2 plus an HDMI
   output addon (e.g. PICO-HDMI-PLUS), the main unit's LCD contents can now be mirrored to an
   HDMI monitor in real time. Opt-in by design — has zero effect on anyone without the addon
@@ -68,9 +97,59 @@ date heading instead of a version number or "Unreleased" marker.
   wrap around to the last profile moved the selection past the drawn range entirely, so the
   highlight simply never appeared anywhere. Fixed by adopting the same "scroll offset follows
   the cursor" approach the EMULATOR MENU already uses (`_run_menu()` in `emulator_menu.py`).
+- **Boot-time profile selection now does the same full resume as the EMULATOR MENU's RAM Load**
+  (PC/registers restored, no reset) (`mp/main.py`). When full-state RAM Load resume was added on
+  2026-08-13, boot's own auto-load was deliberately kept conservative by explicitly passing
+  `system.load_state(restore_cpu_state=False)` — restoring RAM only and resetting to PC=0x0000 —
+  out of concern that an unattended boot (the picker timing out with nobody at the keyboard)
+  could resume a bad/inconsistent save with no way to reach the menu to recover. In practice,
+  though, that safeguard applied uniformly to both the timeout case and an explicit Enter-key
+  selection, so selecting a profile at the picker never actually resumed exactly where RAM Save
+  left off, as intended. Changed to use `load_state()`'s own default (`restore_cpu_state=True`),
+  so boot now matches the EMULATOR MENU's RAM Load behavior. A separate safety net for the
+  unattended case still exists: within the first 1.5 seconds of the main loop, if the CPU comes
+  up stuck sleeping with KEY_INT disabled, it force-resets (the "Startup sleep detected" guard).
+  - This change surfaced a bug where the screen right after resume just stayed at whatever it
+    showed before the load (a black screen), never updating. Root cause wasn't timing — it's that
+    **the LCD hardware's own pixel buffer** (`lcd_state.vram` in `src/lcd_controller.c`) **was
+    never part of RAM Save/Load's saved files at all.** The PB-1000 only ever accesses its LCD
+    through the HD61700's dedicated I/O port instructions (STL/PPO/STLM/etc. — not plain memory
+    stores to `ram0.bin`), so `vram` lives in a C struct completely separate from `ram0.bin`,
+    which `load_state()` never touches. Normally the ROM's own boot code (running from PC=0x0000)
+    rebuilds `vram` as a side effect; resuming mid-program instead means it stays exactly as
+    `lcd_init()` zeroed it unless the resumed program happens to draw something on its own.
+    Meanwhile `LEDTP` (`&H6201`-`&H6800`) — the ROM's own text-screen management buffer — lives in
+    plain RAM (part of `ram0.bin`, correctly restored) and gets transferred into `vram` by the
+    ROM's own DOTDS routine (`&H022C`, see `references/rom0.src`). Added
+    `system.refresh_lcd_from_ledtp()` (`mp/pb1000.py`) replicating that same transfer — pure data
+    movement, never touches CPU registers — called right after `power_on()` and before
+    `force_full_redraw()`, both at boot (`main.py`) and in the EMULATOR MENU's RAM Load
+    (`emulator_menu_ext.py`'s `_do_ram_load()`). The transfer logic was modeled on the existing
+    64-dot-mode DOTDS replacement (`_dotds_override()` in `mp/ext/dotds_64dot.py`), differing from
+    it by correctly accounting for SCTOP (scroll position) — the 64-dot version deliberately
+    ignores SCTOP for its own purposes, so it couldn't be reused as-is. No C changes needed
+    (reuses the existing `lcd_c.blit_reversed()`/`get_num_pages()`/`mark_dirty()`); Python-only.
+  - The same kind of gap existed for **Color VRAM** (the VDP extension, `lcd_state.color_vram`),
+    fixed alongside this. Unlike mono vram, color VRAM has no equivalent of "LEDTP" — plain RAM
+    content it can be rebuilt from — since it's either stamped incrementally by
+    `write_vram_pixel_byte()` as the program draws, or bulk-written directly via the bank-RAM→
+    color-VRAM DMA registers or `vram_loader.py`'s SD/FDD loader. The only way to capture it is
+    as its own file. `save_state()` now writes `color_vram.bin` (12,288 B) whenever VDP is
+    actually active (`system.lcd.vdp_enabled`); `load_state()` reads it back and restores the
+    VDP-enabled/VDP-initialized flags if present, and explicitly disables VDP if not (so
+    switching profiles mid-session via RAM Load can't leave a previous profile's VDP state active
+    over content that never used it). Since `lcd_c.get_color_vram()` already returns a direct
+    reference to `lcd_state.color_vram`, no C changes were needed here either.
 
 ### Documentation
 
+- `doc/usage_guide_en.md` / JA: added previously-undocumented coverage of the **F1 BIOS-style
+  setup menu** (`mp/setup_menu.py` — picking a target file, editing keys, the reset-on-save
+  behavior, Discard) and **F12: exit to REPL** (the development/recovery escape hatch) to §2
+  "Boot Flow". Also noted that the profile picker now scrolls automatically. Updated the
+  "Auto-Load" section to match boot now doing the same full resume as RAM Load (the old
+  behavior is kept as a note for context). Added `color_vram.bin` (VDP only) to the saved-file
+  list in §8 "State Management".
 - `doc/hardware_guide_en.md` / JA: added a new section 9 covering HDMI mirror output wiring
   (main unit Pico 2 W ↔ receiver Pico 2, the new GP28 CS pin) and a link to the receiver
   project.
@@ -85,9 +164,13 @@ date heading instead of a version number or "Unreleased" marker.
   Also fixed the menu-layout diagram's stale Display description ("change on-screen colors" —
   it was never updated when LCD Height was added in an earlier session) to
   "colors, resolution, and HDMI output" (a pre-existing documentation gap, not something
-  introduced by this session's feature work).
+  introduced by this session's feature work). Added a **Reboot Emulator (MCU)** row to the
+  System sub-menu table too, with a warning clarifying how it differs from the existing
+  **Reset** (which only affects the emulated PB-1000 side).
 - `mp/pb1000.ini`: updated the `[hdmi]` section's comment to reference the new section 9 in
   `hardware_guide.md`, and added a note that the section is flash-only.
+- `doc/extension_api.md` / `_en.md`: documented the `<profile>/ext/` directory and the
+  three-way priority order (per-profile > `/sd/ext/` > `/ext/`).
 
 ---
 

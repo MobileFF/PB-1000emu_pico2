@@ -214,6 +214,15 @@ def _do_ram_load(system, display):
         # power_on() (no force_reset/force_power_on) re-runs the LCD control
         # port power-on sequence and SW input line without touching PC.
         system.power_on()
+        # vram (the LCD hardware's own pixel buffer) isn't part of the save
+        # file and load_state() never touches it -- see
+        # refresh_lcd_from_ledtp()'s docstring in pb1000.py. Without this,
+        # whatever was already on screen before RAM Load just stays there
+        # (masking the gap here, unlike at boot, since there's no reset to
+        # make it obvious) until the resumed program's own logic happens to
+        # redraw something.
+        system.refresh_lcd_from_ledtp()
+        system.force_full_redraw()
         return "RAM loaded: " + selected.rsplit("/", 1)[-1]
     except Exception as e:
         return f"!! RAM load error: {e}"

@@ -154,6 +154,7 @@ def _build_system_items(system):
         {'id': 'loop_idle',   'label': 'Loop Idle (ms)',
          'badge': str(getattr(system, '_loop_idle_ms', '?')), 'badge_color': _FG},
         {'id': 'reset',       'label': 'Reset'},
+        {'id': 'reboot_mcu',  'label': 'Reboot Emulator (MCU)'},
         {'id': 'newall',      'label': 'NEW ALL (clear memory)'},
     ]
 
@@ -569,6 +570,24 @@ def _do_reset(system):
     return "Reset executed"
 
 
+def _do_reboot_mcu(display):
+    """Full hardware reboot of the Pico itself (machine.reset()) -- distinct
+    from _do_reset() above, which only resets the emulated PB-1000 CPU core
+    and leaves the Pico/MicroPython session running. This re-runs the whole
+    boot sequence from scratch (profile picker, ROM/RAM load, etc.), so any
+    progress not already written out via RAM Save is lost."""
+    if not _confirm(display, "Reboot emulator (MCU)?",
+                     "Unsaved progress will be lost"):
+        return ""
+    display.fill_rect(0, 0, display.width, display.height, _BG)
+    _draw_text(display, 4, display.height // 2 - 4, "Rebooting...", _S_ON)
+    hdmi_flush(display)
+    time.sleep_ms(400)
+    import machine
+    machine.reset()
+    return ""  # unreachable
+
+
 def _do_newall(system, keyboard_input, display):
     """Queue the NEW ALL matrix key (Win+F12 on real HW) after confirmation.
 
@@ -875,6 +894,8 @@ def _dispatch_system(item_id, system, display, keyboard_input):
     if item_id == 'reset':
         # main loop must resume stepping from PC=0
         return _do_reset(system), True
+    if item_id == 'reboot_mcu':
+        return _do_reboot_mcu(display), True
     if item_id == 'newall':
         msg = _do_newall(system, keyboard_input, display)
         # Queued — exit menu so main loop resumes CPU stepping and the
