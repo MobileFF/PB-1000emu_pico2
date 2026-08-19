@@ -36,6 +36,24 @@
 
 実装: `mp/pb1000.py` の `_read_early_ini_sections()` / `init_display()`。
 
+### 例外2: セクション丸ごとフラッシュ限定(`[hdmi]`)
+
+`[hdmi]` セクションは**丸ごと**、内蔵フラッシュの `/pb1000.ini` でのみ有効です。
+`/sd/pb1000.ini` やプロファイル別 ini に `[hdmi]` を書いても、`load_config()`が
+マージの時点で無視します(§1冒頭の優先順位マージには**従いません**)。固定のハードウェア
+配線に関する設定であり、SDカードやプロファイルごとに変わる性質のものではないための
+制限です。EMULATOR MENU の HDMI トグルも常に `/pb1000.ini` へ書き戻します
+(`mp/emulator_menu.py` の `_save_hdmi_enable()`)。
+
+上記の「例外1」(`[display]`/`[touch]` の一部キー)とは実装が異なります。あちらは
+SDカードがマウントされる**前**に読む(`_read_early_ini_sections()`)ことで自然に
+SD/プロファイルiniの影響を受けない仕組みですが、`[hdmi]` の値はSDマウント後
+(プロファイル選択前後)に必要になるため、そのタイミングでは既にSDが読める状態です。
+そのため代わりに `mp/config.py` の `load_config()` 内で `[hdmi]` セクションを
+明示的にスキップする(`_FLASH_ONLY_SECTIONS`)方式を取っています。
+
+実装: `mp/config.py` の `load_config()` / `_FLASH_ONLY_SECTIONS`。
+
 ---
 
 ## 2. `[display]`
@@ -246,6 +264,11 @@ st7796.y_offset = -4
 第2の Raspberry Pi Pico 2 ＋ HDMI出力アドオンを使った、オプションのHDMIミラー出力機能の設定です。
 アドオンを持たない場合は `enable = false`（デフォルト）のままで一切影響しません。
 配線・受信側ファームウェアの詳細は [hardware_guide.md](hardware_guide.md) §9 を参照してください。
+
+> [!IMPORTANT]
+> **このセクションは丸ごと内蔵フラッシュ限定です**（§1「例外2」参照）。`/sd/pb1000.ini` や
+> プロファイル別 ini に `[hdmi]` を書いても無視されます。EMULATOR MENU からの保存も常に
+> `/pb1000.ini` へ書き戻されます。
 
 | キー | デフォルト | 説明 |
 | --- | --- | --- |

@@ -152,7 +152,9 @@ def main():
         except Exception as _e:
             print(f"Profile picker HDMI mirror setup failed: {_e}")
 
-    selected = select_profile_ui(profile_display, profiles, default_profile, ui_timeout_ms)
+    sd_mounted = display_ret[2] if isinstance(display_ret, tuple) and len(display_ret) >= 3 else False
+    selected = select_profile_ui(profile_display, profiles, default_profile, ui_timeout_ms,
+                                  sd_mounted=sd_mounted)
     profile_dir = get_profile_dir(selected) if selected else None
     print(f"Profile: {selected or '(none)'}")
     if _early_lcd is None:
@@ -390,12 +392,17 @@ def main():
 
     # Step 11: Main loop constants from config
     frame_interval_ms     = get_int(cfg, "emulator", "frame_interval_ms")
-    active_step_count     = get_int(cfg, "emulator", "active_step_count")
     sleep_poll_ms         = get_int(cfg, "emulator", "sleep_poll_ms")
     step_timer_tick_steps = get_int(cfg, "emulator", "step_timer_tick_steps")
     timer_tick_ms         = get_int(cfg, "emulator", "timer_tick_ms")
-    loop_idle_ms          = get_int(cfg, "emulator", "loop_idle_ms")
     step_chunk            = get_int(cfg, "emulator", "step_chunk")
+
+    # active_step_count / loop_idle_ms live on `system` (not plain locals)
+    # so the EMULATOR MENU's Speed controls (System > CPU Steps/Slice, Loop
+    # Idle) can adjust them at runtime -- the loop below reads them fresh
+    # every iteration, so a menu edit takes effect on the very next slice.
+    system._active_step_count = get_int(cfg, "emulator", "active_step_count")
+    system._loop_idle_ms      = get_int(cfg, "emulator", "loop_idle_ms")
 
     tick_step_accum = 0
     frame_time = time.ticks_ms()
@@ -431,7 +438,7 @@ def main():
 
             tick_step_accum += run_cpu_slice(
                 system,
-                active_steps=active_step_count,
+                active_steps=system._active_step_count,
                 sleep_ms=sleep_poll_ms,
                 step_chunk=step_chunk,
                 extra_svc=_uart_kbd_drain,
@@ -506,7 +513,7 @@ def main():
                     timer_tick_steps=step_timer_tick_steps,
                 )
 
-            time.sleep_ms(loop_idle_ms)
+            time.sleep_ms(system._loop_idle_ms)
 
     except KeyboardInterrupt:
         print("\nEmulator stopped by user.")

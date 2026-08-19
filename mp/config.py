@@ -116,8 +116,21 @@ def load_ini(path):
     return result
 
 
-def _merge(base, override):
+# Sections that describe fixed hardware wiring rather than a per-SD-card or
+# per-profile preference. Honored only from the flash-root /pb1000.ini (plus
+# built-in defaults) -- an [hdmi] section in /sd/pb1000.ini or a per-profile
+# pb1000.ini is ignored entirely, never merged in. (Real incident this
+# guards against: an [hdmi] enable=true left over in /sd/pb1000.ini kept
+# silently re-enabling HDMI even after the flash-root ini was changed to
+# enable=false, since /sd/pb1000.ini normally outranks it in the priority
+# chain above.)
+_FLASH_ONLY_SECTIONS = {"hdmi"}
+
+
+def _merge(base, override, skip_sections=()):
     for section, kv in override.items():
+        if section in skip_sections:
+            continue
         base.setdefault(section, {}).update(kv)
 
 
@@ -125,9 +138,9 @@ def load_config(profile_dir=None):
     """Load and merge all config files in priority order."""
     cfg = {s: dict(kv) for s, kv in _DEFAULTS.items()}
     _merge(cfg, load_ini("/pb1000.ini"))
-    _merge(cfg, load_ini("/sd/pb1000.ini"))
+    _merge(cfg, load_ini("/sd/pb1000.ini"), skip_sections=_FLASH_ONLY_SECTIONS)
     if profile_dir:
-        _merge(cfg, load_ini(profile_dir + "/pb1000.ini"))
+        _merge(cfg, load_ini(profile_dir + "/pb1000.ini"), skip_sections=_FLASH_ONLY_SECTIONS)
     return cfg
 
 

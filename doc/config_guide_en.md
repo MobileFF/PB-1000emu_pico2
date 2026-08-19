@@ -38,6 +38,26 @@ can be overridden from the SD card or a per-profile ini.
 
 Implementation: `_read_early_ini_sections()` / `init_display()` in `mp/pb1000.py`.
 
+### Exception 2: an entire section is flash-only (`[hdmi]`)
+
+The **entire** `[hdmi]` section is honored only from the internal flash's
+`/pb1000.ini`. Writing an `[hdmi]` section to `/sd/pb1000.ini` or a
+per-profile ini has no effect — `load_config()` skips it at merge time (it
+does **not** follow the priority chain at the top of §1). This is a
+hardware-wiring setting, not something that should vary by SD card or
+profile. The EMULATOR MENU's HDMI toggle also always writes back to
+`/pb1000.ini` (`_save_hdmi_enable()` in `mp/emulator_menu.py`).
+
+This uses a different mechanism from "Exception 1" above (`[display]`/
+`[touch]`'s early keys). That one naturally avoids SD/profile-ini influence
+by reading before the SD card is mounted (`_read_early_ini_sections()`), but
+`[hdmi]`'s values aren't needed until after the SD card is mounted (around
+profile selection), by which point SD is already readable. So instead,
+`load_config()` in `mp/config.py` explicitly skips the `[hdmi]` section
+(`_FLASH_ONLY_SECTIONS`).
+
+Implementation: `load_config()` / `_FLASH_ONLY_SECTIONS` in `mp/config.py`.
+
 ---
 
 ## 2. `[display]`
@@ -252,6 +272,11 @@ Settings for the optional HDMI mirror output feature, which uses a second Raspbe
 plus an HDMI output addon. If you don't have the addon, leaving `enable = false` (the default)
 has zero effect. See [hardware_guide_en.md](hardware_guide_en.md) §9 for wiring and receiver
 firmware details.
+
+> [!IMPORTANT]
+> **This entire section is flash-only** (see §1 "Exception 2"). An `[hdmi]` section in
+> `/sd/pb1000.ini` or a per-profile ini is ignored. Saving from the EMULATOR MENU also always
+> writes back to `/pb1000.ini`.
 
 | Key | Default | Description |
 | --- | --- | --- |

@@ -34,25 +34,36 @@ def get_profile_dir(name):
     return PROFILE_ROOT + "/" + name
 
 
-def select_profile_ui(display, profiles, default, timeout_ms=30000):
+def select_profile_ui(display, profiles, default, timeout_ms=30000, sd_mounted=False):
     """
     Show profile selection UI on LCD.
     Up/Down keys navigate, Enter confirms. Auto-selects default after timeout.
+    F1 enters the BIOS-style setup menu (mp/setup_menu.py) to edit pb1000.ini
+    on flash/SD/per-profile; that menu either machine.reset()s (on save) or
+    returns here (on discard), in which case the picker just redraws.
     Returns selected profile name, or None if profiles is empty.
-    Single profile skips UI and returns immediately.
+
+    Always shows the picker (even for a single profile) so there is a chance
+    to press F1 before the timeout auto-selects; a single-profile list just
+    has one row.
     """
     if not profiles:
         return None
-    if len(profiles) == 1:
-        print(f"[Boot] Auto-selected sole profile: {profiles[0]}")
-        return profiles[0]
 
     try:
         sel = profiles.index(default)
     except ValueError:
         sel = 0
 
-    _draw_profile_ui(display, profiles, sel, timeout_ms)
+    # Scroll offset (index of the first visible row) -- kept in lockstep with
+    # `sel` below the same way emulator_menu.py's _run_menu() does, so the
+    # highlighted row stays on screen even when there are more profiles than
+    # fit vertically (including right here: default_profile could itself be
+    # past the first page if it sorts late alphabetically).
+    max_vis = _visible_profile_rows(display.height)
+    scroll = sel - max_vis + 1 if sel >= max_vis else 0
+
+    _draw_profile_ui(display, profiles, sel, timeout_ms, scroll)
     hdmi_flush(display)
     if getattr(display, "flush_if_dirty", None) is not None:
         # HDMI経由の初回フレームは、送信側のCSピンをこの直前に初期化した
@@ -64,7 +75,7 @@ def select_profile_ui(display, profiles, default, timeout_ms=30000):
         # 確実に過ぎてから同じ内容を再送することで、キー入力を待たずに
         # 初回から確実に表示されるようにする。
         time.sleep_ms(250)
-        _draw_profile_ui(display, profiles, sel, timeout_ms)
+        _draw_profile_ui(display, profiles, sel, timeout_ms, scroll)
         hdmi_flush(display)
     deadline = time.ticks_add(time.ticks_ms(), timeout_ms)
 
@@ -79,15 +90,36 @@ def select_profile_ui(display, profiles, default, timeout_ms=30000):
             sc = hd61700.get_last_key()
             if sc == 0x52:  # Up arrow
                 sel = (sel - 1) % len(profiles)
+                if sel < scroll:
+                    scroll = sel
+                elif sel >= scroll + max_vis:        # wrapped to bottom
+                    scroll = max(0, sel - max_vis + 1)
                 deadline = time.ticks_add(time.ticks_ms(), timeout_ms)
-                _draw_profile_ui(display, profiles, sel, timeout_ms)
+                _draw_profile_ui(display, profiles, sel, timeout_ms, scroll)
             elif sc == 0x51:  # Down arrow
                 sel = (sel + 1) % len(profiles)
+                if sel >= scroll + max_vis:
+                    scroll = sel - max_vis + 1
+                elif sel < scroll:                   # wrapped to top
+                    scroll = 0
                 deadline = time.ticks_add(time.ticks_ms(), timeout_ms)
-                _draw_profile_ui(display, profiles, sel, timeout_ms)
+                _draw_profile_ui(display, profiles, sel, timeout_ms, scroll)
             elif sc == 0x28:  # Enter
                 print(f"[Boot] Selected profile: {profiles[sel]}")
                 return profiles[sel]
+            elif sc == 0x3A:  # F1 — BIOS-style setup menu
+                import sys, gc
+                import setup_menu
+                setup_menu.run_setup_menu(display, sd_mounted, profiles)
+                # Only reached on Discard (Save triggers machine.reset()).
+                # Fully unload the module (not just the local name) so its
+                # heap is freed for the rest of boot (ROM loading etc. needs
+                # large contiguous blocks) — this menu is meant to cost
+                # nothing unless F1 is actually used.
+                sys.modules.pop('setup_menu', None)
+                gc.collect()
+                deadline = time.ticks_add(time.ticks_ms(), timeout_ms)
+                _draw_profile_ui(display, profiles, sel, timeout_ms, scroll)
 
             hdmi_flush(display)
             time.sleep_ms(50)
@@ -144,8 +176,25 @@ def _draw_text(display, x, y, text, fg, bg=0x0000):
     display.cs.value(1)
 
 
-def _draw_profile_ui(display, profiles, sel, timeout_ms):
-    """Render profile list on LCD using the common ILI9341/ST7796 drawing API (set_window/fill_rect)."""
+def _visible_profile_rows(H):
+    """How many profile rows fit between the title and footer, for a given
+    display height H -- mirrors _draw_profile_ui()'s own row layout exactly
+    (20px top margin, 14px row pitch, stops once a row's text would overlap
+    the 16px-tall footer) so scroll math in select_profile_ui() always
+    agrees with what actually gets drawn."""
+    n = 0
+    y = 20
+    while y + 8 <= H - 16:
+        n += 1
+        y += 14
+    return max(1, n)
+
+
+def _draw_profile_ui(display, profiles, sel, timeout_ms, scroll=0):
+    """Render profile list on LCD using the common ILI9341/ST7796 drawing API (set_window/fill_rect).
+    Only profiles[scroll:scroll+visible_rows] are drawn -- select_profile_ui() keeps `scroll`
+    tracking `sel` (see its Up/Down handling, mirroring emulator_menu.py's _run_menu()) so the
+    highlighted row stays on screen even when there are more profiles than fit vertically."""
     try:
         W = display.width
         H = display.height
@@ -159,9 +208,10 @@ def _draw_profile_ui(display, profiles, sel, timeout_ms):
         # Profile list
         row_h = 14
         y = 20
-        for i, name in enumerate(profiles):
-            if y + 8 > H - 16:
-                break
+        max_vis = _visible_profile_rows(H)
+        vis_end = min(len(profiles), scroll + max_vis)
+        for i in range(scroll, vis_end):
+            name = profiles[i]
             if i == sel:
                 display.fill_rect(0, y - 2, W, row_h, 0x0210)  # dark green highlight
                 _draw_text(display, 4, y, "> " + name, 0x07E0, 0x0210)
@@ -171,7 +221,7 @@ def _draw_profile_ui(display, profiles, sel, timeout_ms):
 
         # Footer
         secs = (timeout_ms + 999) // 1000
-        _draw_text(display, 4, H - 12, f"UP/DN+ENTER  Auto:{secs}s", 0x7BEF)
+        _draw_text(display, 4, H - 12, f"UP/DN+ENTER  F1:Setup  Auto:{secs}s", 0x7BEF)
 
     except Exception as e:
         print(f"[Boot] Draw error: {e}")

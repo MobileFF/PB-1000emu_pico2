@@ -145,10 +145,14 @@ def _build_display_items(system):
     ]
 
 
-def _build_system_items():
+def _build_system_items(system):
     return [
         {'id': 'cpu_status',  'label': 'CPU Status'},
         {'id': 'hook_status', 'label': 'Hook Status'},
+        {'id': 'step_count',  'label': 'CPU Steps/Slice',
+         'badge': str(getattr(system, '_active_step_count', '?')), 'badge_color': _FG},
+        {'id': 'loop_idle',   'label': 'Loop Idle (ms)',
+         'badge': str(getattr(system, '_loop_idle_ms', '?')), 'badge_color': _FG},
         {'id': 'reset',       'label': 'Reset'},
         {'id': 'newall',      'label': 'NEW ALL (clear memory)'},
     ]
@@ -272,11 +276,14 @@ def _text_input(display, title, max_len=16):
 
 # ── Numeric input & color preview ─────────────────────────────────────────────
 
-def _number_input(display, title, current=0):
-    """Integer input (0-255). Returns int or None on cancel."""
+def _number_input(display, title, current=0, min_v=0, max_v=255):
+    """Integer input within [min_v, max_v] (default 0-255, unchanged for the
+    existing fg/bg color callers). Returns int or None on cancel."""
     import hd61700
     W, H = display.width, display.height
-    buf = list(str(max(0, min(255, current))))
+    max_digits = len(str(max_v))
+    buf = list(str(max(min_v, min(max_v, current))))
+    range_hint = "%d-%d" % (min_v, max_v)
 
     def _redraw():
         display.fill_rect(0, 0, W, H, _BG)
@@ -290,7 +297,7 @@ def _number_input(display, title, current=0):
         sc = hd61700.get_last_key()
         if sc != prev_sc:
             prev_sc = sc
-            if sc in _SC_DIGIT and len(buf) < 3:
+            if sc in _SC_DIGIT and len(buf) < max_digits:
                 buf.append(_SC_DIGIT[sc])
                 _redraw()
             elif sc == 0x2A and buf:        # Backspace
@@ -298,10 +305,10 @@ def _number_input(display, title, current=0):
                 _redraw()
             elif sc == 0x28 and buf:        # EXE
                 val = int("".join(buf))
-                if 0 <= val <= 255:
+                if min_v <= val <= max_v:
                     return val
                 display.fill_rect(0, H // 2 - 6, W, 20, _BG)
-                _draw_text(display, 4, H // 2 - 4, "!! 0-255 only", _WARN)
+                _draw_text(display, 4, H // 2 - 4, "!! %s only" % range_hint, _WARN)
             elif sc == 0x29:                # BRK
                 return None
         hdmi_flush(display)
@@ -410,15 +417,31 @@ def _save_display_colors(fg_color, bg_color):
 
 
 def _save_hdmi_enable(enabled):
-    """Write [hdmi] enable=true/false to pb1000.ini. Returns save path or error string."""
+    """Write [hdmi] enable=true/false to /pb1000.ini (flash root only --
+    unlike other settings here, [hdmi] is a flash-only section: config.py's
+    load_config() ignores an [hdmi] section in /sd/pb1000.ini or a
+    per-profile pb1000.ini entirely, so writing there would silently have
+    no effect. Returns save path or error string."""
+    path = "/pb1000.ini"
+    try:
+        _update_ini(path, "hdmi", {"enable": "true" if enabled else "false"})
+        return path
+    except Exception as e:
+        return "ERR:" + str(e)
+
+
+def _save_speed_settings(active_step_count, loop_idle_ms):
+    """Write [emulator] active_step_count/loop_idle_ms to pb1000.ini.
+    Returns save path or error string."""
     import os
     try:
         os.listdir("/sd")
         path = "/sd/pb1000.ini"
     except OSError:
         path = "/pb1000.ini"
+    kv = {"active_step_count": str(active_step_count), "loop_idle_ms": str(loop_idle_ms)}
     try:
-        _update_ini(path, "hdmi", {"enable": "true" if enabled else "false"})
+        _update_ini(path, "emulator", kv)
         return path
     except Exception as e:
         return "ERR:" + str(e)
@@ -632,6 +655,39 @@ def _do_lcd_height(system, fkbar):
     return "LCD Height: %d dot" % new_height
 
 
+def _do_step_count(system, display):
+    """Adjust CPU steps executed per main-loop slice (see main.py's
+    run_cpu_slice(active_steps=system._active_step_count)) -- the main lever
+    for emulation speed. Takes effect immediately since main.py reads this
+    attribute fresh every loop iteration; also persisted to pb1000.ini
+    (like fg/bg color and HDMI) so it survives a reboot."""
+    cur = getattr(system, '_active_step_count', 12000)
+    val = _number_input(display, "CPU Steps/Slice (1-65535)", cur, min_v=1, max_v=65535)
+    if val is None:
+        return ""
+    system._active_step_count = val
+    result = _save_speed_settings(val, getattr(system, '_loop_idle_ms', 0))
+    if result.startswith("ERR:"):
+        return "Steps/Slice:%d save %s" % (val, result)
+    return "Steps/Slice:%d -> %s" % (val, result)
+
+
+def _do_loop_idle(system, display):
+    """Adjust the main loop's per-iteration idle sleep (see main.py's
+    time.sleep_ms(system._loop_idle_ms)). Lower = faster/more CPU-hungry,
+    higher = slower/more power-efficient. Same live+persist behavior as
+    _do_step_count()."""
+    cur = getattr(system, '_loop_idle_ms', 0)
+    val = _number_input(display, "Loop Idle ms (0-1000)", cur, min_v=0, max_v=1000)
+    if val is None:
+        return ""
+    system._loop_idle_ms = val
+    result = _save_speed_settings(getattr(system, '_active_step_count', 12000), val)
+    if result.startswith("ERR:"):
+        return "Loop Idle:%dms save %s" % (val, result)
+    return "Loop Idle:%dms -> %s" % (val, result)
+
+
 def _do_hdmi_toggle(system):
     """Toggle the optional HDMI bridge output (second Pico 2 + PICO-HDMI-PLUS,
     see doc/hardware_guide.md §7) on/off.
@@ -812,6 +868,10 @@ def _dispatch_system(item_id, system, display, keyboard_input):
         from emulator_menu_ext import _do_cpu_status
         _do_cpu_status(system, display)
         return "", False
+    if item_id == 'step_count':
+        return _do_step_count(system, display), False
+    if item_id == 'loop_idle':
+        return _do_loop_idle(system, display), False
     if item_id == 'reset':
         # main loop must resume stepping from PC=0
         return _do_reset(system), True
@@ -850,7 +910,7 @@ def _dispatch_top(item_id, system, display, fkbar, keyboard_input, cfg, state):
     if item_id == 'cat_system':
         closed = _run_menu(
             display, "-- SYSTEM --", "EXE:select  BRK:back",
-            _build_system_items,
+            lambda: _build_system_items(system),
             lambda iid, items, cur: _dispatch_system(iid, system, display, keyboard_input),
         )
         return "", closed

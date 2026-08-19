@@ -49,6 +49,25 @@ date heading instead of a version number or "Unreleased" marker.
   has never shipped in a released build, this code path was never actually reachable in any
   previous release — so it's recorded here as part of the HDMI feature rather than as a
   standalone bug fix.
+- Made the `[hdmi]` section **flash-root `/pb1000.ini` only** (`load_config()` in
+  `mp/config.py` now ignores an `[hdmi]` section in `/sd/pb1000.ini` or a per-profile ini
+  entirely; the EMULATOR MENU's HDMI toggle now always saves to `/pb1000.ini`; the `[hdmi]`
+  entries in `mp/setup_menu.py`'s F1 BIOS-style menu are now hidden while editing an SD/profile
+  ini). During real-hardware testing, the EMULATOR MENU's HDMI toggle had saved
+  `enable=true` to `/sd/pb1000.ini`; editing the flash-root `/pb1000.ini` to `enable=false`
+  afterward had no effect, since `/sd/pb1000.ini` outranks it in the normal priority chain
+  (`/pb1000.ini` < `/sd/pb1000.ini` < per-profile ini) — the SD-side value kept winning. Since
+  this is a fixed hardware-wiring setting, not something that should vary by SD card or
+  profile, it's now treated as flash-only, the same way certain `[display]`/`[touch]` keys
+  already are.
+- Fixed the boot-time **RAM Profile picker** failing to scroll when there are more profiles
+  than fit on screen (`mp/boot_session.py`). `_draw_profile_ui()` always rendered starting from
+  the first profile and simply stopped once it ran out of vertical space — there was no
+  mechanism at all to keep the scroll position following the cursor (`sel`, moved via Up/Down)
+  once it went off-screen. As a result, with more profiles than visible rows, pressing Up to
+  wrap around to the last profile moved the selection past the drawn range entirely, so the
+  highlight simply never appeared anywhere. Fixed by adopting the same "scroll offset follows
+  the cursor" approach the EMULATOR MENU already uses (`_run_menu()` in `emulator_menu.py`).
 
 ### Documentation
 
@@ -56,7 +75,9 @@ date heading instead of a version number or "Unreleased" marker.
   (main unit Pico 2 W ↔ receiver Pico 2, the new GP28 CS pin) and a link to the receiver
   project.
 - `doc/config_guide_en.md` / JA: added a new section 14 documenting every `[hdmi]` key
-  (`enable`/`cs_pin`/`baudrate`/`frame_skip`).
+  (`enable`/`cs_pin`/`baudrate`/`frame_skip`). Also added "Exception 2" to §1 noting that the
+  entire `[hdmi]` section is flash-only (and how its mechanism differs from the `[display]`/
+  `[touch]` early keys).
 - `doc/usage_guide_en.md` / JA: added a new section 11 covering how to enable it and the
   LCD/HDMI exclusivity behavior (while HDMI is enabled, the game screen, bezel, RAM profile
   picker, and EMULATOR MENU are all shown exclusively on HDMI, never on the physical LCD).
@@ -66,7 +87,7 @@ date heading instead of a version number or "Unreleased" marker.
   "colors, resolution, and HDMI output" (a pre-existing documentation gap, not something
   introduced by this session's feature work).
 - `mp/pb1000.ini`: updated the `[hdmi]` section's comment to reference the new section 9 in
-  `hardware_guide.md`.
+  `hardware_guide.md`, and added a note that the section is flash-only.
 
 ---
 
