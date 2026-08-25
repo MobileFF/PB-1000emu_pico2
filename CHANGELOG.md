@@ -7,6 +7,54 @@ push される運用のため、バージョン番号や「未リリース」の
 
 ---
 
+## 2026-08-25
+
+### 修正
+
+- **SDカード・タッチコントローラとのSPIバス競合を修正**（`mp/ili9341.py`/`mp/st7796.py`/
+  `mp/display_init.py`）: `src/lcd_controller.c` のC側高速レンダラーには、毎回SDカード
+  （GP15）・タッチ（GP16）のCSピンを明示的にHighへ強制する「SPI Bus Arbitration」処理が
+  既にあったが、ベゼル・ステータスバー等のUI描画が使うPython側ドライバの`write_cmd()`/
+  `write_data()`/`fill_rect()`には同等のガードがなかった。`_deselect_others()`を追加し、
+  `display_init.py`からSD_CS/T_CSのPinオブジェクトをドライバへ渡すよう修正。
+- **FuncKeyBar再描画がResetなど直後に間欠的に表示されない不具合を修正**
+  （`mp/funckey_bar.py`）: `_blit_raw()`がファイルI/OとLCDへのSPI書き込みをCS Lowの
+  ままインターリーブしていたため、SDカード経由（`/sd/fkbar.raw`）利用時にバス競合の
+  リスクがあった。一度画像全体をメモリへ一括読み込みする方式へ直したところ、今度は
+  ヒープ断片化時（Reset直後など）に約27KBの連続確保が失敗し描画自体が飛ぶ回帰を誘発。
+  最終的に、小さな固定バッファ（512B）を使い回しつつファイル読込中はLCDのCSをHighへ
+  戻す方式へ修正し、両方の問題を解消。
+
+### 追加
+
+- **`[overlay] show_log`設定を追加**: 起動中にREPLログの最終行をLCDへミラー表示する
+  機能（`BootStatusOverlay`）にON/OFF切り替えがなかったため追加（デフォルトOFF）。
+
+---
+
+## 2026-08-24
+
+### 変更
+
+- **`[pio_uart]` を `[rs232c]` へ名称変更**（PB-1000の機能名に合わせた分かりやすい設定名に
+  変更。内部実装のPythonクラス名・モジュール名は`pio_uart.py`のまま維持）。あわせて
+  `tx_pin`/`rx_pin`をini経由で設定可能にし、`baudrate`のセットアップメニュー入力範囲を
+  実機PB-1000のRS-232C仕様に合わせて300〜9600bpsに修正。
+- **`[boot_status]`/`[clock_overlay]`/`[mem_overlay]` を `[overlay]` へ統合**:
+  `show_profile_name`/`show_clock`/`show_mem_free`の3設定を1セクションにまとめた
+  （`BootStatusOverlay`/`ClockOverlay`/`MemOverlay`は実装としては引き続き別クラスのまま。
+  起動時と実行時とでは時刻の取得元が異なるため）。
+- **EMULATOR MENUからHDMI設定を削除**: 起動中のHDMI ON/OFF切り替えができなくても、
+  起動時セットアップメニュー(F1)/`pb1000.ini`の`[hdmi] enable`で設定できるため。
+  Systemサブメニューの並び順も変更し、`Reboot Emulator (MCU)`を一番最後に移動。
+
+### 削除
+
+- **`new_all_debug`機能を完全削除**（`[debug] newall_debug`設定・C側のROM/USBスキャン
+  コードトレース出力とも）。現状のコードベースでは不要と判断。
+
+---
+
 ## 2026-08-23
 
 ### 追加

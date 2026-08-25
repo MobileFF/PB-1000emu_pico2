@@ -7,6 +7,57 @@ date heading instead of a version number or "Unreleased" marker.
 
 ---
 
+## 2026-08-25
+
+### Fixed
+
+- **SD card / touch controller SPI bus arbitration gap** (`mp/ili9341.py`/`mp/st7796.py`/
+  `mp/display_init.py`): `src/lcd_controller.c`'s C-accelerated renderer already
+  force-deasserted the SD card's (GP15) and touch controller's (GP16) CS pins before every
+  transaction ("SPI Bus Arbitration"), but the Python-side driver's `write_cmd()`/
+  `write_data()`/`fill_rect()` (used by the bezel, status bar, and other UI overlays) had no
+  equivalent guard. Added a `_deselect_others()` helper, wired through `display_init.py` passing
+  `sd_cs`/`t_cs` Pin objects into the driver constructors.
+- **FuncKeyBar intermittently failing to redraw** (e.g. right after Reset) (`mp/funckey_bar.py`):
+  `_blit_raw()` was interleaving file reads with LCD SPI writes while holding the LCD's CS low,
+  a bus-arbitration risk when the image is loaded from the SD-card fallback path
+  (`/sd/fkbar.raw`). Reading the whole ~27KB image into one buffer up front fixed that but
+  introduced a new regression -- the single large contiguous allocation intermittently failed
+  under heap fragmentation (e.g. right after Reset), silently skipping the redraw since the
+  caller only catches `OSError`, not `MemoryError`. Final fix reuses a small 512-byte chunk
+  buffer and toggles the LCD's CS off during each file read instead.
+
+### Added
+
+- **`[overlay] show_log` setting**: the boot-time REPL-log-mirror-to-LCD feature
+  (`BootStatusOverlay`) had no on/off switch; added (default off).
+
+---
+
+## 2026-08-24
+
+### Changed
+
+- **Renamed `[pio_uart]` to `[rs232c]`** in `pb1000.ini`, to match the PB-1000 feature name
+  rather than the internal implementation (the Python module/class stay named `pio_uart.py` /
+  `PioUart`, since those describe the real technique). Also made `tx_pin`/`rx_pin` configurable
+  via the ini, and corrected the setup menu's `baudrate` input range to the real PB-1000
+  RS-232C's 300-9600bps.
+- **Merged `[boot_status]`/`[clock_overlay]`/`[mem_overlay]` into `[overlay]`**: the three
+  `show_profile_name`/`show_clock`/`show_mem_free` keys now live in one section
+  (`BootStatusOverlay`/`ClockOverlay`/`MemOverlay` remain separate classes, since boot-time and
+  runtime clocks read from different sources).
+- **Removed the HDMI toggle from EMULATOR MENU**: HDMI can still be enabled/disabled via the
+  boot-time setup menu (F1) or `pb1000.ini`'s `[hdmi] enable`, so the runtime menu no longer
+  needs its own copy. Also reordered the System submenu so `Reboot Emulator (MCU)` is last.
+
+### Removed
+
+- **`new_all_debug` feature removed entirely** (the `[debug] newall_debug` setting and its
+  C-side ROM/USB-scancode trace output) -- no longer needed given the current codebase.
+
+---
+
 ## 2026-08-23
 
 ### Added
