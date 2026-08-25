@@ -30,17 +30,38 @@ src/
 mp/
   boot.py                 # Pre-boot GPIO init (runs before main.py)
   main.py                 # Entry point
-  pb1000.py               # PB1000System class
+  draw_text.py            # Shared LCD text-drawing helper, used across the whole
+                           # boot/menu UI family. Imported at main.py's top level, so
+                           # it's resident before anything else needs it -- everyone
+                           # downstream imports it for free (see module docstring)
+  pb1000.py               # PB1000System class (multiple-inherits PB1000FDDMixin / PB1000StateIOMixin)
+  pb1000_fdd.py           # Virtual-FDD code (split out of pb1000.py 2026-08-22 to fight compile-time heap fragmentation)
+  pb1000_state_io.py      # save_state()/load_state() and the hook registry (same split)
+  display_init.py         # Early display/SD/touch bring-up -- split out of pb1000.py
+                           # (only the part needed before the profile picker).
+                           # main_boot.py imports it at module level; pb1000.py itself
+                           # is a deferred import inside create_system()
   lcd_controller_c.py     # Python wrapper for lcd_c module
   main_boot.py            # Boot and initialisation
-  main_input.py           # Input managers (keyboard, touch, joystick, cursor repeat)
+  main_input_keyboard.py  # Keyboard input manager (split out of the former main_input.py --
+                           # the biggest single compile in main.py's Step 8b)
+  main_input_touch.py     # Touch panel input manager (same split)
+  main_input_joystick.py  # Joystick input manager (same split; only imported when [joystick] enable=true)
+  main_input_cursor.py    # Cursor-key repeat manager (same split)
   main_runtime.py         # CPU execution loop helpers
   main_actions.py         # Screenshots, save-state, disk swap
   main_cleanup.py         # Shutdown and memory dump
-  emulator_menu.py        # Win+F7 runtime menu (common items)
-  emulator_menu_ext.py    # Heavier, less-frequently-used menu items (split out to keep menu compile cost low)
+  emulator_menu.py        # Win+F7 runtime menu (menu engine itself -- 583 lines)
+  emulator_menu_ram.py    # RAM Save UI (split out to keep menu compile cost low; RAM Load removed 2026-08-22)
+  emulator_menu_capture.py # VRAM Save / Full Capture (same reason)
+  emulator_menu_debug.py  # Hook Status / CPU Status (same reason)
+  emulator_menu_display_actions.py # Display category handlers (same reason)
+  emulator_menu_system_actions.py  # System category's Reset/Reboot/NEW ALL/speed settings (same reason)
   funckey_bar.py          # On-screen function key bar
   boot_session.py         # Profile selection UI
+  boot_status.py          # Boot status overlay (boot-time only -- [overlay])
+  clock_overlay.py        # Always-on clock (runtime only -- [overlay] show_clock; reads TIME$/DATE$ directly)
+  mem_overlay.py          # Always-on free-heap readout (runtime only -- [overlay] show_mem_free)
   config.py               # pb1000.ini loading
   pio_uart.py             # PIO software UART (RS-232C)
   keymap.py / keymap.json # Keyboard mapping tables
@@ -54,7 +75,6 @@ mp/
   md100_dos.py            # MD-100 DOS layer (ported from pb1000es dos.pas)
   ntp_sync.py             # NTP time sync over WiFi
   debug.py                # REPL CPU/register debug helpers
-  workarea.py             # PB-1000 work-area (RAM) address dictionary
   ext/                    # Extension API modules (auto-loaded)
 
 hardware/
@@ -321,7 +341,8 @@ system.list_mem_write_hooks()
 A menu entry that lists every currently registered call_hook and mem_write_hook — address,
 owning module (owner), and enabled/disabled state — using `system.list_call_hooks()` /
 `system.list_mem_write_hooks()`. Available from the Win+F7 emulator menu as **Hook Status**
-(`_do_hook_status()` in `emulator_menu.py`). Use Up/Down to scroll, BREAK to close. Handy when
+(`_do_hook_status()` in `emulator_menu_debug.py` — compiled on demand, along with CPU Status,
+the first time either is opened in a running session). Use Up/Down to scroll, BREAK to close. Handy when
 debugging which extension owns a given address, or confirming a hook was correctly
 disabled/enabled (e.g. in MENU display mode).
 
@@ -330,11 +351,20 @@ disabled/enabled (e.g. in MENU display mode).
 This whole mechanism is unconditionally disabled when `[display] lcd_height = 32` (the default) —
 the ROM's native implementation runs untouched — since the fix is unnecessary (and actually harmful)
 in 32-dot mode.
-See `doc/plan_mem_write_hook.md` for the design background (now implemented).
 
 ---
 
-## 7. Serial Console (LCD Character Detection)
+## 7. LCD Character Detection (formerly Serial Console; Python-side wiring removed)
+
+> [!NOTE]
+> The detection pipeline this section describes still exists in the C core
+> (`src/modhd61700.c`), but its only Python-side caller —
+> `PB1000System.console_uart`'s property setter, which called
+> `cpu_core.set_lcd_char_callback(...)` — was removed on 2026-08-22, so
+> `py_lcd_char_cb` now stays `MP_OBJ_NULL` forever and the whole pipeline is
+> permanently inert. It was already guarded by `py_lcd_char_cb !=
+> MP_OBJ_NULL`, so this is safe with no C-core changes (no rebuild needed).
+> What follows is kept as a reference for how it worked while active.
 
 LCD VRAM writes are intercepted by `c_lcd_direct_write()`. When 6 columns of pixels are accumulated they are matched against `charset.bin` (0x20–0x7E) to identify the character code.
 
@@ -362,7 +392,9 @@ system.lcd.set_vdp_enable(False)  # revert to global colour settings
 
 MMIO addresses 0x0C20–0x0C24 allow BASIC programs or machine code to write colour VRAM directly (see `doc/memory_map.md`).
 
-The **Color VRAM** entry in the emulator menu toggles this feature at runtime (it simply calls `set_vdp_enable()`).
+`[display] vdp_enable` (`pb1000.ini`, changeable from the F1 setup menu) sets this at boot (it
+simply calls `set_vdp_enable()` internally; before 2026-08-22 this was a runtime toggle in the
+emulator menu instead).
 
 For colour VRAM to actually be used while rendering, `set_vdp_enable(True)` alone is not enough — the
 `vdp_init_fill_done` flag (readable via `vdp_init_done()`) must also be set. This flag is normally set
@@ -388,7 +420,8 @@ The `[display]` section in `pb1000.ini` stores these as RGB332:
 
 ## 9. Cursor Key Auto-Repeat (`CursorRepeatManager`)
 
-`mp/main_input.py` implements automatic cursor key repeat for PB-1000 emulation.
+`mp/main_input_cursor.py`'s `CursorRepeatManager` class implements automatic cursor key repeat
+for PB-1000 emulation.
 
 ### How It Works
 
@@ -448,7 +481,9 @@ See `doc/extension_api.md` for the full specification.
 A software UART implemented with RP2350 PIO state machines emulates the PB-1000's RS-232C port.
 
 - Default pins: GP6 (TX) / GP13 (RX)
-- Baud rate: configured via `[pio_uart] baudrate` in `pb1000.ini` (default 9600 bps)
+- Pins are changeable via `[rs232c] tx_pin`/`rx_pin` in `pb1000.ini` (read by
+  `initialize_usb_host_and_pio()` in `main_boot.py`, passed to `PioUart(tx_pin=..., rx_pin=...)`)
+- Baud rate: configured via `[rs232c] baudrate` in `pb1000.ini` (default 9600 bps)
 - `pio_uart.py` contains the `PioUart` class
 - `service_pio_uart_bridge()` in `main_runtime.py` bridges the SIO MMIO (0x0C00–0x0C03) and `PioUart` in the main loop
 

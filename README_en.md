@@ -1,6 +1,8 @@
 # PB-1000 Emulator for Raspberry Pi Pico 2
 
 A Casio PB-1000 pocket computer emulator running on Raspberry Pi Pico 2 (RP2350).
+**Raspberry Pi Pico 2 W is recommended** (a plain Pico 2 also works, except NTP time sync,
+which requires the W's WiFi chip; every other feature is unaffected).
 
 ## Overview
 
@@ -11,7 +13,7 @@ This project emulates the Casio PB-1000 pocket computer, which is equipped with 
 - **High-Performance CPU Core**: HD61700 instruction set implemented in C.
 - **MicroPython Framework**: Peripheral logic written in MicroPython, allowing easy customization.
 - **Modern Display Support**: ILI9341 (320x240) or ST7796 (480x320) TFT LCD, selectable via `pb1000.ini`, with touch interface (XPT2046).
-- **External Keyboard**: Supports HID USB keyboards (Host mode) and serial (UART) input.
+- **External Keyboard**: Supports HID USB keyboards (Host mode).
 - **Storage**: SD Card support for saving/restoring RAM states, screenshots, and virtual FDD disk image operations.
 - **State Management**: Save/Load state functionality for RAM and registers.
 - **Communication**: Virtual RS-232C support via PIO UART.
@@ -19,12 +21,14 @@ This project emulates the Casio PB-1000 pocket computer, which is equipped with 
 - **Joystick Support**: Supports ATARI 9-pin joystick connections; directions and A/B buttons can be mapped to any key.
 - **Color Display Support**: Enables color display while maintaining compatibility with the PB-1000.
 - **Up to 104KB RAM**: Banks 2/3 of Page 1 (0x8000–0xFFFF) can be equipped with RAM, enabling up to 104KB of usable RAM.
+- **HDMI Mirror Output**: Optionally connect a second Pico 2 (RP2350) as an HSTX-based receiver to mirror the physical LCD output over HDMI. See the [Hardware Guide](doc/hardware_guide_en.md).
+- **Emulator Menu**: A settings/state UI opened via the F7 key or the on-screen function-key bar (RAM save, disk swap, hook status, and more).
 
 ## Quick Start
 
-1.  **Hardware**: Prepare a Raspberry Pi Pico 2, an ILI9341 or ST7796 LCD, and (optional) SD card module. See [Hardware Guide](doc/hardware_guide_en.md) for details.
+1.  **Hardware**: Prepare a Raspberry Pi Pico 2 W (recommended -- a plain Pico 2 also works, minus NTP time sync), an ILI9341 or ST7796 LCD, and (optional) SD card module. See [Hardware Guide](doc/hardware_guide_en.md) for details.
 2.  **Build**: Compile the custom MicroPython firmware. See [Build Guide](doc/build_guide_en.md).
-3.  **Flash**: Copy the generated `firmware.uf2` to your Pico 2.
+3.  **Flash**: Copy the generated `firmware_pb1000.uf2` to your Pico 2.
 4.  **Setup**: Upload the Python files from `mp/` and your ROM images to `/roms/` or `/sd/`. See [Usage Guide](doc/usage_guide_en.md).
 5.  **Run**: The emulator starts automatically if `main.py` is present.
 

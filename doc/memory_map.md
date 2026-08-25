@@ -59,15 +59,21 @@ UA レジスタ bits 5-4   bank 番号   対象バッファ     読み書き   �
 ─────────────────────────────────────────────────────────────
 ```
 
-- **Bank 0**（ROM1）は常に存在（`has_bank[0] = true`）。
-- **Bank 1–3**（拡張 RAM）: バッファ領域（`bank1_buf`〜`bank3_buf`）は 2026-08 以降、起動時に
-  無条件で確保される（プロファイル切替で使用バンク数が変わっても即ロードできるようにするため）。
-  ただし `has_bank[1..3]`（CPU から見える「バンクが存在するか」フラグ）は、現在アクティブな
-  プロファイルの `ramN.bin` の有無を**都度反映**する — 実機のバンク検出（書き込み→読み戻しで
-  カード有無を判定するような手法）と食い違わないよう、常時 `true` には固定しない。`load_state()`
-  がプロファイル切替のたびに `has_bank[N]` を再評価し、`set_bank_present()`/`set_has_exp_ram()`
-  で C コア側にも反映する。`ramN.bin` が無いバンクは、前のプロファイルのデータが残留しないよう
-  `0xFF`（未マップ領域を読んだ時と同じ値）で埋められる。
+- **Bank 0**（ROM1）は常に存在（`has_bank[0] = true`）。バッファ（`rom1_buf`）は固定サイズの
+  静的配列。
+- **Bank 1–3**（拡張 RAM）: バッファ領域（`bank1_buf`〜`bank3_buf`）は、起動時に選択された
+  プロファイルが対応する `ramN.bin` を持つバンクだけ、その場で MicroPython の GC ヒープから
+  `m_malloc()` により確保される（`modhd61700.c` の `ensure_bank_buf()`）。`ramN.bin` を持たない
+  バンクはポインタが `NULL` のままで、ヒープを消費しない。`has_bank[1..3]`（CPU から見える
+  「バンクが存在するか」フラグ）は現在アクティブなプロファイルの `ramN.bin` の有無を反映し、
+  `set_bank_present()`/`set_has_exp_ram()` の呼び出し順序は「まず `ensure_bank_buf()` で確保 →
+  成功したら `has_bank[N]` を立てる」の順で固定されている（確保に失敗した場合に
+  `has_bank[N]=true` かつバッファ未確保という不整合な状態が残らないようにするため）。
+  CPU の毎バイトメモリアクセス経路（`c_mem_direct_read`/`c_mem_direct_write`）は
+  `has_bank[bank]` に加えてバッファポインタ自体の非 NULL もチェックしてからアクセスする。
+  `ramN.bin` が無いバンクは `has_bank[N]=false` により読み取りが常に `0xFF`（未マップ領域と
+  同じ値）を返すため、バッファ内容を明示的に埋める必要はない。プロファイルはブート時の一回きり
+  の選択で、セッション途中でのバンク構成変更（旧 RAM Load 機能）は存在しない。
 - バンク選択式: `bank = (REG_UA >> 4) & 0x03` （C 側 `hd61700.c`、Python 側ともに統一）。
 
 ---
@@ -165,12 +171,13 @@ IF PEEK(&H0C37) AND 1 THEN PRINT "DMA ERROR"
 | `ext_work_buf` | 256 B | 0x5F00–0x5FFF | 拡張 API ワークエリア（Python `_ext_work` と共有） |
 | `ram_buf` | 8 KB | 0x6000–0x7FFF | 標準 RAM |
 | `rom1_buf` | 32 KB | 0x8000–0xFFFF (Bank 0) | System ROM (ROM1) |
-| `bank1_buf` | 32 KB | 0x8000–0xFFFF (Bank 1) | 拡張 RAM1 |
-| `bank2_buf` | 32 KB | 0x8000–0xFFFF (Bank 2) | 拡張 RAM2 |
-| `bank3_buf` | 32 KB | 0x8000–0xFFFF (Bank 3) | 拡張 RAM3 |
+| `bank1_buf` | 32 KB（バンク使用時のみ動的確保） | 0x8000–0xFFFF (Bank 1) | 拡張 RAM1 |
+| `bank2_buf` | 32 KB（バンク使用時のみ動的確保） | 0x8000–0xFFFF (Bank 2) | 拡張 RAM2 |
+| `bank3_buf` | 32 KB（バンク使用時のみ動的確保） | 0x8000–0xFFFF (Bank 3) | 拡張 RAM3 |
 
 `has_bank[4]` フラグで各バンクの有効/無効を管理する。
-`bank_ptr[4]` / `bank_is_ram[4]` は `hd61700_state_t` の CPU ステートに格納される。
+`bank_ptr[4]` / `bank_is_ram[4]` は `hd61700_state_t` の CPU ステートに格納される
+（バンク 1–3 が未確保の場合、対応する `bank_ptr[N]` は `NULL`）。
 
 ---
 

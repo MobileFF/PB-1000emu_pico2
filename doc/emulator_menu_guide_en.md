@@ -34,7 +34,7 @@ sub-menu.
 == EMULATOR MENU ==
 ├─ Toggles   (turn various features on/off)
 ├─ Storage   (save/load disk, RAM, and screen state)
-├─ Display   (colors, resolution, and HDMI output)
+├─ Display   (colors and resolution)
 ├─ System    (system info and reset-related actions)
 └─ Exit      (close the menu)
 ```
@@ -47,14 +47,23 @@ Each row shows a **badge** on the right (`ON` / `OFF` / `N/A`, or a current sett
 
 | Item | What it does |
 | :--- | :--- |
-| **Serial Console** | Toggle real-time output of on-screen LCD characters to the console UART (GP4/GP5) |
-| **RS-232C (PIO)** | Toggle the PB-1000's RS-232C interface (virtual serial communication) |
-| **vFDD** | Toggle the virtual floppy drive. **Cannot be turned off while the FDD is mid-transfer** (a message is shown if you try) |
 | **Beep** | Mute/unmute the beep sound |
-| **Joystick** | Toggle joystick input |
-| **Color VRAM (VDP)** | Switch the screen between plain two-color monochrome and per-pixel color rendering |
 
-Every item here flips ON/OFF immediately on EXE; none of these are saved to a config file.
+Flips ON/OFF immediately on EXE; not saved to a config file. Kept because muting mid-session
+without losing running state (which a reboot would cost) is a real need a boot-time setting
+can't cover.
+
+RS-232C (PIO), vFDD, Joystick, and Color VRAM (VDP) toggles were removed from this menu on
+2026-08-22. Each corresponds 1:1 to a `pb1000.ini` setting (`[rs232c] enable` /
+`[disk] enabled` / `[joystick] enable` / `[display] vdp_enable`) — change it in the F1
+boot-time setup menu, Save & Exit (or F10), and the Pico reboots automatically to apply it.
+None of these need to flip instantly mid-session, so this menu no longer needs its own separate
+live-toggle implementation for each.
+
+Serial Console (outputting LCD characters to a console over GP4/GP5, UART1) was itself **removed
+entirely** on the same date, 2026-08-22 — not migrated to a setting. The UART keyboard input
+feature (typing PB-1000 keys from a serial terminal), which shared the same UART1, was removed
+at the same time. RS-232C (PIO UART, GP6/GP13) is unrelated and remains available.
 
 ---
 
@@ -64,18 +73,18 @@ Every item here flips ON/OFF immediately on EXE; none of these are saved to a co
 | :--- | :--- |
 | **FD Swap** | Switch the virtual floppy disk's image file |
 | **RAM Save** | Snapshot the current RAM contents and CPU state (PC/registers) to the SD card (`/sd/rams/`) |
-| **RAM Load** | Restore RAM and CPU state from a previously saved snapshot, resuming execution from exactly where it was saved |
 | **VRAM Save** | Save the current screen contents (LCD VRAM) to a file — same as the PrintScreen key |
 | **Full Capture** | Save the entire physical screen, including the bezel and function key bar, as a single image (PPM) |
 
-> [!WARNING]
-> **Running RAM Load immediately overwrites the current RAM and execution state, and the
-> EMULATOR MENU closes automatically.** It does NOT reset the CPU (PC is not forced back to
-> 0x0000) — execution resumes right from the PC/registers captured by RAM Save. Whatever
-> program is currently running is discarded, so use RAM Save first if you need to keep it.
+**RAM Save** opens a screen for picking the destination folder name (when saving a new one, you
+can type a name using letters, digits, and hyphens).
 
-Both **RAM Save** and **RAM Load** open a screen for picking the destination/source folder name
-(when saving a new one, you can type a name using letters, digits, and hyphens).
+> [!NOTE]
+> **RAM Load** (restoring from a previously saved snapshot) was removed from this menu on
+> 2026-08-22. To reach a different profile's saved state — or an earlier save of the current
+> profile — use **System > Reboot Emulator (MCU)** and pick it again at the boot-time profile
+> picker (that picker already loads whichever profile's save you choose). There is no longer a
+> way to switch to a different profile's saved state without a reboot.
 
 ---
 
@@ -86,7 +95,6 @@ Both **RAM Save** and **RAM Load** open a screen for picking the destination/sou
 | **Foreground Color** | Change the color of "lit" LCD pixels |
 | **Background Color** | Change the color of "unlit" LCD pixels |
 | **LCD Height** | Toggle the LCD's vertical resolution between 32-dot and 64-dot |
-| **HDMI** | Toggle mirror output to a second Pico 2 + HDMI addon on/off ([hardware_guide_en.md](hardware_guide_en.md) §9) |
 
 Selecting **Foreground Color** / **Background Color** opens a numeric entry screen (RGB332
 value, 0–255) followed by a color preview screen. Confirming with EXE saves the value to
@@ -99,14 +107,11 @@ reverts to the `[display] lcd_height` setting on the next boot. Right after swit
 until the running program redraws them — this matches real PB-1000 hardware behavior and is
 not a bug.
 
-**HDMI** flips ON/OFF immediately on each EXE press, and — unlike the other Toggles-style
-items — is saved to `[hdmi] enable` in `pb1000.ini` right away, so it persists across reboots.
-**Turning it ON stops all drawing to the physical LCD — the screen, including the EMULATOR MENU
-itself, is shown exclusively on HDMI from that point on** (LCD and HDMI are exclusive outputs;
-see [usage_guide_en.md](usage_guide_en.md) §11). Turning it on without an HDMI addon wired up
-causes no harm to the hardware, but the screen then goes nowhere (neither LCD nor a connected
-monitor), since it's just writing to an SPI bus nothing is listening on — wire up the addon
-before turning this on if you want to verify it.
+> [!NOTE]
+> The **HDMI** mirror output ON/OFF toggle was removed from the EMULATOR MENU on 2026-08-24.
+> Use the boot-time F1 setup menu, or `[hdmi] enable` in `pb1000.ini`, instead (changes take
+> effect after saving and an MCU reboot). See [hardware_guide_en.md](hardware_guide_en.md) §9
+> and [usage_guide_en.md](usage_guide_en.md) §11 for details.
 
 ---
 
@@ -117,8 +122,15 @@ before turning this on if you want to verify it.
 | **Hook Status** | A read-only screen listing which extensions (modules under `mp/ext/`, etc.) are currently active |
 | **CPU Status** | A read-only screen showing the current CPU registers (PC, flags, UA, IA/IB/IE, IX-KY, $0-$31) plus a raw byte dump and disassembly around PC |
 | **Reset** | Reset the **emulated PB-1000** on the spot — the same as pressing NumLock on a real keyboard. The Pico itself does not restart. |
-| **Reboot Emulator (MCU)** | Hardware-reboot **the Pico itself** via `machine.reset()` — see the warning below |
 | **NEW ALL (clear memory)** | Run the PB-1000's NEW ALL function, which erases all user memory |
+| **Reboot Emulator (MCU)** | Hardware-reboot **the Pico itself** via `machine.reset()` — see the warning below |
+
+> [!NOTE]
+> **NEW ALL** doesn't simulate a real Win+F12 keypress through the key matrix. After
+> confirmation, it jumps the CPU's PC directly to the ROM's own NEW ALL handler
+> (`&H8D38`) instead. Before 2026-08-22 this queued a simulated key press, but that was
+> sensitive to KEY_INT timing and the main loop resuming in time, so it was switched to
+> this more direct and reliable approach.
 
 > [!WARNING]
 > **NEW ALL erases all of the user's memory** (saved programs and data). A confirmation screen
@@ -145,10 +157,8 @@ the System sub-menu.
 
 - **Lost track of which menu level you're on?** Keep pressing BREAK — it always steps you back:
   sub-menu → top-level menu → menu closed.
-- **Accidentally toggled Color VRAM (or another toggle)?** Select the same item again with EXE
-  to flip it back.
-- **Accidentally ran RAM Load or NEW ALL?** These take effect immediately and can't be undone.
-  Get in the habit of using **RAM Save** regularly to keep backups.
+- **Accidentally ran NEW ALL or Reboot Emulator (MCU)?** These take effect immediately and can't
+  be undone. Get in the habit of using **RAM Save** regularly to keep backups.
 
 ---
 

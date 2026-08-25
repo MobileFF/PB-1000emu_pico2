@@ -531,6 +531,7 @@ void hd61700_reset(hd61700_state_t *cpu) {
   cpu->irq_status = 0;
   cpu->prev_ua = 0;
   cpu->fetch_ua = 0;
+  cpu->hook_suppress_active = false;
   memset(cpu->regsir, 0, sizeof(cpu->regsir));
   memset(cpu->reg8bit, 0, sizeof(cpu->reg8bit));
   memset(cpu->reg16bit, 0, sizeof(cpu->reg16bit));
@@ -547,10 +548,6 @@ void hd61700_set_key_debug(hd61700_state_t *cpu, bool enable) {
 
 void hd61700_set_lcd_debug(hd61700_state_t *cpu, bool enable) {
   cpu->lcd_debug_log = enable;
-}
-
-void hd61700_set_rom_newall_debug(hd61700_state_t *cpu, bool enable) {
-  cpu->rom_newall_debug_log = enable;
 }
 
 void hd61700_set_pc(hd61700_state_t *cpu, uint16_t pc) { set_pc(cpu, pc); }
@@ -635,8 +632,17 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
       cpu->fetch_ua = cpu->prev_ua;
       cpu->prev_ua = REG_UA;
       /* Execution trap: fire before fetch if PC == a registered hook address.
-       * Handles BASIC's CALL which uses push+JP (HD61700 has no indirect CAL). */
-      if (cpu->call_hook && cpu->call_hook(cpu->cb_ctx, instr_pc)) {
+       * Handles BASIC's CALL which uses push+JP (HD61700 has no indirect CAL).
+       * Skipped once when hook_suppress_active marks this exact PC as already
+       * consulted by the CAL/JP/JR-specific passthrough checks below (see
+       * hd61700.h) -- otherwise a passthrough hook would fire a second time
+       * here the instant PC lands on it. The flag is consumed unconditionally
+       * so it can never linger armed for a later, unrelated visit. */
+      bool suppress_hook_trap =
+          cpu->hook_suppress_active && cpu->hook_suppress_pc == instr_pc;
+      cpu->hook_suppress_active = false;
+      if (!suppress_hook_trap && cpu->call_hook &&
+          cpu->call_hook(cpu->cb_ctx, instr_pc)) {
         uint8_t lo = pop(cpu, &REG_SS);
         uint8_t hi = pop(cpu, &REG_SS);
         uint16_t hook_target = (uint16_t)(((hi << 8) | lo) + 1);
@@ -645,52 +651,6 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
         continue;
       }
       uint8_t op = read_op(cpu);
-      /* Narrow, independent trace: fires once per accepted keypress whose
-       * dispatched code is in the membrane/function-key range (>=0x90),
-       * which covers NEW ALL/CALC/MENU/etc but excludes ordinary character
-       * keys — keeps this quiet during normal typing. R0 holds the ROM's
-       * dispatched key code. */
-      if (cpu->rom_newall_debug_log && instr_pc == 0x94A6 && cpu->log_write &&
-          READ_REG(0) >= 0x90) {
-        char nabuf[96];
-        int nan = snprintf(nabuf, sizeof(nabuf),
-                            "ROM-NEWALL: PC=0x94A6 R0=0x%02X IA=0x%02X",
-                            READ_REG(0), REG_IA);
-        if (nan > 0)
-          cpu->log_write(cpu->log_ctx, nabuf);
-      }
-      /* NEW ALL routine entry: PC=0x8D38 (rom1.src). Fires only if the ROM
-       * actually took the `jp z,&H8D38` branch after dispatching R0=0x9A. */
-      if (cpu->rom_newall_debug_log && instr_pc == 0x8D38 && cpu->log_write) {
-        char neabuf[48];
-        int nean = snprintf(neabuf, sizeof(neabuf), "ROM-NEWALL-ENTRY: PC=0x8D38");
-        if (nean > 0)
-          cpu->log_write(cpu->log_ctx, neabuf);
-      }
-      /* NEW ALL: reached CLRME (clear memory) call at PC=0x8D97. $2:$4 hold
-       * the address/length arguments per the "cal &H016E ;CLRME" call. */
-      if (cpu->rom_newall_debug_log && instr_pc == 0x8D97 && cpu->log_write) {
-        char clbuf[80];
-        int cln = snprintf(clbuf, sizeof(clbuf),
-                            "ROM-NEWALL-CLRME: PC=0x8D97 ADDR=0x%04X LEN=0x%04X",
-                            REG_GET16(2), REG_GET16(4));
-        if (cln > 0)
-          cpu->log_write(cpu->log_ctx, clbuf);
-      }
-      /* Candidate key detected (debounce start): PC=0x062C, "store the
-       * coordinates of a pressed key, $0=KO $1,$2=KI" (rom0.src). Filtered
-       * to KO=6 (our NEW ALL row) only — this routine fires for every key
-       * on the whole keyboard, so an unfiltered trace floods the console. */
-      if (cpu->rom_newall_debug_log && instr_pc == 0x062C && cpu->log_write &&
-          READ_REG(0) == 6) {
-        char cabuf[96];
-        int can = snprintf(cabuf, sizeof(cabuf),
-                            "ROM-CANDIDATE: PC=0x062C KO=0x%02X KI1=0x%02X "
-                            "KI2=0x%02X",
-                            READ_REG(0), READ_REG(1), READ_REG(2));
-        if (can > 0)
-          cpu->log_write(cpu->log_ctx, cabuf);
-      }
       if (cpu->debug_log && cpu->key_debug_log && instr_pc == 0x062C) {
         cpu_log(cpu,
                 "TRACE 062C: OP=0x%02X F=0x%02X IA=0x%02X IB=0x%02X IE=0x%02X "
@@ -1183,6 +1143,8 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
              otherwise can't see. */
           if (!(cpu->call_hook && cpu->call_hook(cpu->cb_ctx, addr))) {
             set_pc(cpu, addr);
+            cpu->hook_suppress_pc = addr;
+            cpu->hook_suppress_active = true;
           }
         }
         cpu->icount -= 3;
@@ -1612,8 +1574,13 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
       case 0x77: { /* CAL IM16 */
         uint16_t addr = read_imm16_aligned(cpu);
         if (check_cond(cpu, op)) {
-          /* CAL hook: if registered, intercept and skip normal push/set_pc.
-           * PC already points to the next instruction after operands. */
+          /* CAL hook: if registered and it asks to intercept (true), skip
+           * normal push/set_pc. PC already points to the next instruction
+           * after operands. If it asks to pass through (false) -- including
+           * simply not being registered -- do the real push+jump, so a
+           * passthrough hook acts as pre-processing in front of the real
+           * routine. Either way, arm hook_suppress so the generic trap at
+           * the loop top doesn't re-fire the instant PC lands on addr. */
           if (cpu->call_hook && cpu->call_hook(cpu->cb_ctx, addr)) {
             cpu->icount -= 12;
           } else {
@@ -1621,6 +1588,8 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
             push(cpu, &REG_SS, (uint8_t)(ret >> 8));
             push(cpu, &REG_SS, (uint8_t)ret);
             set_pc(cpu, addr);
+            cpu->hook_suppress_pc = addr;
+            cpu->hook_suppress_active = true;
             cpu->icount -= 12;
           }
         }
@@ -2089,6 +2058,8 @@ int hd61700_execute(hd61700_state_t *cpu, int cycles, int32_t stop_pc) {
              no return address, so on interception just skip the jump. */
           if (!(cpu->call_hook && cpu->call_hook(cpu->cb_ctx, (uint16_t)npc))) {
             set_pc(cpu, (int32_t)npc);
+            cpu->hook_suppress_pc = (uint16_t)npc;
+            cpu->hook_suppress_active = true;
           }
         }
         cpu->icount -= 3;

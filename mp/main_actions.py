@@ -76,7 +76,7 @@ def handle_key_status_and_capture(system, sc=-1, mod=0):
         system.set_status("CAPTURING...")
         system.update_display()
         try:
-            from emulator_menu import _do_vram_save
+            from emulator_menu_capture import _do_vram_save
             msg = _do_vram_save(system)
             import gc; gc.collect()
             print(f"PrtScr: {msg}")

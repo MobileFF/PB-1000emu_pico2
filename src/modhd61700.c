@@ -5,6 +5,7 @@
 #include "mpconfigport.h"
 #include "py/runtime.h"
 #include "py/mphal.h"
+#include "py/misc.h"
 #include "hd61700.h"
 #include "lcd_controller.h"
 #include "hardware/gpio.h"
@@ -16,11 +17,6 @@ static hd61700_state_t cpu_state;
 static bool cpu_debug_enabled = false;
 static bool cpu_key_debug_enabled = false;
 static bool cpu_lcd_debug_enabled = false;
-/* Narrow, independent trace: only USB scancode 0x45 (F12) press/release
- * events in c_kb_process_usb_key. Deliberately decoupled from
- * cpu_debug_enabled/cpu_key_debug_enabled so it can be used without the
- * high-volume ROM key-scan-path traces gated by those flags. */
-static bool cpu_newall_debug_enabled = false;
 
 extern lcd_state_t *lcd_c_get_state(void);
 
@@ -30,9 +26,42 @@ static size_t rom0_size = 0;
 static uint8_t rom1_buf[0x8000]; // 32KB System ROM
 static size_t rom1_size = 0;
 static uint8_t ram_buf[0x2000];     // 8KB RAM (0x6000-0x7FFF)
-static uint8_t bank1_buf[0x8000]; // 32KB RAM Bank 1 (0x8000-0xFFFF)
-static uint8_t bank2_buf[0x8000]; // 32KB RAM Bank 2 (0x8000-0xFFFF)
-static uint8_t bank3_buf[0x8000]; // 32KB RAM Bank 3 (0x8000-0xFFFF)
+/* Bank 1-3 RAM (32KB each, 0x8000-0xFFFF): allocated on demand from the
+ * MicroPython GC heap, not reserved as static arrays -- so a profile using
+ * fewer than 3 banks genuinely frees that much heap (gc.mem_free()-visible).
+ * NULL until ensure_bank_buf() is called for that bank. See
+ * [[project_bank_dynamic_alloc]] memory for the full history: a first
+ * attempt at this (2026-08-23) caused a real-hardware boot hang, root-caused
+ * (not reproduced, but confirmed via code reading) to c_mem_direct_read()/
+ * c_mem_direct_write() gating bank access on has_bank[] alone, without
+ * checking whether the buffer pointer itself was non-NULL -- fixed below by
+ * (a) checking the pointer explicitly at every dereference site, not just
+ * has_bank[], and (b) allocating the buffer *before* setting has_bank[]=true
+ * in set_bank_present()/set_has_exp_ram(), so a failed allocation can never
+ * leave has_bank[]=true paired with a NULL buffer. */
+#define BANK_BUF_SIZE 0x8000
+static uint8_t *bank1_buf = NULL;
+static uint8_t *bank2_buf = NULL;
+static uint8_t *bank3_buf = NULL;
+
+/* Lazily allocate the given bank's buffer (1..3) from the GC heap if it
+ * doesn't exist yet. Returns the (now guaranteed non-NULL) pointer.
+ * m_malloc() raises MemoryError on failure rather than returning NULL --
+ * propagates as a normal, catchable Python exception up through whichever
+ * native function (set_bank_present/set_has_exp_ram/load_ram) called this,
+ * before that caller has set has_bank[]=true, so has_bank[]/buffer state
+ * can never end up inconsistent even on allocation failure. */
+static uint8_t *ensure_bank_buf(int bank /* 1..3 */) {
+  uint8_t **slot;
+  if (bank == 1) slot = &bank1_buf;
+  else if (bank == 2) slot = &bank2_buf;
+  else if (bank == 3) slot = &bank3_buf;
+  else return NULL;
+  if (*slot == NULL) {
+    *slot = (uint8_t *)m_malloc(BANK_BUF_SIZE);
+  }
+  return *slot;
+}
 static uint8_t ext_work_buf[0x100]; // 256B Extension API work area (0x5F00-0x5FFF)
 
 /* LCD write log / read queue for unit-test intercept */
@@ -54,7 +83,6 @@ static uint16_t dma_len      = 0;
 static uint8_t  dma_status   = 0x00; /* bit0=error */
 
 static void _dma_execute(void) {
-    static uint8_t * const bufs[3] = {bank1_buf, bank2_buf, bank3_buf};
     if (dma_src_bank < 1 || dma_src_bank > 3 || !has_bank[dma_src_bank]
         || dma_len == 0
         || (uint32_t)dma_src_addr + dma_len > 0x8000u
@@ -62,9 +90,15 @@ static void _dma_execute(void) {
         dma_status = 0x01;
         return;
     }
+    uint8_t * const bufs[3] = {bank1_buf, bank2_buf, bank3_buf};
+    uint8_t *src = bufs[dma_src_bank - 1];
+    if (src == NULL) {
+        dma_status = 0x01;
+        return;
+    }
     lcd_state_t *lcd = lcd_c_get_state();
     memcpy(lcd->color_vram + dma_dst_addr,
-           bufs[dma_src_bank - 1] + dma_src_addr, dma_len);
+           src + dma_src_addr, dma_len);
     dma_status = 0x00;
 }
 
@@ -430,9 +464,6 @@ static void c_kb_process_usb_key(uint8_t scancode, bool pressed) {
 
   /* 3. Handle key release */
   if (!pressed) {
-    if (cpu_newall_debug_enabled && scancode == 0x45) {
-      mp_printf(&mp_plat_print, "[NEWALL-DBG] release sc=0x45\n");
-    }
     for (int i = 0; i < c_kb_active_usb_count; i++) {
       if (c_kb_active_usb[i].scancode == scancode) {
         /* SFT combo fire-and-hold: if coords[0]==(11,2) with targets, ensure all keys
@@ -497,10 +528,6 @@ static void c_kb_process_usb_key(uint8_t scancode, bool pressed) {
 
   /* Debounce: Skip press if it happens too soon after previous release (e.g. 50ms) */
   if (mp_hal_ticks_ms() - last_release_ms[scancode] < 50) {
-    if (cpu_newall_debug_enabled && scancode == 0x45) {
-      mp_printf(&mp_plat_print,
-                "[NEWALL-DBG] press sc=0x45 DEBOUNCED (skipped)\n");
-    }
     return;
   }
 
@@ -568,19 +595,6 @@ static void c_kb_process_usb_key(uint8_t scancode, bool pressed) {
         found = true;
         break;
       }
-    }
-  }
-
-  if (cpu_newall_debug_enabled && scancode == 0x45) {
-    if (found) {
-      mp_printf(&mp_plat_print,
-                "[NEWALL-DBG] press sc=0x45 mod=0x%02X found=1 n_coords=%d "
-                "coord0=(%d,%d)\n",
-                current_mod, ak->n_coords, ak->coords[0][0], ak->coords[0][1]);
-    } else {
-      mp_printf(&mp_plat_print,
-                "[NEWALL-DBG] press sc=0x45 mod=0x%02X found=0 (no map match)\n",
-                current_mod);
     }
   }
 
@@ -972,9 +986,14 @@ static uint8_t c_mem_direct_read(void *ctx, uint8_t segment, uint32_t offset) {
       /* Bank 0: System ROM */
       return (rom1_size > 0) ? rom1_buf[off % rom1_size] : 0xFF;
     }
-    /* Banks 1-3: RAM */
-    static uint8_t * const bank_bufs[3] = {bank1_buf, bank2_buf, bank3_buf};
-    if (bank >= 1 && bank <= 3 && has_bank[bank])
+    /* Banks 1-3: RAM. Checks the buffer pointer itself, not just has_bank[]
+     * -- has_bank[bank] can become true via detect_all_banks()'s file probe
+     * (or any other path) before the buffer is actually allocated; without
+     * this check that would be a NULL-pointer dereference on this hot path
+     * (called on every emulated memory access). See the 2026-08-23 postmortem
+     * comment above bank1_buf's declaration. */
+    uint8_t * const bank_bufs[3] = {bank1_buf, bank2_buf, bank3_buf};
+    if (bank >= 1 && bank <= 3 && has_bank[bank] && bank_bufs[bank - 1] != NULL)
       return bank_bufs[bank - 1][off];
     return 0xFF;
   }
@@ -1067,8 +1086,10 @@ static void c_mem_direct_write(void *ctx, uint8_t segment, uint32_t offset,
   /* Banks 1-3: RAM Write (0x8000-0xFFFF) */
   else if (offset >= 0x8000 && bank >= 1 && bank <= 3) {
     uint32_t off = offset - 0x8000;
-    if (off < 0x8000 && has_bank[bank]) {
-      static uint8_t * const bank_bufs[3] = {bank1_buf, bank2_buf, bank3_buf};
+    uint8_t * const bank_bufs[3] = {bank1_buf, bank2_buf, bank3_buf};
+    /* See c_mem_direct_read()'s matching comment: bank_bufs[]!=NULL must be
+     * checked alongside has_bank[], not instead of it. */
+    if (off < 0x8000 && has_bank[bank] && bank_bufs[bank - 1] != NULL) {
       bank_bufs[bank - 1][off] = data;
       if (ENABLE_PROG_WRITE_TRACE && is_prog_trace_addr(offset)) {
         log_watch_write("PROG-WR", bank, offset, data, NULL);
@@ -1309,12 +1330,16 @@ static mp_obj_t mod_reset(size_t n_args, const mp_obj_t *args) {
 
   /* Connect direct memory pointers for high-performance path */
   {
-    static uint8_t * const bank_bufs[3] = {bank1_buf, bank2_buf, bank3_buf};
+    uint8_t * const bank_bufs[3] = {bank1_buf, bank2_buf, bank3_buf};
     cpu_state.rom0_ptr    = rom0_buf;
     cpu_state.ram_ptr     = ram_buf;
     cpu_state.bank_ptr[0] = rom1_buf;
     cpu_state.bank_is_ram[0] = false;
     for (int i = 1; i <= 3; i++) {
+      /* has_bank[i] ? ... : NULL already resolves to NULL either way when
+       * bank_bufs[i-1] itself is NULL (unallocated) -- bank_ptr[] reads in
+       * hd61700.c already NULL-check before dereferencing, so no separate
+       * check is needed here, unlike the c_mem_direct_read/write hot path. */
       cpu_state.bank_ptr[i]    = has_bank[i] ? bank_bufs[i - 1] : NULL;
       cpu_state.bank_is_ram[i] = true;
     }
@@ -1350,16 +1375,6 @@ static mp_obj_t mod_set_lcd_debug(mp_obj_t enabled_obj) {
   return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(mod_set_lcd_debug_obj, mod_set_lcd_debug);
-
-/* hd61700.set_newall_debug(enabled): narrow trace, USB scancode 0x45 (F12)
- * press/release only, plus the ROM's dispatched key code at PC=0x94A6.
- * Independent of set_debug/set_key_debug. */
-static mp_obj_t mod_set_newall_debug(mp_obj_t enabled_obj) {
-  cpu_newall_debug_enabled = mp_obj_is_true(enabled_obj);
-  hd61700_set_rom_newall_debug(&cpu_state, cpu_newall_debug_enabled);
-  return mp_const_none;
-}
-static MP_DEFINE_CONST_FUN_OBJ_1(mod_set_newall_debug_obj, mod_set_newall_debug);
 
 /* hd61700.set_key_pulse_interval_ms(ms): interval between synthetic KEY_INT
  * pulses while a key is held (default C_KB_PULSE_INTERVAL_MS=25). Real
@@ -1688,12 +1703,11 @@ static mp_obj_t mod_load_ram(mp_obj_t slot_obj, mp_obj_t data_obj) {
   size_t   cap = 0;
   if (slot == 0) {
     dst = ram_buf;   cap = sizeof(ram_buf);
-  } else if (slot == 1) {
-    dst = bank1_buf; cap = sizeof(bank1_buf);
-  } else if (slot == 2) {
-    dst = bank2_buf; cap = sizeof(bank2_buf);
-  } else if (slot == 3) {
-    dst = bank3_buf; cap = sizeof(bank3_buf);
+  } else if (slot >= 1 && slot <= 3) {
+    /* Allocate before use -- ensure_bank_buf() raises MemoryError on
+     * failure rather than returning NULL, so dst is guaranteed non-NULL
+     * past this point (or we never reach the memcpy at all). */
+    dst = ensure_bank_buf(slot); cap = BANK_BUF_SIZE;
   } else {
     return mp_const_none; /* unknown slot */
   }
@@ -1703,9 +1717,9 @@ static mp_obj_t mod_load_ram(mp_obj_t slot_obj, mp_obj_t data_obj) {
 
   if (slot >= 1 && slot <= 3) {
     has_bank[slot] = true;
+    has_bank_forced = true;
     /* Update bank_ptr immediately so subsequent reads without reset() also work */
-    static uint8_t * const bank_bufs[3] = {bank1_buf, bank2_buf, bank3_buf};
-    cpu_state.bank_ptr[slot] = bank_bufs[slot - 1];
+    cpu_state.bank_ptr[slot] = dst;
   }
   return mp_const_none;
 }
@@ -1717,22 +1731,25 @@ static mp_obj_t mod_get_ram_view(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(mod_get_ram_view_obj, mod_get_ram_view);
 
-/* hd61700.get_exp_ram_view()  — backward-compatible alias for get_bank_view(1) */
+/* hd61700.get_exp_ram_view()  — backward-compatible alias for get_bank_view(1).
+ * Returns None if bank 1 hasn't been allocated (Python should only call this
+ * for banks it just enabled via set_has_exp_ram/set_bank_present). */
 static mp_obj_t mod_get_exp_ram_view(void) {
-  return mp_obj_new_bytearray_by_ref(sizeof(bank1_buf), bank1_buf);
+  if (bank1_buf == NULL) return mp_const_none;
+  return mp_obj_new_bytearray_by_ref(BANK_BUF_SIZE, bank1_buf);
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(mod_get_exp_ram_view_obj, mod_get_exp_ram_view);
 
-/* hd61700.get_bank_view(bank)  bank: 1..3 */
+/* hd61700.get_bank_view(bank)  bank: 1..3. Returns None if unallocated. */
 static mp_obj_t mod_get_bank_view(mp_obj_t bank_obj) {
   int bank = mp_obj_get_int(bank_obj);
   uint8_t *ptr = NULL;
-  size_t   sz  = 0;
-  if      (bank == 1) { ptr = bank1_buf; sz = sizeof(bank1_buf); }
-  else if (bank == 2) { ptr = bank2_buf; sz = sizeof(bank2_buf); }
-  else if (bank == 3) { ptr = bank3_buf; sz = sizeof(bank3_buf); }
+  if      (bank == 1) { ptr = bank1_buf; }
+  else if (bank == 2) { ptr = bank2_buf; }
+  else if (bank == 3) { ptr = bank3_buf; }
   else return mp_const_none;
-  return mp_obj_new_bytearray_by_ref(sz, ptr);
+  if (ptr == NULL) return mp_const_none;
+  return mp_obj_new_bytearray_by_ref(BANK_BUF_SIZE, ptr);
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(mod_get_bank_view_obj, mod_get_bank_view);
 
@@ -1774,12 +1791,19 @@ static mp_obj_t mod_lcd_clear_read_queue(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(mod_lcd_clear_read_queue_obj, mod_lcd_clear_read_queue);
 
-/* hd61700.set_has_exp_ram(bool)  — sets Bank 1 presence flag (backward compat) */
+/* hd61700.set_has_exp_ram(bool)  — sets Bank 1 presence flag (backward compat).
+ * Allocates (if enabling) BEFORE setting has_bank[1]=true: ensure_bank_buf()
+ * raises MemoryError on allocation failure, which unwinds out of this native
+ * function before has_bank[1] is touched -- so a failed allocation can never
+ * leave has_bank[1]=true paired with a NULL buffer (the exact inconsistency
+ * that made the unchecked c_mem_direct_read/write hot path unsafe the first
+ * time this feature was attempted; see bank1_buf's declaration comment). */
 static mp_obj_t mod_set_has_exp_ram(mp_obj_t enable_obj) {
-  has_bank[1]    = mp_obj_is_true(enable_obj);
+  bool enable = mp_obj_is_true(enable_obj);
+  uint8_t *buf = enable ? ensure_bank_buf(1) : NULL;
+  has_bank[1] = enable;
   has_bank_forced = true;
-  static uint8_t * const bank_bufs[3] = {bank1_buf, bank2_buf, bank3_buf};
-  cpu_state.bank_ptr[1] = has_bank[1] ? bank_bufs[0] : NULL;
+  cpu_state.bank_ptr[1] = buf;
   return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(mod_set_has_exp_ram_obj, mod_set_has_exp_ram);
@@ -1790,29 +1814,43 @@ static MP_DEFINE_CONST_FUN_OBJ_1(mod_set_has_exp_ram_obj, mod_set_has_exp_ram);
    wired, independent of detect_all_banks()'s fixed-path file probe (which
    only checks /roms or /sd, not per-profile save directories). Setting any
    bank via this call (or set_has_exp_ram) latches has_bank_forced so a later
-   reset() never re-runs detect_all_banks() and silently reverts banks 2/3. */
+   reset() never re-runs detect_all_banks() and silently reverts banks 2/3.
+   Allocates before setting has_bank[bank]=true -- see set_has_exp_ram()'s
+   comment above for why that order matters. */
 static mp_obj_t mod_set_bank_present(mp_obj_t bank_obj, mp_obj_t enable_obj) {
   int bank = mp_obj_get_int(bank_obj);
   if (bank < 1 || bank > 3) return mp_const_none;
   bool enable = mp_obj_is_true(enable_obj);
+  uint8_t *buf = enable ? ensure_bank_buf(bank) : NULL;
   has_bank[bank] = enable;
   has_bank_forced = true;
-  static uint8_t * const bank_bufs[3] = {bank1_buf, bank2_buf, bank3_buf};
-  cpu_state.bank_ptr[bank] = enable ? bank_bufs[bank - 1] : NULL;
+  cpu_state.bank_ptr[bank] = buf;
   return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_2(mod_set_bank_present_obj, mod_set_bank_present);
 
 /* ---- CAL hook dispatcher ---- */
 
-/* Called from hd61700.c CAL handler.
- * Returns true if address is registered (intercept), false otherwise. */
+/* Called from hd61700.c's three call_hook sites (generic RTN-sim path,
+ * and the CAL/JP/JR pre-jump checks). Returns true if address is
+ * registered AND the hook wants to intercept (skip the real push/jump
+ * and simulate a return), false if address is unregistered OR the hook
+ * asked to pass through (let the real CAL/JP/JR proceed normally after
+ * the hook has run -- i.e. the hook acts as a pre-processing step in
+ * front of the original ROM routine, not a replacement for it).
+ *
+ * The Python/native hook function's return value decides intercept vs.
+ * passthrough: a truthy return (or the common case of no explicit
+ * `return`, which MicroPython represents as None) means intercept, to
+ * keep every hook written before this passthrough option existed
+ * behaving exactly as before. Returning False explicitly requests
+ * passthrough. */
 static bool c_call_hook_dispatcher(void *ctx, uint16_t addr) {
   (void)ctx;
   for (int i = 0; i < call_hook_count; i++) {
     if (call_hook_addrs[i] == addr && call_hook_enabled[i]) {
-      mp_call_function_0(call_hook_fns[i]);
-      return true;
+      mp_obj_t ret = mp_call_function_0(call_hook_fns[i]);
+      return (ret == mp_const_none) ? true : mp_obj_is_true(ret);
     }
   }
   return false;
@@ -2273,7 +2311,6 @@ static const mp_rom_map_elem_t hd61700_module_globals_table[] = {
     {MP_ROM_QSTR(MP_QSTR_set_debug), MP_ROM_PTR(&mod_set_debug_obj)},
     {MP_ROM_QSTR(MP_QSTR_set_key_debug), MP_ROM_PTR(&mod_set_key_debug_obj)},
     {MP_ROM_QSTR(MP_QSTR_set_lcd_debug), MP_ROM_PTR(&mod_set_lcd_debug_obj)},
-    {MP_ROM_QSTR(MP_QSTR_set_newall_debug), MP_ROM_PTR(&mod_set_newall_debug_obj)},
     {MP_ROM_QSTR(MP_QSTR_set_key_pulse_interval_ms), MP_ROM_PTR(&mod_set_key_pulse_interval_ms_obj)},
     {MP_ROM_QSTR(MP_QSTR_set_mem_callbacks),
      MP_ROM_PTR(&mod_set_mem_callbacks_obj)},

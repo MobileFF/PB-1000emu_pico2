@@ -57,16 +57,21 @@ UA bits 5-4   Bank   Buffer       Access    File
 ─────────────────────────────────────────────────────────────
 ```
 
-- **Bank 0** (ROM1) is always present (`has_bank[0] = true`).
-- **Banks 1–3** (expanded RAM): the buffer space (`bank1_buf`..`bank3_buf`) is always reserved at
-  boot since 2026-08, so switching to a profile that uses more banks can actually load them.
-  `has_bank[1..3]` (the CPU-visible presence flag) is *not* pinned to always-true, though — it's
-  re-evaluated on every profile switch from that profile's `ramN.bin` presence, and mirrored to the C
-  core via `set_bank_present()`/`set_has_exp_ram()`. This matters because a real bank-presence probe
-  (write then read back — an absent bank always reads back 0xFF regardless of what was written, see
-  `c_mem_direct_read`) should see a result consistent with what the loaded profile represents, not a
-  permanently-faked "card present". A profile without `ramN.bin` for a slot gets that bank filled with
-  0xFF (same value an absent bank reads as) rather than leaking the previous profile's contents.
+- **Bank 0** (ROM1) is always present (`has_bank[0] = true`). Its buffer (`rom1_buf`) is a
+  fixed-size static array.
+- **Banks 1–3** (expanded RAM): the buffer space (`bank1_buf`..`bank3_buf`) is allocated on
+  demand from the MicroPython GC heap via `m_malloc()` (`ensure_bank_buf()` in `modhd61700.c`),
+  only for banks the boot-time profile actually has a `ramN.bin` for. A bank without `ramN.bin`
+  keeps its pointer `NULL` and consumes no heap. `has_bank[1..3]` (the CPU-visible presence flag)
+  reflects the active profile's `ramN.bin` presence, mirrored to the C core via
+  `set_bank_present()`/`set_has_exp_ram()` — these always allocate (`ensure_bank_buf()`) before
+  setting `has_bank[N] = true`, so a failed allocation can never leave the two inconsistent. The
+  CPU's per-byte memory-access path (`c_mem_direct_read`/`c_mem_direct_write`) checks both
+  `has_bank[bank]` and the buffer pointer itself before dereferencing. A bank without `ramN.bin`
+  always reads back 0xFF (same value an unmapped region reads as) because `has_bank[N]` is false,
+  so there's no need to explicitly fill its (nonexistent) buffer. Profile selection happens once
+  at boot; there is no mid-session bank reconfiguration (the old RAM Load feature no longer
+  exists).
 - Bank selection formula: `bank = (REG_UA >> 4) & 0x03` (consistent in both C and Python).
 
 ---
@@ -162,12 +167,13 @@ IF PEEK(&H0C37) AND 1 THEN PRINT "DMA ERROR"
 | `ext_work_buf` | 256 B | 0x5F00–0x5FFF | Extension API work area (shared with Python `_ext_work`) |
 | `ram_buf` | 8 KB | 0x6000–0x7FFF | Standard RAM |
 | `rom1_buf` | 32 KB | 0x8000–0xFFFF (Bank 0) | System ROM (ROM1) |
-| `bank1_buf` | 32 KB | 0x8000–0xFFFF (Bank 1) | Expanded RAM1 |
-| `bank2_buf` | 32 KB | 0x8000–0xFFFF (Bank 2) | Expanded RAM2 |
-| `bank3_buf` | 32 KB | 0x8000–0xFFFF (Bank 3) | Expanded RAM3 |
+| `bank1_buf` | 32 KB (allocated on demand) | 0x8000–0xFFFF (Bank 1) | Expanded RAM1 |
+| `bank2_buf` | 32 KB (allocated on demand) | 0x8000–0xFFFF (Bank 2) | Expanded RAM2 |
+| `bank3_buf` | 32 KB (allocated on demand) | 0x8000–0xFFFF (Bank 3) | Expanded RAM3 |
 
 `has_bank[4]` flags manage which banks are active.
-`bank_ptr[4]` / `bank_is_ram[4]` are stored in the `hd61700_state_t` CPU state struct.
+`bank_ptr[4]` / `bank_is_ram[4]` are stored in the `hd61700_state_t` CPU state struct
+(`bank_ptr[N]` is `NULL` for any of banks 1–3 that haven't been allocated).
 
 ---
 

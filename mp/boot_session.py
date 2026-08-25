@@ -6,6 +6,7 @@ import os
 import time
 
 from hdmi_menu_mirror import hdmi_flush
+from draw_text import draw_text as _draw_text
 
 PROFILE_ROOT = "/sd/rams"
 
@@ -109,13 +110,28 @@ def select_profile_ui(display, profiles, default, timeout_ms=30000, sd_mounted=F
                 return profiles[sel]
             elif sc == 0x3A:  # F1 — BIOS-style setup menu
                 import sys, gc
-                import setup_menu
-                setup_menu.run_setup_menu(display, sd_mounted, profiles)
-                # Only reached on Discard (Save triggers machine.reset()).
-                # Fully unload the module (not just the local name) so its
-                # heap is freed for the rest of boot (ROM loading etc. needs
-                # large contiguous blocks) — this menu is meant to cost
-                # nothing unless F1 is actually used.
+                # setup_menu.py has grown large enough that compiling it
+                # needs a sizable contiguous block, right at the point in
+                # boot (SD/USB host already up, ROM buffer pre-reservation
+                # already held -- see main.py) where free heap is most
+                # fragmented. Collect first to give the import its best shot
+                # at finding that block, and catch MemoryError specifically
+                # (not via the outer except Exception below, which would
+                # otherwise silently fall through to auto-selecting a
+                # profile instead of letting the user retry) so a low-memory
+                # moment just reports itself and returns to the picker.
+                gc.collect()
+                try:
+                    import setup_menu
+                    setup_menu.run_setup_menu(display, sd_mounted, profiles)
+                except MemoryError as e:
+                    print(f"[Boot] Setup menu unavailable (low memory): {e}")
+                # Only reached on Discard (Save triggers machine.reset()) or
+                # on the MemoryError above. Fully unload the module (not
+                # just the local name) so its heap is freed for the rest of
+                # boot (ROM loading etc. needs large contiguous blocks) —
+                # this menu is meant to cost nothing unless F1 is actually
+                # used.
                 sys.modules.pop('setup_menu', None)
                 gc.collect()
                 deadline = time.ticks_add(time.ticks_ms(), timeout_ms)
@@ -157,41 +173,15 @@ def select_profile_ui(display, profiles, default, timeout_ms=30000, sd_mounted=F
 
 
 # ---- rendering helpers -------------------------------------------------------
-
-def _swap16(c):
-    """Swap bytes of an RGB565 color value.
-    framebuf.RGB565 stores pixels little-endian; the LCD panel (ILI9341/ST7796) expects big-endian.
-    """
-    return ((c & 0xFF) << 8) | (c >> 8)
-
-
-def _draw_text(display, x, y, text, fg, bg=0x0000):
-    """Draw a text string using the built-in 8x8 framebuf font."""
-    W = display.width
-    max_chars = (W - x) // 8
-    text = text[:max_chars]
-    if not text:
-        return
-    record = getattr(display, 'record_text', None)
-    if record is not None:
-        # HDMIMirrorDisplay: record a compact text command instead of
-        # rasterizing to pixels (see hdmi_menu_mirror.py).
-        record(x, y, text, fg, bg)
-        return
-    import framebuf
-    tw = len(text) * 8
-    buf = bytearray(tw * 8 * 2)
-    fb = framebuf.FrameBuffer(buf, tw, 8, framebuf.RGB565)
-    fb.fill(_swap16(bg))
-    fb.text(text, 0, 0, _swap16(fg))
-    display.set_window(x, y, x + tw - 1, y + 7)
-    # Send pixel data in 1024-byte chunks (same as fill_rect) to avoid SPI transfer issues
-    mv = memoryview(buf)
-    display.dc.value(1)
-    display.cs.value(0)
-    for i in range(0, len(buf), 1024):
-        display.spi.write(mv[i:i + 1024])
-    display.cs.value(1)
+#
+# _draw_text is imported from draw_text.py (see the import at the top of
+# this file) rather than defined here. The copy that used to live in this
+# file allocated a buffer sized to the full string on every call -- this
+# screen redraws on every Up/Down keypress, which is exactly the repeated-
+# variable-size-allocation pattern that caused a real MemoryError elsewhere
+# in this codebase (see boot_status.py's "Heap safety" history) before
+# being replaced with the fixed-size-buffer approach draw_text.py now uses
+# everywhere.
 
 
 def _visible_profile_rows(H):

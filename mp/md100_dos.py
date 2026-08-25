@@ -94,10 +94,13 @@ class MD100Dos:
         if x == self._secnum:
             return True
         self._secnum = -1
-        raw = self._backend.read_raw(x)
-        if raw is None or len(raw) < SIZE_SECTOR:
+        # read_into() fills self._secbuf directly (zero Python-heap
+        # allocation on the ImageStorageBackend path) instead of allocating
+        # a fresh sector-sized object every call and then copying it in --
+        # this is a cache-miss path hit by essentially every disk read,
+        # directory scan, and seek, so it runs very frequently.
+        if not self._backend.read_into(x, self._secbuf):
             return False
-        self._secbuf[:] = raw[:SIZE_SECTOR]
         self._secnum = x
         return True
 

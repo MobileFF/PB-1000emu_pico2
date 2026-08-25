@@ -9,48 +9,43 @@ import sys
 import time
 from config import load_config, get_bool, get_int, get_str
 from boot_session import scan_profiles, get_profile_dir, select_profile_ui
+# Imported here (top level, before main() runs and before the ROM-buffer
+# pre-reservation below eats into contiguous heap) rather than deferred to
+# where it's actually used (Step 5) -- unlike setup_menu.py's deliberately
+# lazy import (rare, F1-only), boot_status is used on every normal boot, so
+# there's no heap-avoidance benefit to deferring it, only cost: compiling it
+# mid-boot, right when the profile picker/EXT loader/keymap build are
+# already fighting over the tightest contiguous heap of the whole boot
+# sequence, has been observed to fail with MemoryError there.
+from boot_status import BootStatusOverlay
+# Shared text-drawing helper for the whole boot/menu UI family (profile
+# picker, setup menu, this file's own ROM-load-error screen, EMULATOR MENU,
+# ...) -- see draw_text.py's module docstring. Imported here, first, so
+# it's resident before any of those other modules need it; each of them
+# just does the same `from draw_text import draw_text as _draw_text` and
+# pays no real cost for it beyond a sys.modules lookup.
+from draw_text import draw_text as _draw_text
 from main_boot import (
     init_display_only,
     init_usb_keyboard_early,
     create_system,
     configure_c_keyboard,
     configure_usb_keyboard_routing,
-    create_console_uart,
     initialize_usb_host_and_pio,
     load_default_roms,
 )
-from main_input import KeyboardInputManager, TouchInputManager, JoystickInputManager, _parse_joystick_key, CursorRepeatManager
-from main_runtime import (
-    run_cpu_slice,
-    service_pio_uart_bridge,
-    service_timer_ticks,
-    service_timer_realtime,
-    update_frame_if_due,
-)
-from main_actions import handle_key_status_and_capture
-from main_cleanup import dump_shutdown_state
 
-
-def _sw16(c):
-    return ((c & 0xFF) << 8) | (c >> 8)
-
-
-def _draw_text(display, x, y, text, fg, bg=0x0000):
-    import framebuf
-    text = str(text)
-    max_chars = max(0, (display.width - x) // 8)
-    text = text[:max_chars]
-    if not text:
-        return
-    buf = bytearray(8 * 8 * 2)  # one 8x8 character cell
-    fb = framebuf.FrameBuffer(buf, 8, 8, framebuf.RGB565)
-    cx = x
-    for ch in text:
-        fb.fill(_sw16(bg))
-        fb.text(ch, 0, 0, _sw16(fg))
-        display.set_window(cx, y, cx + 7, y + 7)
-        display.write_data(buf)
-        cx += 8
+# The main_input_*.py family / main_runtime / main_actions / main_cleanup
+# are NOT imported here at module level -- none of them are needed until
+# well after the profile picker (and its F1 setup menu) have already run,
+# and together they're substantial. Importing them up front would keep all
+# of that compiled bytecode resident through exactly the part of boot with
+# the least free contiguous heap (profile picker, setup_menu.py's F1
+# compile, then create_system()/[ext] loader -- see boot_status.py's "Heap
+# safety" docstring for the same concern applied to that module). Each is
+# instead imported right before its first use below: the main_input_*.py
+# family at Step 8b, main_runtime/main_actions/main_cleanup right before
+# the main loop.
 
 
 def _show_rom_load_error(display, failed_paths):
@@ -180,69 +175,60 @@ def main():
     # Step 5: Merged config (global + profile-specific override)
     cfg = load_config(profile_dir)
 
-    # Step 6: UART init (uses config values)
-    enable_uart_kbd = get_bool(cfg, "keyboard", "enable_uart_kbd")
-    uart_baudrate   = get_int(cfg, "keyboard", "uart_baudrate")
-    uart_tx_pin     = get_int(cfg, "keyboard", "uart_tx_pin")
-    uart_rx_pin     = get_int(cfg, "keyboard", "uart_rx_pin")
-
-    _uart_kbd, _console_uart = create_console_uart(
-        machine,
-        enable_uart_kbd=enable_uart_kbd,
-        baudrate=uart_baudrate,
-        tx_pin=uart_tx_pin,
-        rx_pin=uart_rx_pin,
-    )
+    # Boot status overlay (profile name / clock / mirrored last log line) --
+    # only when the physical LCD is actually the active display (HDMI, if
+    # enabled, took over the picker screen instead -- see the `_early_lcd`
+    # branch above and boot_status.py's BootStatusOverlay docstring for why
+    # the two are kept exclusive). Stopped further down, right before the
+    # emulator's own screen redraw takes over -- see the matching
+    # boot_status.stop() call near system.refresh_lcd_from_ledtp().
+    boot_status = None
+    if _early_lcd is None:
+        try:
+            gc.collect()  # maximize contiguous heap before the scratch-buffer allocation below
+            boot_status = BootStatusOverlay(
+                display, selected,
+                show_profile=get_bool(cfg, "overlay", "show_profile_name"),
+                show_clock=get_bool(cfg, "overlay", "show_clock"),
+                show_log=get_bool(cfg, "overlay", "show_log"),
+            )
+            boot_status.start()
+        except Exception as _e:
+            print(f"Boot status overlay setup failed: {_e}")
+            boot_status = None
 
     # Step 7: Create PB1000System with profile dir and merged config
+    gc.collect()
+    print("[MEM] before create_system (pb1000.py + [ext] loader): free=%d alloc=%d" %
+          (gc.mem_free(), gc.mem_alloc()))
     system = create_system(
         display_ret,
         profile_dir=profile_dir,
         config=cfg,
-        console_uart=_console_uart,
     )
+    gc.collect()
+    print("[MEM] after  create_system (pb1000.py + [ext] loader): free=%d alloc=%d" %
+          (gc.mem_free(), gc.mem_alloc()))
 
-    # Step 8: Input managers
+    # Step 8: enable_usb_kbd flag only -- Step 9 below (initialize_usb_host_and_pio(),
+    # configure_c_keyboard()) needs this, but the actual input-manager
+    # objects (KeyboardInputManager etc.) are constructed later, at Step 8b
+    # (right after load_state()), not here -- see that comment for why:
+    # building them here required importing the main_input_*.py family
+    # (500+ lines combined) right in the middle of create_system()'s [ext]
+    # module loader, the
+    # single tightest-heap moment of the whole boot sequence, which was
+    # observed to fail with MemoryError. Nothing between here and Step 8b
+    # actually touches keyboard_input/touch_input/joystick_input/
+    # cursor_repeat, so deferring their construction changes nothing else.
     enable_usb_kbd = get_bool(cfg, "keyboard", "enable_usb_kbd")
-    keyboard_input = KeyboardInputManager(
-        uart_kbd=_uart_kbd,
-        enable_uart_kbd=enable_uart_kbd,
-        uart_enter_always_exe=get_bool(cfg, "keyboard", "uart_enter_always_exe"),
-        key_hold_ms=get_int(cfg, "keyboard", "key_hold_ms"),
-        key_release_hard_timeout_ms=get_int(cfg, "keyboard", "key_release_hard_timeout_ms"),
-        inter_key_gap_ms=get_int(cfg, "keyboard", "inter_key_gap_ms"),
-    )
-    touch_input = TouchInputManager()
-    cursor_repeat = CursorRepeatManager()
-    joystick_input = None
-    if get_bool(cfg, "joystick", "enable"):
-        _joy_key_map = dict(JoystickInputManager.DEFAULT_KEY_MAP)
-        for _btn, _cfg_key in (
-            ("up",    "key_up"),
-            ("down",  "key_down"),
-            ("left",  "key_left"),
-            ("right", "key_right"),
-            ("fire1", "key_fire1"),
-            ("fire2", "key_fire2"),
-        ):
-            _parsed = _parse_joystick_key(get_str(cfg, "joystick", _cfg_key))
-            if _parsed is not None:
-                _joy_key_map[_btn] = _parsed
-        joystick_input = JoystickInputManager(
-            debounce_ms=get_int(cfg, "joystick", "debounce_ms"),
-            poll_interval_ms=get_int(cfg, "joystick", "poll_interval_ms"),
-            enable_fire2=get_bool(cfg, "joystick", "enable_fire2"),
-            key_map=_joy_key_map,
-        )
-        print("Joystick input enabled.")
 
     # Optional HDMI bridge output (second Pico 2 + PICO-HDMI-PLUS addon).
     # Opt-in, zero impact on users without the addon — see doc/hardware_guide.md
     # §7 and pb1000.ini's [hdmi] section. Must come after create_system()
     # (system.lcd) since it reuses the LCD's already-initialized SPI1 bus.
-    # cs_pin/baud are stashed on system even when disabled so the EMULATOR
-    # MENU's HDMI toggle (emulator_menu.py _do_hdmi_toggle) can turn it on
-    # live later without needing to re-read pb1000.ini.
+    # Boot-time only -- there is no runtime EMULATOR MENU toggle for this
+    # (removed 2026-08-24; use the F1 setup menu / pb1000.ini and reboot).
     system._hdmi_enabled = get_bool(cfg, "hdmi", "enable")
     system._hdmi_frame_skip = max(1, get_int(cfg, "hdmi", "frame_skip") or 1)
     system._hdmi_cs_pin = get_int(cfg, "hdmi", "cs_pin")
@@ -269,6 +255,8 @@ def main():
     failed_roms = load_default_roms(system)
     if failed_roms:
         print(f"*** ROM load failed: {failed_roms} — halting startup.")
+        if boot_status is not None:
+            boot_status.stop()  # stop mirroring before the fatal error screen takes over
         _show_rom_load_error(display, failed_roms)
         return
     gc.collect()
@@ -296,24 +284,125 @@ def main():
     print("[MEM] after  load_state: free=%d alloc=%d" %
           (gc.mem_free(), gc.mem_alloc()))
 
+    # [display] vdp_enable=false (F1 setup menu) forces per-pixel color VRAM
+    # rendering off, overriding whatever load_state() just decided (VDP
+    # defaults to ON in the C core, and load_state() re-enables it whenever a
+    # saved color_vram.bin is found) -- this is the config-backed replacement
+    # for the EMULATOR MENU's old "Color VRAM (VDP)" runtime toggle (removed
+    # 2026-08-22), for programs where the VDP render path itself is
+    # undesirable regardless of what got saved.
+    if not get_bool(cfg, "display", "vdp_enable") and hasattr(system.lcd, "set_vdp_enable"):
+        system.lcd.set_vdp_enable(False)
+
+    # Step 8b: Input managers -- deferred from Step 8 earlier (see the
+    # comment there) to here specifically, ahead of the emulator_menu
+    # preload / NTP / keymap / FuncKeyBar setup below. Those are all
+    # individually try/except-wrapped and degrade gracefully if their
+    # MemoryError-prone imports fail; input handling isn't optional the
+    # way those are, so it goes first, right after load_state() (as fresh
+    # a heap as boot ever gets past this point).
+    #
+    # Split across main_input_keyboard.py / _touch.py / _joystick.py /
+    # _cursor.py (formerly one 535-line main_input.py) with a gc.collect()
+    # before each: even after moving the combined import to this earliest
+    # position, a single 535-line compile was still observed to fail with
+    # MemoryError here on real hardware. Four smaller compiles (the
+    # biggest, KeyboardInputManager, is ~270 lines on its own) each have
+    # much better odds of finding a large-enough contiguous block than one
+    # big one did, even though the total code compiled is the same.
+    gc.collect()
+    from main_input_keyboard import KeyboardInputManager
+    keyboard_input = KeyboardInputManager(
+        key_hold_ms=get_int(cfg, "keyboard", "key_hold_ms"),
+        key_release_hard_timeout_ms=get_int(cfg, "keyboard", "key_release_hard_timeout_ms"),
+        inter_key_gap_ms=get_int(cfg, "keyboard", "inter_key_gap_ms"),
+    )
+
+    gc.collect()
+    from main_input_touch import TouchInputManager
+    touch_input = TouchInputManager()
+
+    gc.collect()
+    from main_input_cursor import CursorRepeatManager
+    cursor_repeat = CursorRepeatManager()
+
+    joystick_input = None
+    if get_bool(cfg, "joystick", "enable"):
+        gc.collect()
+        from main_input_joystick import _parse_joystick_key, JoystickInputManager
+        _joy_key_map = dict(JoystickInputManager.DEFAULT_KEY_MAP)
+        for _btn, _cfg_key in (
+            ("up",    "key_up"),
+            ("down",  "key_down"),
+            ("left",  "key_left"),
+            ("right", "key_right"),
+            ("fire1", "key_fire1"),
+            ("fire2", "key_fire2"),
+        ):
+            _parsed = _parse_joystick_key(get_str(cfg, "joystick", _cfg_key))
+            if _parsed is not None:
+                _joy_key_map[_btn] = _parsed
+        joystick_input = JoystickInputManager(
+            debounce_ms=get_int(cfg, "joystick", "debounce_ms"),
+            poll_interval_ms=get_int(cfg, "joystick", "poll_interval_ms"),
+            enable_fire2=get_bool(cfg, "joystick", "enable_fire2"),
+            key_map=_joy_key_map,
+        )
+        print("Joystick input enabled.")
+
+    # Step 8c: main loop function imports -- moved here (right after the
+    # input managers, still ahead of the emulator_menu preload / NTP /
+    # keymap / FuncKeyBar setup below) for the exact same reason as Step
+    # 8b: these were previously imported much later (just before the
+    # `while True:` loop), by which point emulator_menu/NTP/keymap/
+    # FuncKeyBar had all already had a chance to fail (non-fatally, each is
+    # try/except-wrapped) and fragment the heap on the way -- real hardware
+    # hit an uncaught MemoryError here as a result. Unlike those, nothing
+    # here degrades gracefully (the main loop cannot run without
+    # run_cpu_slice() etc.), so it needs to go early, not be wrapped.
+    gc.collect()
+    from main_runtime import (
+        run_cpu_slice,
+        service_pio_uart_bridge,
+        service_timer_ticks,
+        service_timer_realtime,
+        update_frame_if_due,
+    )
+    from main_actions import handle_key_status_and_capture
+    from main_cleanup import dump_shutdown_state
+
     # Import emulator_menu now (after the ROM/RAM/VFDD one-time loads are
     # done, instead of lazily on first F7 press). emulator_menu.py only
     # imports `time` at module level (no dependency on `system`/CPU state),
     # so it's safe here. Compiling it needs a sizable contiguous
-    # allocation — it has grown substantially (Full Capture, Hook Status,
-    # etc.) — and doing it lazily at F7 time meant competing with whatever
-    # fragmentation has built up by then. NOTE: it must NOT be imported any
-    # earlier than this (e.g. before the ROM buffer reservation above) —
-    # that was tried and it ate enough contiguous heap to make even the
-    # smallest ROM buffer reservation fail, breaking ROM1/VFDD loading.
+    # allocation — the category-specific handlers (Storage/Display/System)
+    # were split into their own emulator_menu_*.py files (lazily imported
+    # only when that category is actually opened) precisely to keep this
+    # preload's own contiguous-block requirement down — and doing it lazily
+    # at F7 time meant competing with whatever fragmentation has built up by
+    # then. NOTE: it must NOT be imported any earlier than this (e.g. before
+    # the ROM buffer reservation above) — that was tried and it ate enough
+    # contiguous heap to make even the smallest ROM buffer reservation fail,
+    # breaking ROM1/VFDD loading.
     # The later `from emulator_menu import show_emulator_menu` in the main
-    # loop then just hits sys.modules.
+    # loop then just hits sys.modules -- IF this preload succeeded. If it
+    # didn't, that later import re-attempts the same compile from inside
+    # the main loop instead (see its own try/except there for why that
+    # needs one too: an uncaught MemoryError there used to kill the whole
+    # emulator session, not just the menu).
+    gc.collect()
+    print("[MEM] before emulator_menu preload: free=%d alloc=%d" %
+          (gc.mem_free(), gc.mem_alloc()))
     try:
         import emulator_menu
     except Exception as _e:
         print(f"emulator_menu preload failed: {_e}")
+    print("[MEM] after  emulator_menu preload: free=%d alloc=%d" %
+          (gc.mem_free(), gc.mem_alloc()))
 
     # WiFi & NTP Synchronization
+    print("[MEM] before NTP sync: free=%d alloc=%d" %
+          (gc.mem_free(), gc.mem_alloc()))
     if get_bool(cfg, "ntp", "enable"):
         ssid = get_str(cfg, "wifi", "ssid")
         password = get_str(cfg, "wifi", "password")
@@ -349,9 +438,17 @@ def main():
                     sys.print_exception(e)
             else:
                 print("[NTP] WiFi hardware not supported on this board. Skipping NTP sync.")
-    pio_uart_baudrate = get_int(cfg, "pio_uart", "baudrate")
+    print("[MEM] after  NTP sync: free=%d alloc=%d" %
+          (gc.mem_free(), gc.mem_alloc()))
+    pio_uart_baudrate = get_int(cfg, "rs232c", "baudrate")
+    pio_uart_enable = get_bool(cfg, "rs232c", "enable")
+    pio_uart_tx_pin = get_int(cfg, "rs232c", "tx_pin")
+    pio_uart_rx_pin = get_int(cfg, "rs232c", "rx_pin")
     initialize_usb_host_and_pio(system, enable_usb_kbd=enable_usb_kbd,
-                                 pio_uart_baudrate=pio_uart_baudrate)
+                                 pio_uart_baudrate=pio_uart_baudrate,
+                                 pio_uart_enable=pio_uart_enable,
+                                 pio_uart_tx_pin=pio_uart_tx_pin,
+                                 pio_uart_rx_pin=pio_uart_rx_pin)
     cpu_core = configure_c_keyboard(system, enable_usb_kbd=enable_usb_kbd)
     configure_usb_keyboard_routing()
 
@@ -370,15 +467,11 @@ def main():
         _dbg_cpu = get_bool(cfg, "debug", "cpu_debug")
         _dbg_key = get_bool(cfg, "debug", "key_debug")
         _dbg_lcd = get_bool(cfg, "debug", "lcd_debug")
-        _dbg_newall = get_bool(cfg, "debug", "newall_debug")
         if _dbg_cpu or _dbg_key or _dbg_lcd:
             cpu_core.set_debug(_dbg_cpu or _dbg_key or _dbg_lcd)
             cpu_core.set_key_debug(_dbg_key)
             cpu_core.set_lcd_debug(_dbg_lcd)
             print(f"[DEBUG] cpu={_dbg_cpu} key={_dbg_key} lcd={_dbg_lcd}")
-        if _dbg_newall and hasattr(cpu_core, 'set_newall_debug'):
-            cpu_core.set_newall_debug(True)
-            print("[DEBUG] newall=True (F12 press/release trace only)")
 
     system.power_on()
     print(f"System initialized. PC={system.pc:#06x} UA={system.ua:#04x}")
@@ -397,6 +490,8 @@ def main():
     # screen would just stay blank until whatever the resumed program
     # happens to do next touches the display. Rebuild vram from the
     # (correctly-restored) LEDTP first, then push it out immediately.
+    if boot_status is not None:
+        boot_status.stop()  # startup is done -- stop mirroring prints to the LCD
     system.refresh_lcd_from_ledtp()
     system.force_full_redraw()
 
@@ -412,7 +507,24 @@ def main():
         print(f"FuncKeyBar init failed: {_e}")
         sys.print_exception(_e)
 
-    # Step 11: Main loop constants from config
+    # Step 11: Main loop constants from config (run_cpu_slice etc. were
+    # already imported at Step 8c, above)
+    clock_overlay = None
+    if get_bool(cfg, "overlay", "show_clock"):
+        try:
+            gc.collect()
+            from clock_overlay import ClockOverlay
+            clock_overlay = ClockOverlay(display)
+        except Exception as _e:
+            print(f"clock_overlay unavailable: {_e}")
+    mem_overlay = None
+    if get_bool(cfg, "overlay", "show_mem_free"):
+        try:
+            gc.collect()
+            from mem_overlay import MemOverlay
+            mem_overlay = MemOverlay(display)
+        except Exception as _e:
+            print(f"mem_overlay unavailable: {_e}")
     frame_interval_ms     = get_int(cfg, "emulator", "frame_interval_ms")
     sleep_poll_ms         = get_int(cfg, "emulator", "sleep_poll_ms")
     step_timer_tick_steps = get_int(cfg, "emulator", "step_timer_tick_steps")
@@ -434,16 +546,6 @@ def main():
     gui_active_until = 0
     _touch = getattr(system, 'touch', None)
 
-    # Drain the UART keyboard's RX buffer once per CPU step_chunk (same
-    # cadence as service_pio_uart_bridge) instead of once per full
-    # active_step_count outer-loop iteration. Bytes arrive independently of
-    # CPU speed, so the previous once-per-outer-loop cadence could let the
-    # RX buffer fill up during a single active_step_count burst.
-    _uart_kbd_drain = None
-    if enable_uart_kbd:
-        def _uart_kbd_drain():
-            keyboard_input.drain_uart(system)
-
     try:
         while True:
             service_pio_uart_bridge(system, cpu_core)
@@ -463,10 +565,15 @@ def main():
                 active_steps=system._active_step_count,
                 sleep_ms=sleep_poll_ms,
                 step_chunk=step_chunk,
-                extra_svc=_uart_kbd_drain,
             )
 
             now = time.ticks_ms()
+
+            if clock_overlay is not None:
+                clock_overlay.poll(system, now)
+
+            if mem_overlay is not None:
+                mem_overlay.poll(system, now)
 
             sc = hd61700.get_last_key()
             if sc == 0xE3 or sc == 0xE7:  # LGUI or RGUI
@@ -480,9 +587,22 @@ def main():
                 if time.ticks_diff(gui_active_until, now) > 0:
                     gui_active_until = 0
                     gc.collect()
-                    from emulator_menu import show_emulator_menu
-                    result = show_emulator_menu(system, display, fkbar, keyboard_input, joystick_input, cfg)
-                    joystick_input = result['joystick_input']
+                    try:
+                        # Normally just a sys.modules hit (see the preload
+                        # comment near "import emulator_menu" earlier in
+                        # main()) -- but if that preload failed, this is a
+                        # full compile attempt from inside the main loop.
+                        # MUST be caught here: an uncaught MemoryError would
+                        # otherwise propagate out of the `while True:` loop
+                        # entirely (see the outer "MAIN LOOP EXCEPTION"
+                        # handler below), ending the whole emulator session
+                        # just because the menu couldn't open.
+                        from emulator_menu import show_emulator_menu
+                        result = show_emulator_menu(system, display, fkbar, joystick_input, cfg)
+                        joystick_input = result['joystick_input']
+                    except MemoryError as _e:
+                        print(f"EMULATOR MENU unavailable (low memory): {_e}")
+                        gc.collect()
             elif sc == 0x53:  # NumLock → RESET
                 system.reset_emulator()
                 #system.force_full_redraw()

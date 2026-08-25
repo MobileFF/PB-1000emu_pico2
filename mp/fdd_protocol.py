@@ -51,6 +51,28 @@ def _cnv_status(dstatus):
     return _DSTATUS_TO_MD.get(dstatus, MD_INVALID_COMMAND)
 
 
+# SwitchCmd command-code -> cmdtab index (fdd.pas). Module-level so it's built
+# once at import time, not on every _switch_cmd() call -- that call fires once
+# per new MD-100 command byte, which for a program that polls FDD status
+# repeatedly (even while otherwise idle) can be a very high-frequency hot
+# path; rebuilding a 17-entry dict literal every time was a real, measurable
+# contributor to the free-heap sawtooth seen in real-hardware [MEM_OVERLAY]
+# logs (see project memory).
+_SWITCH_CMD_DISPATCH = {
+    0x00: 1,  0x01: 1,  0x02: 1,
+    0x10: 43, 0x11: 43,
+    0x20: 14, 0x21: 14,
+    0x30: 7,  0x31: 7,  0x32: 7,  0x33: 7,  0x34: 7,
+    0x40: 5,
+    0x50: 25,
+    0x60: 32,
+    0x70: 39,
+    0x80: 21,
+    0xC0: 50,
+    0xD0: 55,
+}
+
+
 class FDDProtocol:
     """Port of fdd.pas. Maintains identical state to the Delphi implementation."""
 
@@ -166,20 +188,7 @@ class FDDProtocol:
             return self._opstatus
 
         self._opstatus = MD_OK
-        _dispatch = {
-            0x00: 1,  0x01: 1,  0x02: 1,
-            0x10: 43, 0x11: 43,
-            0x20: 14, 0x21: 14,
-            0x30: 7,  0x31: 7,  0x32: 7,  0x33: 7,  0x34: 7,
-            0x40: 5,
-            0x50: 25,
-            0x60: 32,
-            0x70: 39,
-            0x80: 21,
-            0xC0: 50,
-            0xD0: 55,
-        }
-        idx = _dispatch.get(x)
+        idx = _SWITCH_CMD_DISPATCH.get(x)
         if idx is not None:
             self._index = idx
         elif x == 0x90:   # FORMAT DISK

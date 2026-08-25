@@ -5,18 +5,23 @@ Triggered from boot_session.select_profile_ui() via F1, i.e. before
 PB1000System or any ROM/RAM state exists -- the roomiest point in the boot
 sequence for heap. Intentionally self-contained: does NOT import
 emulator_menu.py (which has grown large) so a normal boot that never presses
-F1 never pays for this module's heap at all.
+F1 never pays for this module's heap at all. (draw_text.py is the one
+exception -- it's tiny and already resident by the time F1 can even be
+pressed, since boot_session.py, the only thing that can reach this module,
+imports it at its own top level -- see draw_text.py's docstring.)
 
 Edits are held in memory (`pending`) and only written to the chosen ini file
-when the user picks "Save & Exit", which then calls machine.reset() so the
-whole boot sequence re-reads the new config from scratch. "Discard & Back"
-(or BRK with no pending edits) returns normally to the caller instead.
+when the user picks "Save & Exit" (or presses F10 from any row in the key
+editor as a shortcut for the same action), which then calls machine.reset()
+so the whole boot sequence re-reads the new config from scratch. "Discard &
+Back" (or BRK with no pending edits) returns normally to the caller instead.
 """
 import os
 import time
 
 from hdmi_menu_mirror import hdmi_flush
 from config import load_ini
+from draw_text import draw_text as _draw_text
 
 PROFILE_ROOT = "/sd/rams"
 
@@ -60,14 +65,10 @@ SCHEMA = [
     ("display", "y_offset",          "int",  (0, 320),               False, False),
     ("display", "fg_color",          "int",  (0, 255),               True,  False),
     ("display", "bg_color",          "int",  (0, 255),               True,  False),
+    ("display", "vdp_enable",        "bool", None,                   True,  False),
 
     # keyboard
     ("keyboard", "enable_usb_kbd",              "bool", None,        True,  False),
-    ("keyboard", "enable_uart_kbd",              "bool", None,       True,  False),
-    ("keyboard", "uart_baudrate",                "int",  (300, 921600), False, False),
-    ("keyboard", "uart_tx_pin",                  "int",  (0, 28),     False, False),
-    ("keyboard", "uart_rx_pin",                  "int",  (0, 28),     False, False),
-    ("keyboard", "uart_enter_always_exe",        "bool", None,        False, False),
     ("keyboard", "key_pulse_interval_ms",        "int",  (1, 1000),   False, False),
     ("keyboard", "key_hold_ms",                  "int",  (1, 5000),   False, False),
     ("keyboard", "key_release_hard_timeout_ms",  "int",  (1, 10000),  False, False),
@@ -93,6 +94,12 @@ SCHEMA = [
     ("profile", "default_profile", "str", None,        True, False),
     ("profile", "ui_timeout_ms",   "int", (0, 300000),  True, False),
 
+    # overlay (boot-time status + clock + free-heap readout)
+    ("overlay", "show_profile_name", "bool", None, True, False),
+    ("overlay", "show_clock",        "bool", None, True, False),
+    ("overlay", "show_mem_free",     "bool", None, True, False),
+    ("overlay", "show_log",          "bool", None, True, False),
+
     # joystick
     ("joystick", "enable",          "bool", None,        True,  False),
     ("joystick", "enable_fire2",    "bool", None,         False, False),
@@ -111,8 +118,11 @@ SCHEMA = [
     ("beep", "freq_hz",  "int",  (20, 20000),  True,  False),
     ("beep", "duty",     "int",  (0, 100),     True,  False),
 
-    # pio_uart
-    ("pio_uart", "baudrate", "int", (300, 921600), False, False),
+    # rs232c (PIO UART implementation)
+    ("rs232c", "enable",   "bool", None,           True,  False),
+    ("rs232c", "baudrate", "int", (300, 9600),   False, False),
+    ("rs232c", "tx_pin",   "int", (0, 28),        False, False),
+    ("rs232c", "rx_pin",   "int", (0, 28),        False, False),
 
     # wifi
     ("wifi", "ssid",     "str", None, True, False),
@@ -128,7 +138,6 @@ SCHEMA = [
     ("debug", "cpu_debug",    "bool", None, False, False),
     ("debug", "key_debug",    "bool", None, False, False),
     ("debug", "lcd_debug",    "bool", None, False, False),
-    ("debug", "newall_debug", "bool", None, False, False),
 
     # hdmi (flash-only -- see config.py's _FLASH_ONLY_SECTIONS: SD/profile
     # pb1000.ini overrides for this section are ignored at load time, so
@@ -154,34 +163,6 @@ SCHEMA = [
     ("touch", "st7796.funckey_x_offset", "int", (-100, 100), False, False),
     ("touch", "st7796.funckey_y_offset", "int", (-100, 100), False, False),
 ]
-
-
-# ── Low-level display helpers (self-contained -- no emulator_menu import) ──
-
-def _sw16(c):
-    return ((c & 0xFF) << 8) | (c >> 8)
-
-
-def _draw_text(display, x, y, text, fg, bg=_BG):
-    text = str(text)
-    max_chars = max(0, (display.width - x) // 8)
-    text = text[:max_chars]
-    if not text:
-        return
-    record = getattr(display, 'record_text', None)
-    if record is not None:
-        record(x, y, text, fg, bg)
-        return
-    import framebuf
-    buf = bytearray(8 * 8 * 2)
-    fb = framebuf.FrameBuffer(buf, 8, 8, framebuf.RGB565)
-    cx = x
-    for ch in text:
-        fb.fill(_sw16(bg))
-        fb.text(ch, 0, 0, _sw16(fg))
-        display.set_window(cx, y, cx + 7, y + 7)
-        display.write_data(buf)
-        cx += 8
 
 
 # USB HID scancode -> printable char. Covers lowercase letters, digits, and
@@ -434,6 +415,16 @@ def _run_list(display, title, hint, build_items_fn, dispatch_fn):
             items = build_items_fn()
             _draw_list(display, title, hint, items, cursor, scroll, msg)
 
+        elif sc == 0x43:  # F10 -- Save & Exit shortcut (key editor only;
+                           # ignored elsewhere since dispatch_fn only acts on
+                           # __f10__ inside _edit_target's _dispatch)
+            item_id = items[cursor].get('id', '')
+            msg, close, ret = dispatch_fn('__f10__', item_id, items, cursor)
+            if close:
+                return ret
+            items = build_items_fn()
+            _draw_list(display, title, hint, items, cursor, scroll, msg)
+
         elif sc == 0x29:  # BREAK -- back one level
             msg, close, ret = dispatch_fn('__back__', None, items, cursor)
             if close:
@@ -538,9 +529,18 @@ def _pick_target(display, sd_mounted, profiles):
 
 # ── Key editor (screen 2) ───────────────────────────────────────────────────
 
-def _fmt_val(v):
+# Keys whose value is masked in the list view (badge) so it isn't left
+# readable on-screen while browsing -- still shown in the clear inside the
+# actual edit widget (_edit_text pre-fills with the real value), since
+# that's the one place the user needs to see what they're typing/changing.
+_SECRET_KEYS = {("wifi", "password")}
+
+
+def _fmt_val(section, key, v):
     if v is None:
         return "(unset)"
+    if (section, key) in _SECRET_KEYS and v != "":
+        return "*" * min(len(str(v)), 12)
     return str(v)
 
 
@@ -580,7 +580,7 @@ def _edit_target(display, path, kind):
             rows.append({
                 'id': (section, key, kw, extra),
                 'label': key,
-                'badge': _fmt_val(val),
+                'badge': _fmt_val(section, key, val),
                 'badge_color': _FG if val is not None else _FTR,
             })
         return rows
@@ -596,13 +596,31 @@ def _edit_target(display, path, kind):
         items += _rows()
         items.append({'type': 'separator'})
         n_pending = sum(len(kv) for kv in pending.values())
-        items.append({'id': 'save', 'label': 'Save & Exit (reset)',
+        items.append({'id': 'save', 'label': 'Save & Exit (reset) [F10]',
                       'badge': str(n_pending) if n_pending else '',
                       'badge_color': _S_ON})
         items.append({'id': 'discard', 'label': 'Discard & Back'})
         return items
 
     def _dispatch(action, item_id, items, cursor):
+        def _do_save():
+            if not any(pending.values()):
+                return "Nothing to save.", False, None
+            if not _confirm(display, ["Save and reboot now?"]):
+                return "", False, None
+            try:
+                _apply_ini_changes(path, pending)
+            except Exception as e:
+                return "Save failed: %s" % e, False, None
+            display.fill_rect(0, 0, display.width, display.height, _BG)
+            _draw_text(display, 4, display.height // 2 - 4, "Saved. Rebooting...", _S_ON)
+            hdmi_flush(display)
+            time.sleep_ms(600)
+            return "", True, True
+
+        if action == '__f10__':  # Save & Exit shortcut, works from any row
+            return _do_save()
+
         if action == '__back__':
             if any(pending.values()):
                 if not _confirm(display, ["Discard unsaved changes?"]):
@@ -625,19 +643,7 @@ def _edit_target(display, path, kind):
         if item_id == 'save':
             if action != '__exe__':
                 return "", False, None
-            if not any(pending.values()):
-                return "Nothing to save.", False, None
-            if not _confirm(display, ["Save and reboot now?"]):
-                return "", False, None
-            try:
-                _apply_ini_changes(path, pending)
-            except Exception as e:
-                return "Save failed: %s" % e, False, None
-            display.fill_rect(0, 0, display.width, display.height, _BG)
-            _draw_text(display, 4, display.height // 2 - 4, "Saved. Rebooting...", _S_ON)
-            hdmi_flush(display)
-            time.sleep_ms(600)
-            return "", True, True
+            return _do_save()
 
         # A key row: item_id == (section, key, kind, extra)
         if not isinstance(item_id, tuple):
@@ -685,7 +691,7 @@ def _edit_target(display, path, kind):
         return "", False, None
 
     return _run_list(display, "SETUP: " + path,
-                      "UP/DN:move EXE:edit L/R:cycle BS:clear BRK:back",
+                      "UP/DN:move EXE:edit L/R:cycle BS:clear F10:save BRK:back",
                       _build, _dispatch)
 
 

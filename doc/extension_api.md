@@ -130,6 +130,11 @@ Pico 2 上では `/ext/` または `/sd/ext/` に配置する（下記の優先�
 用意されている。同じ内容を `/sd/ext/`・`/ext/` に置いた場合と異なり、他のプロファイルを
 起動したときには一切影響しない。
 
+プロファイル別 `ext/` の切り替えは起動時（プロファイル選択時）の一度きりで、実行中に別の
+プロファイルへ切り替える機能は提供していない（別プロファイルの保存状態を使いたい場合は、
+System > Reboot Emulator (MCU) でエミュレータ自体を再起動し、起動時のプロファイル選択画面で
+選び直す）。
+
 `.py` と `.mpy`（`mpy-cross` で事前コンパイルしたもの）のどちらも自動ロードの対象になる。
 同名モジュールが両方存在する場合は、MicroPython の import 解決の仕様により常に `.py` が
 優先される。起動時のコンパイルコストを避けたい大きめの拡張モジュールは `.mpy` にしておくと
@@ -149,6 +154,8 @@ def register(system):
         # 必要なハードウェア初期化をここで行う
         # owner はエミュレータメニューの「Hook Status」画面に表示される
         # ラベル。lambda を渡す場合は関数名から判別できないので明示推奨。
+        # モジュール名（ファイル名から拡張子を除いたもの）と一致させておくと
+        # Hook Status 上でどのモジュールのフックか分かりやすい。
         system.register_call_hook(CALL_ADDR, lambda: _handler(system), owner="myext")
         print(f"myext: registered at {CALL_ADDR:#06x}")
     except Exception as e:
@@ -228,9 +235,12 @@ hd61700.set_call_hook_enabled(CALL_ADDR, True)   # 有効化
 | --- | --- | --- |
 | `system.enable_call_hook(addr)` | `hd61700.set_call_hook_enabled(addr, True)` | フックを有効化 |
 | `system.disable_call_hook(addr)` | `hd61700.set_call_hook_enabled(addr, False)` | フックを無効化（登録維持） |
-| `system.register_call_hook(addr, fn, owner=None)` | `hd61700.set_call_hook(addr, fn)` | フックを登録（デフォルト有効）。`owner` は Hook Status 画面用のラベル |
+| `system.register_call_hook(addr, fn, owner=None)` | `hd61700.set_call_hook(addr, fn)` | フックを登録（デフォルト有効）。`owner` は Hook Status 画面用のラベル。`fn` が `False` を返すと素通し（前処理フック、本来の ROM コードも実行される）、それ以外（`None` 含む）はインターセプト。詳細は dev_guide.md §6 |
 | `system.unregister_call_hook(addr)` | `hd61700.clear_call_hook(addr)` | フックを解除 |
 | `system.list_call_hooks()` | — | 登録済みフックを `(addr, owner, enabled)` のリストで取得 |
+| `system.register_mem_write_hook(addr_start, fn, addr_end=None, owner=None)` | `hd61700.set_mem_write_hook(...)` | メモリ書き込みフックを登録。`addr_end` 省略時は単一アドレス |
+| `system.unregister_mem_write_hook(addr_start)` | `hd61700.clear_mem_write_hook(addr_start)` | メモリ書き込みフックを解除 |
+| `system.list_mem_write_hooks()` | — | 登録済みメモリ書き込みフックを `(addr_start, addr_end, owner, enabled)` のリストで取得 |
 
 登録状況は Win+F7 のエミュレータメニュー **Hook Status** からも確認できる（詳細は `dev_guide.md` §6.2）。
 

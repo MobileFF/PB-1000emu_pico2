@@ -152,8 +152,14 @@ typedef void (*hd61700_log_write_cb)(void *ctx, const char *msg);
  * ROM routines reach a given entry point via a plain jump rather than a
  * call, so all three must be checked for a hook to reliably intercept
  * every path in).
- * Returns true  = intercept (skip the normal push+jump / plain jump).
- * Returns false = not registered (execute normally). */
+ * Returns true  = intercept (skip the normal push+jump / plain jump; the
+ *                 hook stands in for the original routine and is expected
+ *                 to simulate its own return).
+ * Returns false = not registered, OR registered but the hook asked to pass
+ *                 through: the real push+jump / plain jump still happens
+ *                 right after the hook runs, so the hook acts as a
+ *                 pre-processing step in front of the original ROM code
+ *                 rather than a replacement for it. */
 typedef bool (*hd61700_call_hook_cb)(void *ctx, uint16_t address);
 
 /* CPU State */
@@ -208,11 +214,6 @@ typedef struct {
   bool debug_log;
   bool key_debug_log;
   bool lcd_debug_log;
-  /* Narrow, independent trace: prints R0 (the CRTKY-returned key code) once
-   * per accepted keypress at ROM1 PC=0x94A6 ("wait for a key, handle the
-   * function keys", right after `cal CRTKY` returns). Decoupled from
-   * debug_log/key_debug_log so it stays low-volume regardless of those. */
-  bool rom_newall_debug_log;
 
   /* Cycle counter (decremented) */
   int icount;
@@ -237,6 +238,20 @@ typedef struct {
 
   /* CAL hook: intercepts CAL/JP/JR instructions targeting registered addresses */
   hd61700_call_hook_cb call_hook;
+
+  /* One-shot suppression for the generic top-of-loop call_hook trap
+   * (see hd61700_execute()). Set by the CAL/JP/JR-specific hook checks
+   * right when they land PC on a hooked address via passthrough (false
+   * return): without this, the very next loop iteration would see
+   * PC == that address and re-invoke the hook a second time through the
+   * generic trap, since that trap can't tell "just arrived via a jump
+   * the opcode-specific check already consulted the hook for" apart from
+   * any other way of landing on the same PC. Consumed (cleared) the very
+   * next time the generic trap is evaluated, whether or not it matches,
+   * so a stray interrupt landing in between can never leave it armed for
+   * a later, unrelated visit to the same address. */
+  uint16_t hook_suppress_pc;
+  bool hook_suppress_active;
 
   /* When true, mem_writebyte()/_iz()/_stack() skip the ram_ptr/bank_ptr
      direct-pointer fast path for addresses within
@@ -277,7 +292,6 @@ int hd61700_step(hd61700_state_t *cpu);
 void hd61700_set_debug(hd61700_state_t *cpu, bool enable);
 void hd61700_set_key_debug(hd61700_state_t *cpu, bool enable);
 void hd61700_set_lcd_debug(hd61700_state_t *cpu, bool enable);
-void hd61700_set_rom_newall_debug(hd61700_state_t *cpu, bool enable);
 void hd61700_set_pc(hd61700_state_t *cpu, uint16_t pc);
 
 #endif /* HD61700_H */

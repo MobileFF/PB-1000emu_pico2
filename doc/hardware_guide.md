@@ -70,8 +70,11 @@ ILI9341・ST7796 のどちらも同じピン役割で接続できます。使用
 | デバイス | Pico ピン | 機能 | 備考 |
 | :--- | :--- | :--- | :--- |
 | **REPL (UART0)** | **GP0 (TX), GP1 (RX)** | **MicroPython REPL / ファイル転送 (`mpremote`)** | **必須。** Pico の USB ポートはキーボードホスト専用のため、ここに USB-シリアル変換アダプタ（3.3V TTL）を接続しないと REPL に一切アクセスできません。PC 側では `mpremote connect /dev/ttyUSB0`（Windows は `COMx`）のように接続します |
-| コンソール (UART1) | GP4 (TX), GP5 (RX) | デバッグ / REPL（サブ） | 任意。上記 REPL (UART0) とは別系統のデバッグ出力。`pb1000.ini` の `uart_tx_pin` / `uart_rx_pin` で変更可 |
-| PIO UART | GP6 (TX), GP13 (RX) | 仮想 RS-232C | 任意。デフォルト 9600 bps（`pb1000.ini` の `[pio_uart] baudrate` で変更可） |
+| PIO UART | GP6 (TX), GP13 (RX)（デフォルト） | 仮想 RS-232C | 任意。ピン番号・ボーレートともに `pb1000.ini` の `[rs232c] tx_pin`/`rx_pin`/`baudrate`（デフォルト 9600 bps）で変更可。他機能と重複しない空きピンであれば変更可能 |
+
+> [!NOTE]
+> GP4 (TX) / GP5 (RX)（UART1、旧「コンソール」/ UARTキーボード入力）は 2026-08-22 に
+> ファームウェアから廃止されました。ここに配線しても現在は何も機能しません。
 
 > **配線**: USB-シリアル変換アダプタの TXD を Pico の **GP1 (RX)** へ、RXD を **GP0 (TX)** へ、GND 同士を接続します（TX↔RX のクロス接続に注意）。
 
@@ -97,25 +100,25 @@ ILI9341・ST7796 のどちらも同じピン役割で接続できます。使用
 | FIRE2 | GP27 | `key_fire2` | SHIFT |
 
 `pb1000.ini` の `[joystick]` セクションで各ボタンに割り当てる PB-1000 キーを変更できます。空文字の場合はデフォルトマップが使われます。  
-ピンアサイン自体は `main_input.py` の `JoystickInputManager.DEFAULT_PIN_MAP` で定義されており、コード変更で変えられます。  
+ピンアサイン自体は `main_input_joystick.py` の `JoystickInputManager.DEFAULT_PIN_MAP` で定義されており、コード変更で変えられます。  
 74HC148 プライオリティエンコーダを使った 3-bit 接続回路の詳細は `references/memo/joystick_3bit_encoding_circuit.md` を参照してください。
 
 **ジョイスティック有効時の GPIO 空き状況**
 
-ジョイスティック（GP18–21, GP26–27）をすべて使用した場合、外部デバイス用に自由に使える GPIO は **GP28** のみです（ADC2 として使用可能）。その他のピンは下表の機能を無効化した場合に解放できます。
+ジョイスティック（GP18–21, GP26–27）をすべて使用した場合、外部デバイス用に自由に使える GPIO は **GP4, GP5, GP28** です（GP28 は ADC2 としても使用可能）。その他のピンは下表の機能を無効化した場合に解放できます。
 
 | GPIO | 用途 | 解放条件 |
 | :--- | :--- | :--- |
 | GP0, GP1 | **REPL (UART0)** | **解放不可（常時必須）。** USB ポートがキーボードホスト専用のため、これが唯一の REPL 経路 |
 | GP2, GP3 | I2C1（予約、PR6 未実装） | 現状 `mp/ext/` に I2C を使うモジュールは搭載されておらず未使用。将来 `sample/mp/ext/dht20.py` 等の I2C 拡張を `mp/ext/` に導入する場合に使用 |
-| GP4, GP5 | UART1（コンソール KBD） | `pb1000.ini`: `enable_uart_kbd=false` |
-| GP6, GP13 | PIO UART（RS-232C） | RS-232C 不使用時 |
+| GP4, GP5 | （未使用。旧 UART1コンソール/UARTキーボード入力は2026-08-22廃止） | **常時使用可能** |
+| GP6, GP13 | PIO UART（RS-232C、デフォルト） | RS-232C 不使用時、または `pb1000.ini` の `[rs232c] tx_pin`/`rx_pin` で他のピンへ変更した場合 |
 | GP14 | BEEP PWM | `pb1000.ini`: `[beep] enable=false` |
 | **GP28** | **空き（ADC2）** | **常時使用可能** |
 
 ### 7. 外部 SPI デバイス（GP28 CS 利用）
 
-SPI1 バスはすでに LCD・SD・タッチパネルが CS ピンで共有しており、同じ方式で追加デバイスを接続できます。ジョイスティックを含む標準構成では **GP28 が唯一の空き GPIO** であるため、追加デバイスの CS ピンとして使用することを推奨します。
+SPI1 バスはすでに LCD・SD・タッチパネルが CS ピンで共有しており、同じ方式で追加デバイスを接続できます。ジョイスティックを含む標準構成では **GP28** を追加デバイスの CS ピンとして使用することを推奨します（GP4/GP5 も空いていますが、GP28 は ADC2 としても使えるため、より汎用的な既定選択です）。
 
 | 信号 | Pico ピン | 備考 |
 | :--- | :--- | :--- |
@@ -182,10 +185,9 @@ def _callback(system, cs):
 参照してください。
 
 **設定**: `pb1000.ini` の `[hdmi]` セクション（詳細は [config_guide.md](config_guide.md) §14）、
-または EMULATOR MENU の Display > HDMI から ON/OFF を切り替えます
-（[emulator_menu_guide.md](emulator_menu_guide.md) §5）。**LCD と HDMI は排他出力**で、HDMI 有効時は
-物理 LCD への描画が止まり、画面はすべて HDMI 側に表示されます（[usage_guide.md](usage_guide.md)
-§11 参照）。
+または起動時の F1 セットアップメニューから ON/OFF を切り替えます（保存後 MCU リブートで
+反映）。**LCD と HDMI は排他出力**で、HDMI 有効時は物理 LCD への描画が止まり、画面はすべて
+HDMI 側に表示されます（[usage_guide.md](usage_guide.md) §11 参照）。
 
 ## 配線上の注意点
 

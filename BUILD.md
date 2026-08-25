@@ -1,5 +1,14 @@
 # Build Instructions
 
+> [!IMPORTANT]
+> The real hardware is a **Raspberry Pi Pico 2 W**, and the board target below must always be
+> **`RPI_PICO2_W`**, together with the PIO-USB TinyUSB `CFLAGS` shown in step 4. Building for
+> plain `RPI_PICO2` uses different TinyUSB CFLAGS and the resulting firmware's USB keyboard will
+> not work, even though the build itself succeeds. For the authoritative, actively-maintained
+> version of these instructions see [doc/build_guide_en.md](doc/build_guide_en.md) -- this file
+> covers Windows/WSL2/MSYS2 environment setup in more detail, but always cross-check the actual
+> `make`/CFLAGS commands against that guide.
+
 ## Prerequisites
 
 ### Windows (PowerShell)
@@ -134,7 +143,8 @@ make submodules
 **In WSL2/Linux:**
 > [!IMPORTANT]
 > If your project is on the G: drive (Windows), you can access it via `/mnt/g/`.
-> Adjust the path below to match your setup.
+> Adjust the path below to match your setup. Windows-native builds are not recommended because
+> of the CFLAGS below -- run this from WSL2.
 
 ```bash
 # Example if project is in G:\マイドライブ\RaspberryPiPicoW\PB-1000_emu_AG2
@@ -143,33 +153,40 @@ export USER_C_MODULES="/mnt/g/マイドライブ/RaspberryPiPicoW/PB-1000_emu_AG
 # If you copied the project to WSL home:
 # export USER_C_MODULES="$HOME/projects/pico/PB-1000_emu_AG2/src/micropython.cmake"
 
+# Required for TinyUSB's PIO-USB host mode -- do NOT build without this, and never add
+# -DDEBUG_SKIP_CORE_INIT (it silently disables tuh_init(), so USB keyboards stop working
+# even though the build and boot both still succeed).
+export CFLAGS='-Wno-error=unused-parameter -Wno-error=unused-variable
+  -DCFG_TUSB_MCU=OPT_MCU_RP2350
+  -DCFG_TUSB_OS=OPT_OS_PICO
+  -DCFG_TUH_ENABLED=1
+  -DCFG_TUD_ENABLED=0
+  -DCFG_TUSB_RHPORT1_MODE=(OPT_MODE_HOST|0x0100)
+  -DMICROPY_HW_USB_CDC=0
+  -DMICROPY_HW_USB_MSC=0
+  -DMICROPY_HW_USB_HID=0
+  -DMICROPY_PY_PIO_USB=1
+  -I<path to your synced src/ copy>'
+
 # Clean and Build
-make BOARD=RPI_PICO2 USER_C_MODULES="$USER_C_MODULES" clean
-make BOARD=RPI_PICO2 USER_C_MODULES="$USER_C_MODULES" -j$(nproc)
+make BOARD=RPI_PICO2_W USER_C_MODULES="$USER_C_MODULES" clean
+make BOARD=RPI_PICO2_W USER_C_MODULES="$USER_C_MODULES" WERROR=0 -j$(nproc)
 ```
 
-**In PowerShell:**
-```powershell
-# Set the path to the PB-1000 emulator source
-$USER_C_MODULES = "G:/マイドライブ/RaspberryPiPicoW/PB-1000_emu_AG2/src/micropython.cmake"
-
-# Clean and Build
-make BOARD=RPI_PICO2 USER_C_MODULES=$USER_C_MODULES clean
-make BOARD=RPI_PICO2 USER_C_MODULES=$USER_C_MODULES -j4
-```
-
-The output will be in `build-RPI_PICO2/firmware.uf2`.
+The output will be in `build-RPI_PICO2_W/firmware.uf2`.
 
 ### 5. Flash to Pico 2
 
-1. **Connect Pico 2**: Hold the **BOOTSEL** button and connect the USB cable to your PC.
+1. **Connect Pico 2 W**: Hold the **BOOTSEL** button and connect the USB cable to your PC.
 2. **Mount/Access Drive**:
    - **Windows**: It will appear as `RPI-RP2`.
    - **WSL2**: Usually, it's easier to copy the file from WSL to the Windows host first.
      ```bash
-     cp build-RPI_PICO2/firmware.uf2 /mnt/c/Users/<YourUsername>/Desktop/
+     cp build-RPI_PICO2_W/firmware.uf2 /mnt/c/Users/<YourUsername>/Desktop/firmware_pb1000.uf2
      ```
-3. **Copy File**: Drag and drop (or copy) `firmware.uf2` into the `RPI-RP2` drive.
+     (Renaming to `firmware_pb1000.uf2` avoids confusion if you have other Pico projects' UF2s
+     around, but the drag-and-drop step works with any filename.)
+3. **Copy File**: Drag and drop (or copy) the UF2 into the `RPI-RP2` drive.
 4. **Reboot**: The Pico will reboot automatically once copying is complete.
 
 ### 6. Verify Installation
@@ -220,10 +237,10 @@ In the REPL:
 
 ### Incremental Changes
 
-When modifying C code:
-```powershell
-cd g:\マイドライブ\RaspberryPiPicoW\micropython\ports\rp2
-make BOARD=RPI_PICO2 USER_C_MODULES="G:/マイドライブ/RaspberryPiPicoW/PB-1000_emu_AG2/src/micropython.cmake"
+When modifying C code (from WSL2/Linux, with the CFLAGS from step 4 above still exported):
+```bash
+cd ~/projects/pico/micropython/ports/rp2
+make BOARD=RPI_PICO2_W USER_C_MODULES="$USER_C_MODULES" WERROR=0 -j$(nproc)
 ```
 
 When modifying Python code only:

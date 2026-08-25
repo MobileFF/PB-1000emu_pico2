@@ -30,17 +30,36 @@ src/
 mp/
   boot.py                 # 起動前の GPIO 初期状態設定（main.py より前に実行される）
   main.py                 # エントリポイント
-  pb1000.py               # PB1000System クラス
+  draw_text.py            # LCD文字描画の共通ヘルパー（起動/メニュー系UI全体で共用。
+                           # main.py がトップレベルで import し、他はそれ以降どこから
+                           # importしても実質コストゼロ。詳細はモジュール docstring）
+  pb1000.py               # PB1000System クラス（PB1000FDDMixin / PB1000StateIOMixin を多重継承）
+  pb1000_fdd.py           # 仮想 FDD 関連（2026-08-22、コンパイル時ヒープ断片化対策で pb1000.py から分割）
+  pb1000_state_io.py      # save_state()/load_state() とフックレジストリ（同上分割）
+  display_init.py         # LCD/SD/タッチの起動時初期化（プロファイルピッカーより前に必要な
+                           # 部分だけを pb1000.py から分離。main_boot.py がモジュールレベルで
+                           # import、pb1000.py 自体は create_system() 内での遅延 import）
   lcd_controller_c.py     # lcd_c モジュールの Python ラッパー
   main_boot.py            # 起動・初期化処理
-  main_input.py           # 入力マネージャ（キーボード・タッチ・ジョイスティック）
+  main_input_keyboard.py  # キーボード入力マネージャ（旧 main_input.py から分割。
+                           # main.py Step 8b の中で最もコンパイルコストが大きい部分）
+  main_input_touch.py     # タッチパネル入力マネージャ（同上分割）
+  main_input_joystick.py  # ジョイスティック入力マネージャ（同上分割、[joystick] enable時のみ import）
+  main_input_cursor.py    # カーソルキーリピートマネージャ（同上分割）
   main_runtime.py         # CPU 実行ループ補助
   main_actions.py         # スクリーンショット・save-state・ディスクスワップ
   main_cleanup.py         # 終了処理・メモリダンプ
-  emulator_menu.py        # GUI+F7 ランタイムメニュー（頻用項目）
-  emulator_menu_ext.py    # 同メニューの重量級・低頻度項目（コンパイルコスト分離のため分割）
+  emulator_menu.py        # GUI+F7 ランタイムメニュー（メニューエンジン本体。583行）
+  emulator_menu_ram.py    # RAM Save UI（コンパイルコスト分離のため分割。RAM Load は 2026-08-22 に削除）
+  emulator_menu_capture.py # VRAM Save・Full Capture（同上）
+  emulator_menu_debug.py  # Hook Status・CPU Status（同上）
+  emulator_menu_display_actions.py # Display カテゴリの各ハンドラ（同上）
+  emulator_menu_system_actions.py  # System カテゴリの Reset/Reboot/NEW ALL/速度設定（同上）
   funckey_bar.py          # 画面下部ファンクションキーバー
   boot_session.py         # プロファイル選択 UI
+  boot_status.py          # 起動ステータスオーバーレイ（起動中のみ・[overlay]）
+  clock_overlay.py        # 常時時計表示（実行中のみ・[overlay] show_clock、TIME$/DATE$を直読み）
+  mem_overlay.py          # 常時ヒープ空き容量表示（実行中のみ・[overlay] show_mem_free）
   config.py               # pb1000.ini 読み込み
   pio_uart.py             # PIO ソフト UART（RS-232C）
   keymap.py / keymap.json # キーボードマッピングテーブル
@@ -54,7 +73,6 @@ mp/
   md100_dos.py            # MD-100 DOS 層（pb1000es dos.pas 移植）
   ntp_sync.py             # WiFi 経由 NTP 時刻同期
   debug.py                # REPL 向け CPU/レジスタデバッグ補助
-  workarea.py             # PB-1000 ワークエリア（RAM）アドレス辞書
   ext/                    # 拡張 API モジュール（自動ロード）
 
 hardware/
@@ -248,11 +266,39 @@ CAL 命令を使わない BASIC の CALL 文（push+JP 経路）にも対応で�
 > スキップ／JP・JR: ジャンプだけをスキップしスタックには一切触れない）。同じ登録アドレスが
 > `JP $`（レジスタ間接ジャンプ）等それ以外の経路で到達された場合は上記の汎用経路（SS から
 > 2 バイト pop）にフォールバックするため、**呼び出し元の命令の種類によって、同一アドレスへの
-> フックでもスタックへの副作用が異なる**。またこの機構は Python 関数の戻り値を一切見ておらず、
-> 登録さえされていれば常に intercept される（「今回は素通りさせる」という選択的なフックは
-> できない）。狭い一箇所だけを狙い撃ちしたい場合（呼び出し元アドレスが常に固定で 1 種類しか
-> ない等）は、対象アドレスではなく**呼び出し元のアドレス**にフックを登録し、フック関数側で
-> 手動でスタックへ push してから本来の処理へ迂回させる、という手法が使える。
+> フックでもスタックへの副作用が異なる**。狭い一箇所だけを狙い撃ちしたい場合（呼び出し元アドレスが
+> 常に固定で 1 種類しかない等）は、対象アドレスではなく**呼び出し元のアドレス**にフックを登録し、
+> フック関数側で手動でスタックへ push してから本来の処理へ迂回させる、という手法が使える。
+
+### インターセプト方式 / 素通し方式（前処理フック）の使い分け
+
+フック関数の**戻り値**で、対象ルーチンを完全に置き換える（インターセプト）か、フック実行後に
+本来の ROM コードへ処理を戻して続行させる（素通し＝前処理フック）かを選べる。
+
+- 戻り値なし（`return` を書かない = `None`）、または真値を返す → **インターセプト**（従来通り）。
+  対象アドレスの本来の命令は一切実行されず、CAL 側は push された戻り先へ RTN 相当の復帰、
+  JP/JR 側はジャンプ自体がなかったことになり次の命令へ進む。
+- 明示的に `False` を返す → **素通し（passthrough）**。フックの処理が終わった後、
+  本来の push+jump（CAL）／ジャンプ（JP・JR）がそのまま実行され、対象アドレスの ROM コードは
+  普通に走る。つまりフックは「本来のサブルーチンの直前に割り込む前処理」として使える。
+
+```python
+def my_pre_hook():
+    # 本来の処理の前にログを取る・レジスタを覗く・条件によって何かする、等
+    print("about to enter ROM routine")
+    return False   # 本来の ROM コードへ処理を継続させる
+
+system.register_call_hook(0x1234, my_pre_hook, owner="myext")
+```
+
+素通しを選んだ場合でも、対象アドレスに到達した瞬間にもう一度フックが呼ばれることはない
+（`hd61700.c` 側で 1 回限りの抑制フラグ `hook_suppress_active` により、CAL/JP/JR 専用チェックと
+汎用経路チェックが同じ着地を二重に検出しないようになっている）。
+
+この機構は「前処理（フック→本来のコード実行）」はサポートするが、「後処理（本来のコードが
+`RTN` で戻ってきた後に追加処理を挟む）」は直接はサポートしない。対象ルーチンの `RTN` 先で
+別途フックを仕込む、あるいはフック関数側でスタック上の戻り先を自分で書き換えて別のトランポリン
+アドレスへ差し替える、といった手動の工夫が必要になる。
 
 ### Python API
 
@@ -314,21 +360,30 @@ system.list_mem_write_hooks()
 
 `system.list_call_hooks()` / `system.list_mem_write_hooks()` を使って、現在登録されている
 call_hook・mem_write_hook をアドレス・登録元(owner)・有効/無効状態つきで一覧表示するメニュー項目。
-Win+F7 のエミュレータメニューから **Hook Status** を選択すると表示される（`emulator_menu.py`
-の `_do_hook_status()`）。上下キーでスクロール、BREAK で閉じる。デバッグ時に「どの拡張がどの
+Win+F7 のエミュレータメニューから **Hook Status** を選択すると表示される（`emulator_menu_debug.py`
+の `_do_hook_status()`。CPU Status とともに、稼働中セッションでの選択時にオンデマンドで
+コンパイルされる。上下キーでスクロール、BREAK で閉じる。デバッグ時に「どの拡張がどの
 アドレスをフックしているか」「MENU 表示モードなどで意図通り無効化されているか」を確認する用途。
 
 実際の使用例として `mp/ext/dotds_64dot.py` が DSPMD レジスタ（0x68D0）へのメモリ書き込みフックを登録し、
 値に応じて CALL フックの有効・無効を切り替えている（64 ドット表示行対応）。ただし
 `[display] lcd_height = 32`（デフォルト）の場合はこの仕組み自体が常に無効化され、
 ROM 本来の実装がそのまま動作する（32 ドットモードではこのフィックスは不要かつ有害なため）。
-設計・実装の経緯は `doc/plan_mem_write_hook.md` を参照（実装済み）。
 
 ---
 
-## 7. シリアルコンソール（LCD 文字検出）
+## 7. LCD 文字検出（旧シリアルコンソール、Python 側配線は廃止済み）
 
-### 動作原理
+> [!NOTE]
+> この節が記述する検出パイプライン自体は C コア（`src/modhd61700.c`）に現在も残っているが、
+> 2026-08-22 に Python 側の唯一の呼び出し元だった `PB1000System.console_uart` プロパティ
+> セッター（`cpu_core.set_lcd_char_callback(...)` を呼んでいた）を削除したため、
+> `py_lcd_char_cb` は常に `MP_OBJ_NULL` のままとなり、このパイプライン全体が恒久的に
+> 無効（no-op）になっている。`py_lcd_char_cb != MP_OBJ_NULL` のガードが最初から存在する
+> ため安全に無効化されており、C コア自体の変更（再ビルド）は行っていない。以下は
+> 参考として残す、稼働当時の実装メモ。
+
+### 動作原理（稼働当時）
 
 LCD VRAM への書き込みを `c_lcd_direct_write()` がフックし、6 列ピクセルが揃うたびに `charset.bin`（0x20–0x7E）と照合して文字コードを判定する。
 
@@ -358,13 +413,27 @@ system.lcd.set_vdp_enable(False)  # グローバル色設定に戻す
 
 MMIO アドレス 0x0C20–0x0C24 で BASIC / マシン語から色 VRAM を操作できる（詳細は `doc/memory_map.md` 参照）。
 
-エミュレータメニューの **Color VRAM** 項目でオン/オフ切り替え可能（内部的には `set_vdp_enable()` を呼ぶだけ）。
+`[display] vdp_enable`（`pb1000.ini`、F1 セットアップメニューから変更可）で起動時のオン/オフを設定できる
+（内部的には `set_vdp_enable()` を呼ぶだけ。2026-08-22 以前はエミュレータメニューの実行時トグルだった）。
 
 実際にカラー VRAM が描画に使われるには `set_vdp_enable(True)` に加えて `vdp_init_fill_done` フラグ
 （`vdp_init_done()` で参照可能）が立っている必要がある。このフラグは通常 CPU 側の VDP ポート書き込み
 （`lcd_c.vdp_write()` reg=2、0xFF 以外のデータ）で自動的に立つが、`get_color_vram()` 経由でカラー VRAM に
 直接書き込む拡張（`mp/ext/vram_loader.py` 等）はこの経路を通らないため、`set_vdp_init_done(True)` を明示的に
 呼ばない限り古いモノクロ VRAM 側の描画にフォールバックしてしまう。
+
+### グローバル LCD カラー
+
+ピクセル単位の VDP モードを使わずに、点灯/消灯ピクセルの色をグローバルに設定することもできる。
+`lcd_c` モジュールの `set_colors(fg_rgb565, bg_rgb565)` は RGB565 値を受け取る。
+`pb1000.ini` の `[display]` セクションではこれを RGB332 として保存する:
+
+| ini キー | 形式 | デフォルト | 説明 |
+| --- | --- | --- | --- |
+| `fg_color` | RGB332（0–255） | `0`（黒） | 点灯ピクセルの色 |
+| `bg_color` | RGB332（0–255） | `180`（0xB4、青みがかったグレー） | 消灯ピクセルの色 |
+
+`main_boot.py` が起動時に RGB332 → RGB565 へ変換し、`system.lcd.set_colors()` 経由で適用する。
 
 ---
 
@@ -389,7 +458,9 @@ BASIC から Pico 2 の周辺機能（I2C、SPI、WiFi 等）を `CALL` 命令�
 RP2350 の PIO ステートマシンを使ったソフト UART で仮想 RS-232C を実装。
 
 - デフォルト: GP6（TX）/ GP13（RX）
-- ボーレートは `pb1000.ini` の `[pio_uart] baudrate` で設定（デフォルト 9600 bps）。
+- ピン番号は `pb1000.ini` の `[rs232c] tx_pin`/`rx_pin` で変更可能（`main_boot.py` の
+  `initialize_usb_host_and_pio()` が読み取り、`PioUart(tx_pin=..., rx_pin=...)` へ渡す）。
+- ボーレートは `pb1000.ini` の `[rs232c] baudrate` で設定（デフォルト 9600 bps）。
 - `pio_uart.py` の `PioUart` クラスが実装。
 - `service_pio_uart_bridge()` がメインループで SIO MMIO（0x0C00–0x0C03）と PioUart をブリッジ。
 
@@ -423,7 +494,7 @@ hd61700.set_lcd_debug(True) # LCD 書き込みトレース
 
 ## 13. カーソルキーリピート（`CursorRepeatManager`）
 
-`mp/main_input.py` の `CursorRepeatManager` クラスが PB-1000 エミュレーション中のカーソルキー自動リピートを実装する。
+`mp/main_input_cursor.py` の `CursorRepeatManager` クラスが PB-1000 エミュレーション中のカーソルキー自動リピートを実装する。
 
 ### 動作原理
 

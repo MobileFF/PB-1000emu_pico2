@@ -7,6 +7,60 @@ date heading instead of a version number or "Unreleased" marker.
 
 ---
 
+## 2026-08-23
+
+### Added
+
+- **Dynamic memory allocation for BANK1/2/3** (`src/modhd61700.c`): the RAM bank 1-3 buffers are
+  now allocated from the MicroPython GC heap on demand, only for the banks the boot-time
+  profile's `ramN.bin` files actually cover — a profile using fewer banks genuinely frees more
+  heap. The first attempt at this made real hardware fail to boot at all (blank LCD, no REPL);
+  reverted to the static-array design to recover, then root-caused the crash to the CPU's
+  per-byte memory-access path checking only the `has_bank[]` flag, not whether the buffer
+  pointer itself was non-NULL. The fixed re-implementation (adds that pointer check, plus
+  strictly ordering allocation before the presence flag is set) has been confirmed booting and
+  running correctly across multiple real-hardware sessions.
+
+### Fixed
+
+- Root-caused and fixed a long list of contributors to the free-heap "sawtooth" seen in
+  `[mem_overlay]` logs, via iterative real-hardware measurement: display-driver
+  `set_window()`/`write_cmd()`/`fill_rect()` allocating a fresh buffer on every call, the status
+  bar's per-call font-dictionary rebuild, several `PB1000System` attributes that weren't
+  initialized in `__init__` (so `getattr(obj, name, default)` silently raised `AttributeError`
+  every main-loop iteration), and bound methods being re-created every call in the PIO UART
+  bridge and CPU execution loop. Combined, these accounted for tens of KB/sec of steady-state
+  allocation; reduced to near zero.
+
+---
+
+## 2026-08-22
+
+### Removed
+
+- **Removed the UART1 serial-console keyboard input path entirely** (GP4/GP5,
+  `[keyboard] enable_uart_kbd`). This is unrelated to the PIO UART-based virtual RS-232C
+  (GP6/GP13), which is untouched.
+- **Removed the EMULATOR MENU's RAM Load** (restoring a saved snapshot mid-session). The
+  Toggles submenu was also trimmed down to Beep only (other toggles are now unified into the
+  boot-time setup menu (F1) or `pb1000.ini` settings). To switch to a different profile or save,
+  reboot the emulator (MCU) and pick again from the profile selection screen.
+
+### Changed
+
+- Split several large files by feature to fight compile-time heap fragmentation:
+  - `pb1000.py` (1943 lines) → `pb1000_fdd.py` (virtual FDD) and `pb1000_state_io.py`
+    (save_state/load_state and the hook registry), pulled in via multiple-inheritance mixins.
+  - `emulator_menu_ext.py` (704 lines) → `emulator_menu_ram.py`, `emulator_menu_capture.py`,
+    `emulator_menu_debug.py`.
+  - Deferred several of `main.py`'s top-level imports so `main_input`, `main_runtime`, and
+    `pb1000.py` itself aren't compiled during the profile picker or boot-time setup menu (F1).
+- Rewrote `pio_uart.py`'s RX/TX buffers from list+`pop(0)` to a zero-allocation ring buffer.
+- Consolidated 7 duplicate LCD text-drawing implementations into a single shared
+  `mp/draw_text.py`.
+
+---
+
 ## 2026-08-17
 
 ### Added

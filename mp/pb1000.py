@@ -4,10 +4,26 @@ import os
 import sys
 import time
 import machine
-# ILI9341 and ST7796 are imported lazily inside init_display() when selected
+# init_display()/init_sdcard() and the display/touch pin constants used to
+# live here, but moved to display_init.py so code that only needs display
+# bring-up (main_boot.py's init_display_only(), called before the profile
+# picker) doesn't have to import all of PB1000System just to reach them --
+# see display_init.py's module docstring. Re-exported here only so existing
+# `from pb1000 import init_display` call sites (mostly test scripts) still
+# work without changes; PB1000System itself never calls this re-export.
+from display_init import init_display
 from fdd_protocol import FDDProtocol
 from fdd_storage import ImageStorageBackend
 from md100_dos import MD100Dos
+# PB1000System's own class body used to hold every method directly and grew
+# to ~1943 lines, which on 2026-08-22 failed to compile on real hardware
+# with MemoryError despite ~193KB free (heap fragmentation, not capacity --
+# see pb1000_fdd.py's module docstring for the full explanation). Two of
+# its largest self-contained chunks -- virtual FDD/storage-path helpers and
+# save_state()/load_state()/the hook registry -- were split into their own
+# files as mixins so each compiles as a separate, smaller unit.
+from pb1000_fdd import PB1000FddMixin
+from pb1000_state_io import PB1000StateIOMixin
 
 try:
     from lcd_controller_c import LCDControllerC as LCDController
@@ -27,17 +43,6 @@ try:
 except ImportError:
     _HAS_PIO_UART = False
 
-SPI_ID = 1
-SCK_PIN = 10
-MOSI_PIN = 11
-MISO_PIN = 12
-CS_PIN = 9
-DC_PIN = 8
-RST_PIN = 7
-BL_PIN = 22
-SD_CS_PIN = 15
-T_CS_PIN = 16
-T_IRQ_PIN = 17
 PD_RES = 0x08
 PD_PWR = 0x10
 PD_STR = 0x04
@@ -45,161 +50,36 @@ PD_ACK = 0x10  # Port B bit 4
 PD_BEEP_MASK = 0xC0  # bit6 と bit7: BEEP 制御ビット
 VFDD_IO_READ_ADDR = 0x0C03
 VFDD_IO_WRITE_ADDR = 0x0C04
-ENABLE_VIRTUAL_FDD = True
 
-def init_sdcard(spi, lcd_baudrate=40_000_000):
-    try:
-        from sdcard import SDCard
-        sd_cs = machine.Pin(SD_CS_PIN, machine.Pin.OUT, value=1)
-        # Use 400kHz for stable SD init, restore to the actual LCD SPI baudrate
-        sd = SDCard(spi, sd_cs, baudrate=400000, restore_baudrate=lcd_baudrate)
-        vfs = os.VfsFat(sd)
-        os.mount(vfs, "/sd")
-        print("SD Card mounted at /sd")
-        return True
-    except Exception as e:
-        print(f"SD Card mount optional: {e}")
-        sys.print_exception(e)
-        return False
-
-def _read_early_ini_sections(section_names):
-    """Read the given sections from /pb1000.ini and /roms/pb1000.ini.
-    SD card is not yet mounted at this point, so only internal flash is checked.
-    Returns {section_name: {key: value}}."""
-    wanted = {s.lower() for s in section_names}
-    result = {s: {} for s in wanted}
-    for path in ("/pb1000.ini", "/roms/pb1000.ini"):
-        try:
-            with open(path, "r") as f:
-                section = None
-                for raw in f:
-                    line = raw.strip()
-                    if not line or line[0] in (";", "#"):
-                        continue
-                    if line.startswith("[") and line.endswith("]"):
-                        name = line[1:-1].strip().lower()
-                        section = name if name in wanted else None
-                        continue
-                    if section and "=" in line:
-                        k, v = line.split("=", 1)
-                        k = k.strip().lower()
-                        v = v.split(";", 1)[0].split("#", 1)[0].strip()
-                        result[section][k] = v
-        except OSError:
-            pass
-    return result
-
-
-def _early_bool(s, default):
-    if s is None:
-        return default
-    return s.strip().lower() in ("1", "true", "yes", "on")
-
-def init_display():
-    _early_cfg = _read_early_ini_sections(("display", "touch"))
-    disp_cfg = _early_cfg["display"]
-    touch_early_cfg = _early_cfg["touch"]
-    # Accept both "driver=ST7796" and "display=ST7796" as equivalent keys.
-    driver = disp_cfg.get("driver", disp_cfg.get("display", "ILI9341")).upper()
-
-    # ILI9341: 26 MHz (safe for all modules). ST7796: 40 MHz.
-    # Override with spi_baudrate in [display] section of pb1000.ini if needed.
-    default_baud = 40_000_000 if driver == "ST7796" else 26_000_000
-    spi_baud = int(disp_cfg.get("spi_baudrate", str(default_baud)))
-
-    # 0 = normal, 180 = physically flipped (board mounted upside down).
-    try:
-        rotation = int(disp_cfg.get("rotation", "0"))
-    except (ValueError, TypeError):
-        rotation = 0
-    if rotation not in (0, 180):
-        rotation = 0
-
-    spi = machine.SPI(
-        SPI_ID,
-        baudrate=spi_baud,
-        sck=machine.Pin(SCK_PIN),
-        mosi=machine.Pin(MOSI_PIN),
-        miso=machine.Pin(MISO_PIN),
-    )
-    print(f"SPI baudrate: {spi_baud}")
-    # Ensure all CS pins are high before starting
-    machine.Pin(CS_PIN, machine.Pin.OUT, value=1)
-    machine.Pin(T_CS_PIN, machine.Pin.OUT, value=1)
-    machine.Pin(SD_CS_PIN, machine.Pin.OUT, value=1)
-
-    cs = machine.Pin(CS_PIN, machine.Pin.OUT)
-    dc = machine.Pin(DC_PIN, machine.Pin.OUT)
-    rst = machine.Pin(RST_PIN, machine.Pin.OUT)
-    machine.Pin(BL_PIN, machine.Pin.OUT, value=1)
-
-    if driver == "ST7796":
-        from st7796 import ST7796
-        display = ST7796(spi, cs, dc, rst, width=480, height=320, rotation=rotation)
-        display.fill_rect(0, 0, 480, 320, 0x0000)
-        print(f"Display: ST7796 480x320 (rotation={rotation})")
-    else:
-        from ili9341 import ILI9341
-        display = ILI9341(spi, cs, dc, rst, width=320, height=240, rotation=rotation)
-        display.fill_rect(0, 0, 320, 240, 0x0000)
-        print(f"Display: ILI9341 320x240 (rotation={rotation})")
-    display.spi_baudrate = spi_baud
-
-    # Try mounting SD card; pass actual SPI baudrate so it's restored correctly
-    sd_mounted = init_sdcard(spi, spi_baud)
-
-    touch = None
-    try:
-        from xpt2046 import XPT2046
-        # XPT2046 orientation depends on how the touch overlay film is
-        # mounted on each physical panel, which differs between the
-        # ILI9341 and ST7796 modules — the two need different swap/invert
-        # settings by default. ILI9341 needs axes swapped only (no invert);
-        # ST7796 (MSP4021 etc.) needs axes swapped and both inverted, plus
-        # its own calibration range. Can be overridden per-panel via
-        # swap_xy/x_inv/y_inv in [touch] section of /pb1000.ini — use a
-        # "ili9341."/"st7796." prefixed key (e.g. ili9341.y_inv) to scope the
-        # override to one driver, since both drivers' settings can coexist in
-        # the same ini and only one is active at a time via [display] driver.
-        # An unprefixed key still applies to whichever driver is active.
-        # (SD card is not yet mounted here, so only internal-flash
-        # pb1000.ini is honored for these early keys.)
-        _driver_prefix = driver.lower()
-        def _touch_early(key):
-            dkey = _driver_prefix + "." + key
-            if dkey in touch_early_cfg:
-                return touch_early_cfg[dkey]
-            return touch_early_cfg.get(key)
-        swap_xy = _early_bool(_touch_early("swap_xy"), True)
-        if driver == "ST7796":
-            x_inv = _early_bool(_touch_early("x_inv"), True)
-            y_inv = _early_bool(_touch_early("y_inv"), True)
-            touch = XPT2046(spi, T_CS_PIN, T_IRQ_PIN,
-                            width=display.width, height=display.height,
-                            swap_xy=swap_xy, x_inv=x_inv, y_inv=y_inv,
-                            y_min=325, y_max=3850,
-                            lcd_baudrate=spi_baud,
-                            rotate180=(rotation == 180))
-        else:
-            x_inv = _early_bool(_touch_early("x_inv"), False)
-            y_inv = _early_bool(_touch_early("y_inv"), False)
-            touch = XPT2046(spi, T_CS_PIN, T_IRQ_PIN,
-                            width=display.width, height=display.height,
-                            swap_xy=swap_xy, x_inv=x_inv, y_inv=y_inv,
-                            lcd_baudrate=spi_baud,
-                            rotate180=(rotation == 180))
-    except Exception as e:
-        print("Touch panel init failed:", e)
-        sys.print_exception(e)
-
-    return display, touch, sd_mounted, spi
+# Minimal 5x7 font for PB1000System._draw_text() (the small on-screen status
+# toast, e.g. "Key Press: X" -- distinct from draw_text.py's shared helper
+# used everywhere else). Module-level so it's built once at import time, not
+# on every _draw_text() call -- that call runs once per status-bar redraw,
+# which real-hardware [MEM_OVERLAY] logs showed firing far more often than
+# expected (see project memory), making this 45-entry dict literal a much
+# larger per-call cost than the similar mp/fdd_protocol.py:_switch_cmd()
+# dispatch-dict issue found and fixed earlier the same session.
+_STATUS_FONT = {
+    'A':0x7E0909097E, 'B':0x7F49494936, 'C':0x3E41414122, 'D':0x7F4141413E,
+    'E':0x7F49494941, 'F':0x7F09090901, 'G':0x3E4149493A, 'H':0x7F0808087F,
+    'I':0x00417F4100, 'J':0x2041413F01, 'K':0x7F08142241, 'L':0x7F40404040,
+    'M':0x7F020C027F, 'N':0x7F0408107F, 'O':0x3E4141413E, 'P':0x7F09090906,
+    'Q':0x3E4151215E, 'R':0x7F09192946, 'S':0x4649494931, 'T':0x01017F0101,
+    'U':0x3F4040403F, 'V':0x1F2040201F, 'W':0x7F4038407F, 'X':0x6314081463,
+    'Y':0x0708700807, 'Z':0x6151494543, ' ':0x0000000000, '0':0x3E5149453E,
+    '1':0x00427F4000, '2':0x4261514946, '3':0x2141454B31, '4':0x1814127F10,
+    '5':0x2745454539, '6':0x3C4A494930, '7':0x0171090503, '8':0x3649494936,
+    '9':0x064949291E, '.':0x0060600000, '+':0x08083E0808, '-':0x0808080808,
+    '*':0x14083E0814, '/':0x2010080402, '=':0x2424242424, '<':0x0814224100,
+    '>':0x0041221408, '!':0x00005F0000, '^':0x0402010204, '&':0x3649552250,
+}
 
 def draw_bezel(display, scale=1.0, x=16, y=40, lcd_height=32):
     """Draws the PB-1000 LCD bezel scaled to fit the display."""
     lw = int(192 * scale)
     lh = int(lcd_height * scale)
     padding = 4
-    
+
     # Outer bezel (dark grey)
     display.fill_rect(x - padding, y - padding, lw + padding*2, lh + padding*2, 0x4228)
     # Middle bezel (bezel edge)
@@ -244,46 +124,7 @@ class RAMView:
     def __repr__(self):
         return f"<RAMView {self._size} bytes at 0x{self._start:04X}>"
 
-def load_virtual_fdd_config(path):
-    try:
-        os.stat(path)
-    except OSError:
-        return None
-    section = ""
-    values = {}
-    with open(path, "r") as fh:
-        for raw in fh:
-            line = raw.strip()
-            if not line or line[0] in ("#", ";"):
-                continue
-            if line.startswith("[") and line.endswith("]"):
-                section = line[1:-1].strip().lower()
-                continue
-            if section != "disk" or "=" not in line:
-                continue
-            k, v = line.split("=", 1)
-            k = k.strip().lower()
-            v = v.split(";", 1)[0].split("#", 1)[0].strip()
-            values[k] = v
-    if not values:
-        return None
-    def _bool(s):
-        return s.lower() in ("1", "true", "yes", "on")
-    raw_path = values.get("path", "").strip()
-    if raw_path and not raw_path.startswith("/"):
-        parts = path.rsplit("/", 1)
-        base = parts[0] if len(parts) > 1 else ""
-        raw_path = base + "/" + raw_path if base else raw_path
-    return {
-        "config_path": path,
-        "enabled": _bool(values.get("enabled", "false")),
-        "backend": values.get("backend", "image").strip().lower() or "image",
-        "path": raw_path,
-        "readonly": _bool(values.get("readonly", "false")),
-    }
-
-
-class PB1000System:
+class PB1000System(PB1000FddMixin, PB1000StateIOMixin):
     INT_ROM_LIMIT    = 0x2000
     RAM_START        = 0x6000
     RAM_SIZE         = 0x2000   # 8KB
@@ -333,21 +174,38 @@ class PB1000System:
         self.profile_dir = profile_dir
         self._config = config
 
-        # Bank presence: [0]=ROM1 (always), [1..3]=RAM banks. Buffer *space*
-        # for all three RAM banks is always reserved below, regardless of
-        # which files exist in the boot-time profile — this is what lets a
-        # later RAM Load switch to a profile with more banks actually load
-        # them (previously the buffer itself didn't exist unless the boot
-        # profile happened to have that bank).
-        #
-        # has_bank[] itself, however, tracks whether the *currently active*
-        # profile has real data for that bank, and is mirrored to the CPU
-        # core via set_bank_present()/set_has_exp_ram() so that programs
-        # probing bank presence (write-then-readback; absent banks read back
-        # 0xFF regardless of what was written — see c_mem_direct_read in
+        # Bank presence: [0]=ROM1 (always), [1..3]=RAM banks. has_bank[]
+        # tracks whether the *currently active* profile has real data for
+        # each bank, and is mirrored to the CPU core via
+        # set_bank_present()/set_has_exp_ram() so that programs probing
+        # bank presence (write-then-readback; absent banks read back 0xFF
+        # regardless of what was written — see c_mem_direct_read in
         # modhd61700.c) see a result consistent with what this profile
-        # actually represents, not a permanently-present fake. load_state()
-        # re-evaluates and re-syncs this on every profile switch.
+        # actually represents.
+        #
+        # Buffer *space* for each bank is allocated on demand, in C, only
+        # for banks this profile actually has (set_bank_present()/
+        # set_has_exp_ram() call ensure_bank_buf() -- see modhd61700.c --
+        # which m_malloc()s from the same GC heap gc.mem_free() reports, so
+        # a profile using fewer than 3 banks genuinely frees that much heap
+        # rather than reserving it unconditionally). RAM Load no longer
+        # exists (reboot + re-pick at the profile picker instead, see
+        # [[project_ram_load_profile_switch_ext]]), so there is no
+        # mid-session bank count change to support, and
+        # get_bank_view()/get_exp_ram_view() are only ever called here for
+        # banks this same __init__ just enabled.
+        #
+        # (2026-08-23: a first attempt at this caused a real-hardware boot
+        # hang -- see [[project_bank_dynamic_alloc]] for the postmortem.
+        # Root cause: modhd61700.c's c_mem_direct_read()/c_mem_direct_write()
+        # gated bank access on has_bank[] alone without checking the buffer
+        # pointer itself, so has_bank[]=true with an unallocated buffer (e.g.
+        # via detect_all_banks()'s file probe, or a failed allocation) was an
+        # unchecked NULL dereference. Re-implemented with an explicit
+        # pointer check at that hot path, and with allocation strictly
+        # ordered before has_bank[]=true in set_bank_present()/
+        # set_has_exp_ram() so a failed m_malloc() can never leave the two
+        # inconsistent.)
         self.has_bank = [True, False, False, False]
         for slot in range(1, 4):
             path = self._get_storage_path(f"ram{slot}.bin")
@@ -362,28 +220,39 @@ class PB1000System:
         if hasattr(cpu_core, "get_ram_view"):
             raw_view = cpu_core.get_ram_view()
             self.ram = RAMView(cpu_core, memoryview(raw_view), self.RAM_SIZE, self.RAM_START)
-            # Bank 1 (exp_ram): backward-compat view. Always built regardless
-            # of has_bank[1] — the buffer must exist so a later profile
-            # switch that does have ram1.bin can load into it.
-            if hasattr(cpu_core, "get_exp_ram_view"):
+            # Bank 1 (exp_ram): backward-compat view, only built when this
+            # profile actually has ram1.bin (has_bank[1]) -- the C buffer
+            # only exists in that case now (see comment above).
+            _b1 = None
+            if self.has_bank[1] and hasattr(cpu_core, "get_exp_ram_view"):
                 exp_raw_view = cpu_core.get_exp_ram_view()
-                _b1 = RAMView(cpu_core, memoryview(exp_raw_view), self.EXP_RAM_SIZE, self.SYS_ROM_START, segment=0x10)
-            else:
+                if exp_raw_view is not None:
+                    _b1 = RAMView(cpu_core, memoryview(exp_raw_view), self.EXP_RAM_SIZE, self.SYS_ROM_START, segment=0x10)
+            if _b1 is None and not hasattr(cpu_core, "get_exp_ram_view"):
+                # Old firmware without this C export at all: fall back to a
+                # plain Python buffer regardless of has_bank[1], matching
+                # the pre-dynamic-allocation behavior for that case.
                 _b1 = bytearray(self.EXP_RAM_SIZE)
-            # Banks 2 and 3 — same unconditional allocation.
+            # Banks 2 and 3 — same, only built when present.
             _bank_views = []
             for slot in range(2, 4):
-                if hasattr(cpu_core, "get_bank_view"):
+                view = None
+                if self.has_bank[slot] and hasattr(cpu_core, "get_bank_view"):
                     rv = cpu_core.get_bank_view(slot)
-                    _bank_views.append(RAMView(cpu_core, memoryview(rv), self.EXP_RAM_SIZE, self.SYS_ROM_START, segment=slot << 4))
-                else:
-                    _bank_views.append(bytearray(self.EXP_RAM_SIZE))
+                    if rv is not None:
+                        view = RAMView(cpu_core, memoryview(rv), self.EXP_RAM_SIZE, self.SYS_ROM_START, segment=slot << 4)
+                if view is None and not hasattr(cpu_core, "get_bank_view"):
+                    view = bytearray(self.EXP_RAM_SIZE)
+                _bank_views.append(view)
         else:
             self.ram = bytearray(self.RAM_SIZE)
             _b1 = bytearray(self.EXP_RAM_SIZE)
             _bank_views = [bytearray(self.EXP_RAM_SIZE), bytearray(self.EXP_RAM_SIZE)]
 
-        # _bank_ram[0]=unused, [1]=RAM1, [2]=RAM2, [3]=RAM3
+        # _bank_ram[0]=unused, [1]=RAM1, [2]=RAM2, [3]=RAM3. A slot is None
+        # when that bank isn't present for this profile -- every consumer
+        # already checks has_bank[slot] before touching _bank_ram[slot]
+        # (save_state()/load_state()/bank_loader.py/vram_loader.py all do).
         self.exp_ram = _b1
         self._bank_ram = [None, _b1, _bank_views[0], _bank_views[1]]
             
@@ -394,9 +263,7 @@ class PB1000System:
 
         self.lcd = LCDController(display, debug=self.debug_cfg["lcd"])
         self.lcd.on_scale_change = self._on_lcd_scale_change
-        if hasattr(self.lcd, 'set_char_output_callback'):
-            self.lcd.set_char_output_callback(self._on_lcd_char_output)
-        
+
         self._disp_x = 16
         self._disp_y = 40
         self._lcd_height = 32  # updated by create_system from ini
@@ -405,13 +272,24 @@ class PB1000System:
         self.funckey_touch_x_offset = 0
         self.funckey_touch_y_offset = 24
         self.port_data = 0
-        self._console_uart = None      # active uart (None = serial console OFF)
-        self._console_uart_hw = None   # uart hardware ref; set by main_boot, used by menu
-        self._lcd_had_output = False
         self.status_msg = ""
         self.status_expiry_ms = 0
         self._status_rendered_msg = None
         self.pio_uart = None      # Set externally from main.py
+        # Initialized here (not just in reset_emulator(), which already resets
+        # them) so main.py's every-loop-iteration getattr(self, name, False)
+        # checks (main.py's EOF-pending check; this file's UART RX/VFDD warn
+        # checks) hit a real attribute via normal lookup instead of falling
+        # through to __getattr__(), which raises AttributeError (caught by
+        # getattr()'s default, but the exception + its f-string message still
+        # get allocated on the GC heap every single call until first written).
+        # 2026-08-23 mem_overlay log bisection: this was ~1.3-1.4KB/s of
+        # input_alloc, isolated by the fact that keyboard/cursor/touch/joy
+        # sub-brackets all read 0 while the outer bracket (which also spans
+        # this getattr check) stayed nonzero -- see [[project_mem_churn_investigation]].
+        self._pio_uart_eof_pending = False
+        self._uart_rx_logged = False
+        self._uart_vfdd_warn = False
         self.virtual_fdd = None
         self._virtual_fdd_ack = False
         self._last_vfdd_transfer_time = 0
@@ -460,8 +338,6 @@ class PB1000System:
         cpu_core.set_port_callbacks(self._cb_refs["port_read"], self._cb_refs["port_write"])
         if hasattr(cpu_core, "set_io_callbacks"):
             cpu_core.set_io_callbacks(self._cb_refs["io_read"], self._cb_refs["io_write"])
-        
-        # lcd_char callback is registered on demand via the console_uart property setter
 
         # Use C-side port_read/port_write (RP2350 GPIO/PWM direct)
         if self._c_port_active:
@@ -577,11 +453,17 @@ class PB1000System:
             
         elif index == 2:
             if self.pio_uart:
-                data = self.pio_uart.read(1)
-                self._io_rd_regs[2] = data[0] if data else 0
-                if data and not getattr(self, '_uart_rx_logged', False):
+                # read_byte() (int or None, zero allocation) instead of
+                # read(1) (would allocate a fresh bytearray+bytes every call)
+                # -- this branch runs once per ROM MMIO read of the UART data
+                # register, i.e. potentially hundreds of times per second
+                # during an active RS-232C transfer. See pio_uart.py's
+                # PioUart.read_byte() docstring.
+                data = self.pio_uart.read_byte()
+                self._io_rd_regs[2] = data if data is not None else 0
+                if data is not None and not getattr(self, '_uart_rx_logged', False):
                     self._uart_rx_logged = True
-                    print(f"[UART_RX] ROM read first byte: {data[0]:#04x}")
+                    print(f"[UART_RX] ROM read first byte: {data:#04x}")
                 # Deassert INT1 when Python buffer is now empty so the CPU
                 # does not re-enter the ISR before the next byte arrives.
                 if not self.pio_uart.any() and hasattr(cpu_core, 'uart_clear_rx_signal'):
@@ -589,7 +471,7 @@ class PB1000System:
                 # ROM consumed EOF — flag auto-BREAK; main loop's KeyboardInputManager
                 # queues BRK and waits for is_key_input_enabled so it only fires
                 # after the ROM finishes processing.
-                if data and data[0] == 0x1A and not getattr(self, '_pio_uart_eof_pending', False):
+                if data == 0x1A and not getattr(self, '_pio_uart_eof_pending', False):
                     self._pio_uart_eof_pending = True
                     print("[UART_EOF] EOF byte read by ROM; auto-BREAK scheduled")
             else:
@@ -634,16 +516,11 @@ class PB1000System:
             if not _in_fdd_mode:
                 if self.pio_uart:
                     self.pio_uart.write(data)
-                # console_uart (UART1, GP4/GP5) is on independent pins and must
-                # always receive BASIC PRINT output regardless of FDD power state.
-                # Skipped during an active FDD transfer: those bytes are FDD
-                # protocol data, not console text, and must not leak to the
-                # debug REPL (was flooding the log with raw retry bytes).
-                char = chr(data & 0x7F)
-                if self.console_uart:
-                    self.console_uart.write(char)
-                else:
-                    print(char, end="")
+                # Echo to the REPL for debugging. Skipped during an active FDD
+                # transfer: those bytes are FDD protocol data, not console
+                # text, and must not leak to the debug REPL (was flooding the
+                # log with raw retry bytes).
+                print(chr(data & 0x7F), end="")
 
     def _fdd_read_bridge_fn(self, segment, offset):
         return self._read_io_register(offset)
@@ -722,12 +599,15 @@ class PB1000System:
         MicroPython は常に .py を .mpy より優先するため、ここで
         拡張子ごとの優先順位を別途実装する必要はない。
         各モジュールは register(system) 関数を持つこと。
+
+        _ext_init() から起動時に1回だけ呼ばれる。
         """
         import os, sys, gc
         mod_sources = {}  # mod_name -> ext_dir (最初に見つかった = 優先されるディレクトリ)
         ext_dirs = []
+        profile_ext_dir = (self.profile_dir + "/ext") if self.profile_dir else None
         if self.profile_dir:
-            ext_dirs.append(self.profile_dir + "/ext")
+            ext_dirs.append(profile_ext_dir)
         ext_dirs += ["/sd/ext", "/ext"]
 
         # sys.path へは優先順位と逆順で insert(0, ...) する -- insert(0,...) は
@@ -775,777 +655,6 @@ class PB1000System:
             except Exception as e:
                 print(f"EXT: {mod_name} load error: {e}")
                 sys.print_exception(e)
-
-    def _log_vfdd(self, msg):
-        pass
-
-    def _handle_virtual_fdd_port_write(self, data):
-        if not self.has_virtual_fdd():
-            self._port_last_write = data & 0xFF
-            return
-
-        current = data & 0xFF
-        previous = self._port_last_write
-        was_powered = (previous & PD_PWR) == 0
-        powered_now = (current & PD_PWR) == 0
-        self._virtual_fdd_interface_powered = powered_now
-        # True only when RES is released in THIS same CTRL write (not a persistent flag).
-        # Used to detect the boot pulse where STR falls simultaneously with RES release.
-        res_released_now = (current & PD_RES) == 0 and (previous & PD_RES) != 0
-
-        if (current & PD_PWR) != (previous & PD_PWR):
-            try:
-                _pc_dbg = f" PC={cpu_core.get_pc():#06x}"
-            except Exception:
-                _pc_dbg = ""
-            print(f"[VFDD] Power: {'ON' if powered_now else 'OFF'}{_pc_dbg}")
-            if powered_now:
-                # Power just turned ON: pre-load 0x55 so boot detection works
-                # even before any RES/STR pulse occurs
-                self._io_rd_regs[4] = 0x55  # MD-100 identifier
-                self._gpo_parity = 0         # Reset parity for clean D92E P1/P0 pairs
-            else:
-                self._virtual_fdd_ack = False
-                self.virtual_fdd_controller.close()
-
-        if powered_now:
-            # Power is ON (Active Low)
-            if (current & PD_RES) != 0 and (previous & PD_RES) == 0:
-                # Rising edge of RES: Device Enters Reset (Active HIGH)
-                self._log_vfdd(f"Reset Detected (Active HIGH)")
-                self._virtual_fdd_ack = False
-                self.virtual_fdd_controller.open()
-            elif (current & PD_RES) == 0 and (previous & PD_RES) != 0:
-                # Falling edge of RES: Reset Released (Run Mode)
-                self._log_vfdd("Reset released")
-                # Boot ROM reads 0x0C03, stores it in OPTCD, then checks
-                # OPTCD==0x55 to confirm the MD-100 interface is present.
-                self._io_rd_regs[4] = 0x55  # MD-100 identifier for boot detection
-                if hasattr(cpu_core, "set_vfdd_data"):
-                    cpu_core.set_vfdd_data(0x55)
-                self._inject_optcd_signature("reset-release")
-
-            # Allow transfer whenever power is on, ensuring P3 is always updated by STR
-            # Handle STR (Strobe) toggling
-            if (current & PD_STR) == 0 and (previous & PD_STR) != 0:
-                # Falling edge of STR: Start of transfer cycle.
-                # Data was already pre-fetched at the end of the previous cycle.
-                self._virtual_fdd_ack = True
-
-                # cpu_core.get_vfdd_write_data() is broken (always 0x00); use
-                # _io_wr_regs[4], kept correct by the _write_io_register callback.
-                val_in = self._io_wr_regs[4]
-
-                if res_released_now:
-                    # Boot pulse: RES released in this same CTRL write as STR
-                    # fell (e.g. CTRL 1C->00). Don't call transfer() here — it
-                    # would advance state before the real command is issued;
-                    # just leave _io_rd_regs[4]=0x55 for the ROM's OPTCD read.
-                    pass
-                else:
-                    val_out_next = self.virtual_fdd_controller.transfer(val_in)
-                    self._io_rd_regs[4] = val_out_next
-                    if hasattr(cpu_core, "set_vfdd_data"):
-                        cpu_core.set_vfdd_data(val_out_next)
-                
-            elif (current & PD_STR) != 0 and (previous & PD_STR) == 0:
-                # Rising edge of STR: End of transfer cycle.
-                self._virtual_fdd_ack = False
-        else:
-            self._virtual_fdd_ack = False
-            if was_powered and not powered_now:
-                self._log_vfdd("Interface entered power-off state")
-        if (current & PD_RES) != 0 and (previous & PD_RES) == 0:
-            # FDD Reset rising edge outside powered block: reset state machine
-            self.virtual_fdd_controller.open()
-
-        self._port_last_write = current
-
-    def _inject_optcd_signature(self, reason="runtime"):
-        try:
-            ram_idx = 0x6BFA - 0x6000
-            if 0 <= ram_idx < len(self.ram):
-                self.ram[ram_idx] = 0x55
-                print(f"[VFDD] Injected OPTCD=0x55 at 0x6BFA ({reason})")
-        except Exception as e:
-            print(f"[VFDD] Failed to inject OPTCD ({reason}): {e}")
-            sys.print_exception(e)
-
-    def _register_dump_path(self):
-        return "/roms/register.bin"
-
-    def _restore_registers_from_dump(self):
-        path = self._register_dump_path()
-        try:
-            with open(path, 'rb') as f:
-                data = f.read(36)
-            if len(data) >= 36:
-                cpu_core.set_registers(data[:36])
-                print(f"registers restored from {path}")
-        except OSError:
-            pass
-
-    def _ensure_dir(self, path):
-        """Create directory if it doesn't exist."""
-        try:
-            parts = path.strip("/").split("/")
-            curr = ""
-            for p in parts:
-                curr += "/" + p
-                try:
-                    os.mkdir(curr)
-                except OSError:
-                    pass
-        except Exception as _e:
-            sys.print_exception(_e)
-
-    def _get_storage_path(self, filename):
-        """Return the best path for a file. Profile dir takes highest priority."""
-        if self.profile_dir:
-            return self.profile_dir + "/" + filename
-
-        sd_path = "/sd/" + filename
-        roms_path = "/roms/" + filename
-        root_path = "/" + filename
-
-        if self.sd_mounted:
-            if filename in ("ram0.bin", "ram1.bin", "ram2.bin", "ram3.bin", "regs.json", "color_vram.bin"):
-                if self._file_exists(sd_path):
-                    return sd_path
-                if self._file_exists(roms_path):
-                    return roms_path
-                return sd_path
-
-            if self._file_exists(sd_path):
-                return sd_path
-
-        if self._file_exists(roms_path):
-            return roms_path
-        return root_path
-
-    def _file_exists(self, path):
-        try:
-            os.stat(path)
-            return True
-        except OSError:
-            return False
-
-    def _virtual_fdd_config_candidates(self):
-        return (
-            "/sd/profile.ini",
-            "/sd/virtual_fdd.ini",
-            "/roms/profile.ini",
-        )
-
-    def discover_virtual_fdd_config(self):
-        if not ENABLE_VIRTUAL_FDD:
-            self.virtual_fdd_config = {"enabled": False, "reason": "disabled by flag"}
-            self._pending_virtual_fdd_config = None
-            return None
-
-        # Use [disk] section from merged pb1000.ini config if available
-        if self._config is not None and "disk" in self._config:
-            disk = self._config["disk"]
-            enabled = disk.get("enabled", "false").lower() in ("1", "true", "yes", "on")
-            if not enabled:
-                self.virtual_fdd_config = {"enabled": False, "reason": "disabled in pb1000.ini"}
-                self._pending_virtual_fdd_config = None
-                return None
-            raw_path = disk.get("path", "").strip()
-            if raw_path and not raw_path.startswith("/"):
-                raw_path = "/sd/" + raw_path
-            cfg = {
-                "enabled": True,
-                "backend": disk.get("backend", "raw").strip(),
-                "path": raw_path,
-                "readonly": disk.get("readonly", "false").lower() in ("1", "true", "yes", "on"),
-            }
-            print(f"[VFDD] Config from pb1000.ini: {raw_path}")
-            self.virtual_fdd_config = cfg
-            self._pending_virtual_fdd_config = cfg
-            return cfg
-
-        for config_path in self._virtual_fdd_config_candidates():
-            cfg = load_virtual_fdd_config(config_path)
-            if cfg:
-                print(f"[VFDD] Found config: {config_path}")
-                self.virtual_fdd_config = cfg
-                self._pending_virtual_fdd_config = cfg
-                return cfg
-        
-        if ENABLE_VIRTUAL_FDD:
-            # Fallback to default
-            default_path = "/sd/disks/disk1.img"
-            print(f"[VFDD] No config file found. Using default: {default_path}")
-            cfg = {
-                "enabled": True,
-                "backend": "image",
-                "path": default_path,
-                "readonly": False
-            }
-            self.virtual_fdd_config = cfg
-            self._pending_virtual_fdd_config = cfg
-            return cfg
-            
-        return None
-
-    def configure_virtual_fdd(self, path=None, readonly=False, enabled=True):
-        if not enabled:
-            self.disable_virtual_fdd()
-            return False
-
-        if not path:
-            raise ValueError("virtual FDD path is required")
-
-        # Create image file if it does not exist yet
-        new_disk = False
-        try:
-            os.stat(path)
-        except OSError:
-            parent = path.rsplit("/", 1)[0] if "/" in path else ""
-            if parent:
-                try:
-                    os.stat(parent)
-                except OSError:
-                    print(f"[VFDD] Directory not found: {parent}. Disabling virtual FDD.")
-                    self.disable_virtual_fdd()
-                    return False
-            ImageStorageBackend.create(path, 256)
-            new_disk = True
-            print(f"[VFDD] Created new disk image: {path}")
-
-        # Inject MD-100 identifier into OPTCD (&H6BFA) in main RAM.
-        # This may be overwritten later by ROM error paths, so we also refresh it
-        # on reset-release.
-        self._inject_optcd_signature("configure")
-
-        backend = ImageStorageBackend(path, readonly=readonly)
-        dos = MD100Dos()
-        dos.dos_init(backend)
-        if new_disk:
-            dos.format_disk()
-        self.virtual_fdd = backend
-        self.virtual_fdd_controller.attach_dos(dos)
-        self.virtual_fdd_controller.fdd_open()
-
-        # New C-side Selective Hooking:
-        # We stay in C-managed memory mode (Full Speed) and only hook 0x0C00 range.
-        if hasattr(cpu_core, "set_io_callbacks"):
-            # I/O callbacks are already registered during __init__.
-            # Re-registering here is unnecessary and can destabilize boot on-device.
-            print("[VFDD] C-side selective MMIO hooking already active")
-
-        self.virtual_fdd_config = {
-            "enabled": True,
-            "backend": "image",
-            "path": path,
-            "readonly": bool(readonly),
-        }
-        # Ensure Python-side ROM copies exist for the callback path (Bug #1)
-        self._ensure_rom_copies()
-
-        print(
-            "Virtual FDD enabled: "
-            f"path={path} readonly={1 if readonly else 0}"
-        )
-        return True
-
-    def _ensure_rom_copies(self):
-        """Reload ROM data into Python copies when C direct memory is disabled."""
-        if self.rom0 is None or len(self.rom0) == 0:
-            self.load_rom('/roms/rom0.bin', slot=0, keep_copy=True)
-        if self.rom1 is None or len(self.rom1) == 0:
-            self.load_rom('/roms/rom1.bin', slot=1, keep_copy=True)
-
-    def disable_virtual_fdd(self):
-        if self.virtual_fdd is not None:
-            try:
-                self.virtual_fdd.close()
-            except Exception:
-                pass
-        self.virtual_fdd_controller.attach_dos(None)
-        self.virtual_fdd = None
-        self.virtual_fdd_config = {"enabled": False}
-
-    def swap_disk(self, new_path):
-        """実行中にディスクイメージを差し替える。new_path=None でイジェクト。"""
-        if self.has_virtual_fdd():
-            self.disable_virtual_fdd()
-        if new_path is None:
-            print("[VFDD] Disk ejected.")
-            return True
-        try:
-            return self.configure_virtual_fdd(new_path)
-        except Exception as e:
-            print(f"[VFDD] swap_disk failed: {e}")
-            sys.print_exception(e)
-            return False
-
-    def activate_pending_virtual_fdd(self):
-        cfg = self._pending_virtual_fdd_config
-        if not cfg or not cfg.get("enabled", False):
-            self._pending_virtual_fdd_config = None
-            return False
-        try:
-            result = self.configure_virtual_fdd(
-                path=cfg.get("path"),
-                readonly=cfg.get("readonly", False),
-                enabled=True,
-            )
-            if result:
-                self._pending_virtual_fdd_config = None
-            return result
-        except Exception as exc:
-            print(f"[VFDD] Auto-config failed: {exc}")
-            import sys
-            sys.print_exception(exc)
-            return False
-
-    def boot_virtual_fdd(self):
-        """Robust initialization: Discovery + Activation in one call."""
-        cfg = self.discover_virtual_fdd_config()
-        if cfg:
-            return self.activate_pending_virtual_fdd()
-        print("[VFDD] No config found")
-        return False
-
-    def has_virtual_fdd(self):
-        return self.virtual_fdd is not None
-
-    def _ram_path(self, slot=0):
-        return f"/roms/ram{slot}.bin"
-
-    def load_ram(self):
-        path0 = self._ram_path(0)
-        try:
-            with open(path0, 'rb') as f:
-                val = f.read(self.RAM_SIZE)
-            if val:
-                for i in range(len(val)):
-                    self.ram[i] = val[i]
-                print(f"Standard RAM restored from {path0}")
-        except OSError:
-            pass
-
-        if self.has_exp:
-            path1 = self._ram_path(1)
-            try:
-                with open(path1, 'rb') as f:
-                    val = f.read(self.EXP_RAM_SIZE)
-                if val:
-                    for i in range(len(val)):
-                        self.exp_ram[i] = val[i]
-                    print(f"Expanded RAM restored from {path1}")
-            except OSError:
-                pass
-
-    def save_state(self, path=None):
-        import json
-        import gc
-        gc.collect()
-        
-        if path is None:
-            path0 = self._get_storage_path("ram0.bin")
-            reg_path = self._get_storage_path("regs.json")
-        else:
-            path0 = f"{path}/ram0.bin"
-            reg_path = f"{path}/regs.json"
-
-        # Ensure the target directory exists (handles profile subdirs like /sd/rams/work/)
-        dir_path = path0.rsplit("/", 1)[0]
-        if dir_path.startswith("/sd"):
-            self._ensure_dir(dir_path)
-
-        try:
-            with open(path0, "wb") as f:
-                buf = self.ram._view if isinstance(self.ram, RAMView) else self.ram
-                f.write(buf)
-            print(f"RAM0 saved: {path0} ({len(buf)} bytes)")
-        except Exception as e:
-            print(f"Error saving RAM0: {e}")
-            sys.print_exception(e)
-
-        for slot in range(1, 4):
-            if not self.has_bank[slot]:
-                continue
-            rp = (self._get_storage_path(f"ram{slot}.bin") if path is None else f"{path}/ram{slot}.bin")
-            try:
-                sbuf = self._bank_ram[slot]
-                data = sbuf._view if isinstance(sbuf, RAMView) else sbuf
-                if len(data) == 0:
-                    print(f"RAM{slot} skipped: buffer empty")
-                    continue
-                with open(rp, "wb") as f:
-                    f.write(data)
-                print(f"RAM{slot} saved: {rp} ({len(data)} bytes)")
-            except Exception as e:
-                print(f"Error saving RAM{slot}: {e}")
-                sys.print_exception(e)
-
-        # Color VRAM (VDP extension, src/lcd_controller.c's lcd_state.color_vram)
-        # is, like mono vram, a separate C buffer never touched by ram0.bin/
-        # regs.json -- see refresh_lcd_from_ledtp()'s docstring for the mono-
-        # vram equivalent of this gap. Unlike mono vram there's no ROM routine
-        # that rebuilds it from something already in RAM (it's stamped
-        # incrementally by write_vram_pixel_byte() as the program draws, or
-        # bulk-loaded via the bank-RAM DMA registers / vram_loader.py's SD/FDD
-        # loader), so it has to be captured as its own file. Only written when
-        # VDP is actually active, to avoid a 12KB file for the common case of
-        # a program that never uses it.
-        try:
-            if self.lcd.vdp_enabled and lcd_c is not None:
-                cv_path = self._get_storage_path("color_vram.bin") if path is None else f"{path}/color_vram.bin"
-                cvram = lcd_c.get_color_vram()
-                with open(cv_path, "wb") as f:
-                    f.write(cvram)
-                print(f"Color VRAM saved: {cv_path} ({len(cvram)} bytes)")
-        except Exception as e:
-            print(f"Error saving Color VRAM: {e}")
-            sys.print_exception(e)
-
-        try:
-            regs = {
-                "pc": int(cpu_core.get_pc()),
-                "flags": int(cpu_core.get_flags()),
-                "ia": int(cpu_core.get_reg8(4)),
-                "ib": int(cpu_core.get_reg8(2)),
-                "ie": int(cpu_core.get_reg8(5)),
-                "ua": int(cpu_core.get_reg8(3)),
-                "regmain": [int(cpu_core.get_reg(i)) for i in range(32)],
-                "regsir": [int(cpu_core.get_sreg(i)) for i in range(3)],
-                "reg16": [int(cpu_core.get_reg16(i)) for i in range(6)],
-                # irq_status/state: which interrupt handler (if any) is active,
-                # and CPU_SLP/CPU_FAST — see get_irq_status()/get_state() in
-                # modhd61700.c. A save taken mid-interrupt-handler (interrupts
-                # fire on their own schedule regardless of what the loaded
-                # program does, e.g. the periodic keyboard-scan interrupt) has
-                # PC/UA pointing into ROM handler code that only makes sense
-                # with these restored too, or resume can crash via a stale/
-                # inconsistent fetch-bank state. Guarded with hasattr() so old
-                # firmware without these C exports still round-trips the rest.
-                "irq_status": int(cpu_core.get_irq_status()) if hasattr(cpu_core, "get_irq_status") else 0,
-                "cpu_flow_state": int(cpu_core.get_state()) if hasattr(cpu_core, "get_state") else 0,
-            }
-            with open(reg_path, "w") as f:
-                json.dump(regs, f)
-            print(f"State saved to {reg_path}")
-        except Exception as e:
-            print(f"Error saving registers: {e}")
-            sys.print_exception(e)
-
-    def register_call_hook(self, address, fn, owner=None):
-        """Register a callable for the given destination address.
-        fn may be a Python function or a native C MicroPython function.
-        Fires when CAL, JP, or JR targets this exact address — some ROM
-        routines reach a given entry point via a plain JP/JR (a tail-call
-        style jump) rather than CAL, so all three must be caught for the
-        hook to reliably intercept every path in. CAL pushes a return
-        address before jumping (interception pops it and returns as if
-        RTN had executed); JP/JR push nothing, so interception simply
-        skips the jump and continues at the next instruction instead.
-
-        owner: optional human-readable label (e.g. "dotds_64dot") shown by
-        the emulator menu's Hook Status screen. Extension modules should
-        pass their own module name; if omitted, fn.__name__ is used as a
-        best-effort fallback (may be unavailable on some MicroPython builds).
-        """
-        if not hasattr(self, "_call_hook_refs"):
-            self._call_hook_refs = {}
-            self._call_hook_owner = {}
-            self._call_hook_enabled = {}
-        self._call_hook_refs[address] = fn  # Python-side GC anchor
-        self._call_hook_owner[address] = owner or getattr(fn, "__name__", "?")
-        self._call_hook_enabled[address] = True  # new entries are enabled by default
-        if hasattr(cpu_core, "set_call_hook"):
-            cpu_core.set_call_hook(address, fn)
-
-    def enable_call_hook(self, address):
-        """Enable a previously registered hook. No-op if not registered."""
-        if hasattr(self, "_call_hook_enabled") and address in self._call_hook_enabled:
-            self._call_hook_enabled[address] = True
-        if hasattr(cpu_core, "set_call_hook_enabled"):
-            cpu_core.set_call_hook_enabled(address, True)
-
-    def disable_call_hook(self, address):
-        """Disable a registered hook without unregistering it."""
-        if hasattr(self, "_call_hook_enabled") and address in self._call_hook_enabled:
-            self._call_hook_enabled[address] = False
-        if hasattr(cpu_core, "set_call_hook_enabled"):
-            cpu_core.set_call_hook_enabled(address, False)
-
-    def list_call_hooks(self):
-        """Return [(address, owner, enabled), ...] sorted by address, for
-        diagnostic display (e.g. the emulator menu's Hook Status screen)."""
-        refs = getattr(self, "_call_hook_refs", {})
-        owners = getattr(self, "_call_hook_owner", {})
-        enabled = getattr(self, "_call_hook_enabled", {})
-        return sorted(
-            (addr, owners.get(addr, "?"), enabled.get(addr, True))
-            for addr in refs
-        )
-
-    def register_mem_write_hook(self, addr_start, fn, addr_end=None, owner=None):
-        """Call fn(addr, data, bank) before a byte is written to memory.
-        Omit addr_end to watch a single address; pass addr_end to watch a
-        range (addr_start..addr_end inclusive). fn returning True cancels
-        the write. Registering again with the same addr_start overwrites
-        the previous entry (range and callable included).
-
-        owner: optional human-readable label shown by the emulator menu's
-        Hook Status screen; see register_call_hook() for details."""
-        if addr_end is None:
-            addr_end = addr_start
-        if not hasattr(self, "_mem_write_hook_refs"):
-            self._mem_write_hook_refs = {}
-            self._mem_write_hook_range = {}
-            self._mem_write_hook_owner = {}
-            self._mem_write_hook_enabled = {}
-        self._mem_write_hook_refs[addr_start] = fn  # Python-side GC anchor
-        self._mem_write_hook_range[addr_start] = addr_end
-        self._mem_write_hook_owner[addr_start] = owner or getattr(fn, "__name__", "?")
-        self._mem_write_hook_enabled[addr_start] = True  # new entries are enabled by default
-        if hasattr(cpu_core, "set_mem_write_hook"):
-            cpu_core.set_mem_write_hook(addr_start, addr_end, fn)
-
-    def list_mem_write_hooks(self):
-        """Return [(addr_start, addr_end, owner, enabled), ...] sorted by
-        addr_start, for diagnostic display (e.g. the emulator menu's Hook
-        Status screen)."""
-        refs = getattr(self, "_mem_write_hook_refs", {})
-        ranges = getattr(self, "_mem_write_hook_range", {})
-        owners = getattr(self, "_mem_write_hook_owner", {})
-        enabled = getattr(self, "_mem_write_hook_enabled", {})
-        return sorted(
-            (addr, ranges.get(addr, addr), owners.get(addr, "?"), enabled.get(addr, True))
-            for addr in refs
-        )
-
-    def load_state(self, path=None, restore_cpu_state=True):
-        """restore_cpu_state=True (default): full resume, including PC/UA/
-        all registers, as captured by save_state() — used by the emulator
-        menu's user-initiated "RAM Load".
-        restore_cpu_state=False: RAM contents only, CPU forced to a clean
-        reset (PC=0x0000, IB/IE/IA/UA cleared) — the old, conservative
-        behavior. Used for the automatic boot-time restore (main.py), since
-        an unattended boot must never be able to get stuck resuming a bad/
-        inconsistent save with no way to reach the menu to recover (see
-        2026-08-11 FOREX_PB boot-hang report: a save taken mid-VFDD-access
-        resumed into a TRP whose 0x6FFA jump table pointed into the unmapped
-        dead zone, hanging every subsequent boot until this split existed)."""
-        import json
-        if path is None:
-            path0 = self._get_storage_path("ram0.bin")
-            reg_path = self._get_storage_path("regs.json")
-        else:
-            path0 = f"{path}/ram0.bin"
-            reg_path = f"{path}/regs.json"
-
-        print(f"Loading state: RAM={path0}, REGS={reg_path}")
-        import gc
-        gc.collect()
-
-        def _load_direct(f, view):
-            """readinto でCバッファに直接書き込む。Pythonヒープ割り当てゼロ。"""
-            return f.readinto(view)
-
-        def _load_chunked(f, ram_target, chunk_size=256):
-            """チャンク単位で書き込む。chunk_size を小さくしてヒープ断片化に対応。"""
-            offset = 0
-            buf = bytearray(chunk_size)
-            while True:
-                n = f.readinto(buf)
-                if not n:
-                    break
-                ram_target[offset:offset + n] = buf[:n]
-                offset += n
-                gc.collect()
-            return offset
-
-        def _fill_bank(ram_target, value, chunk_size=1024):
-            """バンクRAMをvalueで埋める(チャンク単位、Pythonヒープ確保は
-            pattern一つ分のみ)。ファイルが無いプロファイルへ切り替えた際、
-            前のプロファイルの内容が残留しないようにするために使う。"""
-            view = ram_target._view if hasattr(ram_target, '_view') else ram_target
-            size = len(ram_target)
-            pattern = bytes([value & 0xFF]) * chunk_size
-            offset = 0
-            while offset < size:
-                n = min(chunk_size, size - offset)
-                view[offset:offset + n] = pattern if n == chunk_size else pattern[:n]
-                offset += n
-
-        def _load_to_ram(file_path, ram_target, slot):
-            if not self._file_exists(file_path):
-                print(f"RAM file not found: {file_path}")
-                return False
-            try:
-                gc.collect()
-                with open(file_path, "rb") as f:
-                    if slot == 0 and hasattr(cpu_core, "load_ram"):
-                        # メインRAM(8KB): C-API 経由で一括ロード
-                        gc.collect()
-                        try:
-                            data = f.read()
-                            cpu_core.load_ram(slot, data)
-                            print(f"RAM slot {slot} loaded via C-API ({len(data)}B)")
-                            del data
-                            gc.collect()
-                        except MemoryError:
-                            f.seek(0)
-                            n = _load_chunked(f, ram_target)
-                            print(f"RAM slot {slot} loaded chunked ({n}B)")
-                    elif hasattr(ram_target, '_view'):
-                        # バンクRAM(32KB): readinto でCバッファに直接書き込み
-                        # f.readinto(memoryview) はPythonヒープを一切消費しない
-                        gc.collect()
-                        try:
-                            n = _load_direct(f, ram_target._view)
-                            print(f"RAM slot {slot} loaded direct ({n}B) from {file_path}")
-                        except Exception as _e:
-                            print(f"RAM direct load failed ({_e}), retrying chunked")
-                            f.seek(0)
-                            n = _load_chunked(f, ram_target)
-                            print(f"RAM slot {slot} loaded chunked ({n}B) from {file_path}")
-                    else:
-                        # fallback: bytearray バッファへのチャンク書き込み
-                        n = _load_chunked(f, ram_target)
-                        print(f"RAM slot {slot} loaded chunked ({n}B) from {file_path}")
-                return True
-            except Exception as e:
-                print(f"Error loading {file_path}: {e}")
-                sys.print_exception(e)
-                return False
-
-        _load_to_ram(path0, self.ram, 0)
-        gc.collect()
-        for slot in range(1, 4):
-            # Bank buffers are always allocated (see __init__), so switching
-            # profiles can always load whichever banks the newly-selected
-            # profile provides. has_bank[slot] (the CPU-visible presence
-            # flag, mirrored into the C core) is re-evaluated per profile:
-            # a profile without ramN.bin means "no card in this slot" for
-            # this session, matching what a bank-presence probe would see
-            # on real hardware — so the bank is filled with 0xFF (the same
-            # value c_mem_direct_read returns for an absent bank) rather
-            # than left with the previous profile's stale contents.
-            rp = (self._get_storage_path(f"ram{slot}.bin") if path is None else f"{path}/ram{slot}.bin")
-            present = self._file_exists(rp)
-            self.has_bank[slot] = present
-            if hasattr(cpu_core, "set_bank_present"):
-                cpu_core.set_bank_present(slot, present)
-            if present:
-                _load_to_ram(rp, self._bank_ram[slot], slot)
-            else:
-                _fill_bank(self._bank_ram[slot], 0xFF)
-                print(f"RAM slot {slot}: no save for this profile, filled 0xFF")
-            gc.collect()
-
-        # Color VRAM (VDP extension) -- see save_state()'s comment for why this
-        # needs its own file. Only restored if this profile actually saved one;
-        # otherwise explicitly disable VDP (not just "leave it as-is") so a mid-
-        # session profile switch via RAM Load can't leave a previous profile's
-        # VDP state active over content that never used it.
-        try:
-            cv_path = self._get_storage_path("color_vram.bin") if path is None else f"{path}/color_vram.bin"
-            if lcd_c is not None and self._file_exists(cv_path):
-                cvram = lcd_c.get_color_vram()
-                with open(cv_path, "rb") as f:
-                    n = f.readinto(cvram)
-                self.lcd.set_vdp_enable(True)
-                if hasattr(lcd_c, "set_vdp_init_done"):
-                    lcd_c.set_vdp_init_done(True)
-                print(f"Color VRAM restored: {cv_path} ({n} bytes)")
-            elif lcd_c is not None:
-                self.lcd.set_vdp_enable(False)
-        except Exception as e:
-            print(f"Error loading Color VRAM: {e}")
-            sys.print_exception(e)
-
-        try:
-            if self._file_exists(reg_path):
-                if reg_path.endswith(".json"):
-                    with open(reg_path, "r") as f:
-                        regs = json.load(f)
-                    # cpu_core.reset() first regardless of restore_cpu_state:
-                    # hd61700_init() zeroes the whole C struct including callback
-                    # pointers/bank buffers that must be re-wired either way.
-                    cpu_core.reset(self.debug_cfg["sys"])
-                    if not restore_cpu_state:
-                        cpu_core.set_pc(0x0000)
-                        cpu_core.set_reg8(2, 0)  # Clear IB
-                        cpu_core.set_reg8(5, 0)  # Clear IE
-                        cpu_core.set_reg8(4, 0)  # Clear IA
-                        cpu_core.set_reg8(3, 0)  # Clear UA
-                        print("CPU reset after RAM load (saved registers ignored, PC=0x0000)")
-                    else:
-                        # Full resume: restore the exact CPU state save_state()
-                        # captured (pc/flags/ia/ib/ie/ua/regmain/regsir/reg16), not
-                        # just the RAM contents.
-                        #
-                        # set_reg8(3, ua) (UA) already re-syncs the internal fetch_ua/
-                        # prev_ua fetch-bank pipeline as a side effect (see the comment
-                        # on mod_set_reg8 in modhd61700.c, written specifically for this
-                        # save-state-restore case) — without that, the first instruction
-                        # executed after resume would fetch from bank 0 regardless of
-                        # the restored UA (reset() leaves fetch_ua/prev_ua at 0), which
-                        # is exactly the class of UA-bank corruption bug this project
-                        # spent a long investigation on for FOREX_PB (see
-                        # 調査用/FOREX_PB/investigation_notes.md) — so UA must be
-                        # restored via set_reg8, not written directly into a save
-                        # format that bypasses it.
-                        #
-                        # 2026-08-11 FOREX_PB boot-hang report: a menu-triggered RAM
-                        # Load resumed at PC=0x9318/UA=0x50 — ROM handler code, not
-                        # FOREX_PB's own (FOREX_PB does no disk access, ruling out
-                        # the game itself having caused the VFDD activity seen right
-                        # after resume) — straight into a TRP whose 0x6FFA jump table
-                        # resolved to 0x3720 (unmapped dead zone). The likely
-                        # explanation: the save was taken while a periodic interrupt
-                        # handler (e.g. keyboard-scan, which fires on its own schedule
-                        # regardless of the loaded program) was mid-flight, temporarily
-                        # in ROM/UA=0x50 territory — but irq_status wasn't part of the
-                        # saved format, so resume left it at 0 (reset() default) even
-                        # though PC was sitting inside what was an active handler,
-                        # leaving fetch_bank_ua()'s "force bank 0 while a handler is
-                        # active" protection incorrectly disengaged for any interrupt
-                        # nesting/RTNI bookkeeping that follows. get_irq_status()/
-                        # get_state() (added same day) close this gap; hasattr() guards
-                        # keep old saves (and old firmware without these C exports)
-                        # loading fine, just without this restored.
-                        cpu_core.set_reg8(2, int(regs.get("ib", 0)))   # IB
-                        cpu_core.set_reg8(5, int(regs.get("ie", 0)))   # IE
-                        cpu_core.set_reg8(4, int(regs.get("ia", 0)))   # IA
-                        cpu_core.set_reg8(3, int(regs.get("ua", 0)))   # UA (syncs fetch_ua/prev_ua)
-                        cpu_core.set_flags(int(regs.get("flags", 0)))
-                        for i, v in enumerate(regs.get("regmain", [])):
-                            cpu_core.set_reg(i, int(v))
-                        for i, v in enumerate(regs.get("regsir", [])):
-                            cpu_core.set_sreg(i, int(v))
-                        for i, v in enumerate(regs.get("reg16", [])):
-                            cpu_core.set_reg16(i, int(v))
-                        if hasattr(cpu_core, "set_irq_status"):
-                            cpu_core.set_irq_status(int(regs.get("irq_status", 0)))
-                        if hasattr(cpu_core, "set_state"):
-                            cpu_core.set_state(int(regs.get("cpu_flow_state", 0)))
-                        cpu_core.set_pc(int(regs.get("pc", 0)))
-                        print("CPU state restored from RAM load (PC=0x%04X UA=0x%02X irq_status=0x%02X)" %
-                              (int(regs.get("pc", 0)), int(regs.get("ua", 0)),
-                               int(regs.get("irq_status", 0))))
-                        # Known limitation: peripheral-side state driven by the
-                        # emulated program (e.g. an in-progress virtual-FDD transfer)
-                        # is still not captured — a save taken mid-transfer can resume
-                        # into a CPU state that no longer matches what the peripheral
-                        # emulation expects. Unlike irq_status this isn't CPU state,
-                        # so it isn't something get_irq_status()/get_state() can help
-                        # with; a full fix would need VFDD's own controller state
-                        # snapshotted too.
-                else:
-                    self._restore_registers_from_dump()
-            else:
-                print(f"Register file not found: {reg_path}")
-        except Exception as e:
-            print(f"Error loading registers: {e}")
-            sys.print_exception(e)
 
     _LEDTP_ADDR = 0x6201     # references/rom0.src: LCD dot-matrix buffer (LEDTP)
     _LEDTP_RAM_OFF = _LEDTP_ADDR - 0x6000
@@ -1641,24 +750,6 @@ class PB1000System:
              if result:
                  self.set_status(result,10000)
 
-    @property
-    def console_uart(self):
-        return self._console_uart
-
-    @console_uart.setter
-    def console_uart(self, uart):
-        self._console_uart = uart
-        if not hasattr(self, "_cb_refs"):
-            return
-        if not hasattr(cpu_core, "set_lcd_char_callback"):
-            return
-        if uart is not None:
-            if "lcd_char" not in self._cb_refs:
-                self._cb_refs["lcd_char"] = self._on_lcd_char_output
-            cpu_core.set_lcd_char_callback(self._cb_refs["lcd_char"])
-        else:
-            cpu_core.set_lcd_char_callback(None)
-
     def update_display(self, x_offset=None, y_offset=None):
         if x_offset is not None: self._disp_x = x_offset
         if y_offset is not None: self._disp_y = y_offset
@@ -1730,6 +821,16 @@ class PB1000System:
         self.lcd.mark_dirty()
         self._status_rendered_msg = None  # force status bar refresh
         self.update_display()
+        # Gap filler: draw_bezel()'s outer rect ends at game-screen-bottom+4
+        # (padding) and _render_status_bar()'s backdrop starts at
+        # game-screen-bottom+12-2=+10 -- a ~6px-tall band between them that
+        # neither function ever paints, left showing whatever was drawn
+        # there earlier. Repaint the whole band black so nothing is left
+        # uncovered.
+        if hasattr(self.lcd, 'display') and self.lcd.display is not None:
+            _d = self.lcd.display
+            _gsb = self._disp_y + int(self._lcd_height * self.lcd.scale)  # game screen bottom
+            _d.fill_rect(self._disp_x, _gsb + 4, 200, 6, 0x0000)
 
     def set_status(self, msg, duration_ms=2000):
         self.status_msg = msg
@@ -1738,7 +839,7 @@ class PB1000System:
     def _render_status_bar(self):
         if not hasattr(self.lcd, 'display') or self.lcd.display is None:
             return
-        
+
         now = time.ticks_ms()
         # Handle expiry
         active_msg = self.status_msg
@@ -1749,46 +850,22 @@ class PB1000System:
         # Only redraw if the message has changed
         if active_msg == self._status_rendered_msg:
             return
-        
+
         y_pos = self._disp_y + int(self._lcd_height * self.lcd.scale) + 12
         display = self.lcd.display
         
         # Clear/Draw backdrop
         display.fill_rect(self._disp_x, y_pos - 2, 200, 12, 0x0000)
-        
+
         if active_msg:
             self._draw_text(display, self._disp_x, y_pos, active_msg, 0x07FF) # Cyan text
-            
+
         self._status_rendered_msg = active_msg
 
-        # Draw status text below the bezel
-        # LCD height is lcd_height * scale. Bezel margin is ~4.
-        y_pos = self._disp_y + int(self._lcd_height * self.lcd.scale) + 12
-        display = self.lcd.display
-        
-        # Simple backdrop for text
-        display.fill_rect(self._disp_x, y_pos - 2, 200, 12, 0x0000)
-        self._draw_text(display, self._disp_x, y_pos, self.status_msg, 0x07FF) # Cyan text
-
     def _draw_text(self, display, x, y, text, color):
-        # Extremely minimal 5x7 font (subset for common labels)
-        font = {
-            'A':0x7E0909097E, 'B':0x7F49494936, 'C':0x3E41414122, 'D':0x7F4141413E,
-            'E':0x7F49494941, 'F':0x7F09090901, 'G':0x3E4149493A, 'H':0x7F0808087F,
-            'I':0x00417F4100, 'J':0x2041413F01, 'K':0x7F08142241, 'L':0x7F40404040,
-            'M':0x7F020C027F, 'N':0x7F0408107F, 'O':0x3E4141413E, 'P':0x7F09090906,
-            'Q':0x3E4151215E, 'R':0x7F09192946, 'S':0x4649494931, 'T':0x01017F0101,
-            'U':0x3F4040403F, 'V':0x1F2040201F, 'W':0x7F4038407F, 'X':0x6314081463,
-            'Y':0x0708700807, 'Z':0x6151494543, ' ':0x0000000000, '0':0x3E5149453E,
-            '1':0x00427F4000, '2':0x4261514946, '3':0x2141454B31, '4':0x1814127F10,
-            '5':0x2745454539, '6':0x3C4A494930, '7':0x0171090503, '8':0x3649494936,
-            '9':0x064949291E, '.':0x0060600000, '+':0x08083E0808, '-':0x0808080808,
-            '*':0x14083E0814, '/':0x2010080402, '=':0x2424242424, '<':0x0814224100,
-            '>':0x0041221408, '!':0x00005F0000, '^':0x0402010204, '&':0x3649552250,
-        }
         curr_x = x
         for char in str(text).upper():
-            bits = font.get(char, 0x7F7F7F7F7F) # Block for unknown
+            bits = _STATUS_FONT.get(char, 0x7F7F7F7F7F) # Block for unknown
             # Hex bytes are ordered MSB...LSB, so i=0 (left) should be MSB
             for i in range(5):
                 col_bits = (bits >> ((4 - i) * 8)) & 0xFF
@@ -1796,18 +873,6 @@ class PB1000System:
                     if col_bits & (1 << j):
                         display.fill_rect(curr_x + i, y + j, 1, 1, color)
             curr_x += 6
-
-    def _on_lcd_char_output(self, code):
-        uart = getattr(self, 'console_uart', None)
-        if not uart:
-            return
-        if code is None:
-            if self._lcd_had_output:
-                uart.write(b'\r\n')
-                self._lcd_had_output = False
-        elif 0x20 <= code <= 0x7E:
-            uart.write(bytes([code]))
-            self._lcd_had_output = True
 
     def _on_lcd_scale_change(self, scale):
         """Callback from LCDController when scale is changed."""

@@ -1,5 +1,15 @@
-from pb1000 import PB1000System, init_display
-from pio_uart import PioUart
+# init_display() lives in display_init.py (not pb1000.py) specifically so
+# it can be imported here, at module level, without dragging in PB1000System
+# and everything pb1000.py needs for it (~2000 lines) -- that class isn't
+# actually needed until create_system() below, which runs well after the
+# profile picker (and its F1 setup menu) have already had their chance to
+# run on the least-fragmented heap of the whole boot sequence. See
+# display_init.py's module docstring. `from pb1000 import PB1000System` is
+# therefore deferred to inside create_system() itself, and PioUart's import
+# deferred similarly to inside initialize_usb_host_and_pio() -- see
+# main.py's own note about main_input/main_runtime/etc. for the same
+# reasoning applied at the main.py level.
+from display_init import init_display
 
 _usb_host_initialized = False
 
@@ -70,8 +80,9 @@ def _setup_touch_offsets(system, dw, dh, config=None):
         system.funckey_touch_y_offset = _gi("funckey_y_offset",  round(24  * _ty))
 
 
-def create_system(display_ret, profile_dir=None, config=None, *, console_uart=None):
+def create_system(display_ret, profile_dir=None, config=None):
     """Create PB1000System with the given profile directory and merged config."""
+    from pb1000 import PB1000System
     display = display_ret[0] if isinstance(display_ret, tuple) else display_ret
     touch = display_ret[1] if isinstance(display_ret, tuple) and len(display_ret) >= 2 else None
 
@@ -85,8 +96,6 @@ def create_system(display_ret, profile_dir=None, config=None, *, console_uart=No
     )
     print("PB1000System initialized.")
     system.touch = touch
-    if console_uart is not None:
-        system._console_uart_hw = console_uart  # store hw ref; console starts OFF by default
     disp_cfg = (config or {}).get("display", {})
     display_obj = display_ret[0] if isinstance(display_ret, tuple) else display_ret
     dw = getattr(display_obj, "width", 320)
@@ -124,39 +133,38 @@ def create_system(display_ret, profile_dir=None, config=None, *, console_uart=No
     return system
 
 
-def create_console_uart(machine, *, enable_uart_kbd, baudrate, tx_pin, rx_pin):
-    uart_kbd = None
-    console_uart = None
-    if enable_uart_kbd:
-        try:
-            uart_kbd = machine.UART(
-                1,
-                baudrate=baudrate,
-                tx=machine.Pin(tx_pin),
-                rx=machine.Pin(rx_pin),
-                txbuf=2048,
-                # Explicit rxbuf (default is a small fixed size on the rp2
-                # port): outer-loop UART polling cadence can lag behind
-                # incoming bytes, so give the RX side enough headroom to
-                # ride that out instead of silently overflowing.
-                rxbuf=2048,
-            )
-            console_uart = uart_kbd
-            print(f"UART1 Console I/O enabled: GP{tx_pin}(TX)/GP{rx_pin}(RX) @ {baudrate}bps")
-        except Exception as e:
-            print(f"Failed to init UART1 console: {e}")
-    return uart_kbd, console_uart
-
-
 def load_default_roms(system):
     """Load rom0.bin/rom1.bin from /roms/. Returns a list of the paths that
     failed to load (empty list means both loaded successfully)."""
     import gc
     failed = []
+    # If virtual FDD is going to be enabled for this profile, its callback
+    # path needs its own Python-side copy of each ROM (see
+    # PB1000System._ensure_rom_copies() in pb1000.py). Without keep_copy
+    # here, that first read is discarded and the VFDD activation below would
+    # otherwise re-read the whole ~32KB ROM file a second time -- landing
+    # right after PB1000System construction and the [ext] module loader have
+    # already eaten into the freshly-released ROM-buffer heap. That second
+    # read has been observed to fail there with MemoryError (non-fatal --
+    # VFDD just doesn't come up for that boot -- but avoidable by keeping
+    # the copy from this first read instead).
+    #
+    # discover_virtual_fdd_config() is called here, once, up front -- not
+    # via boot_virtual_fdd() below, which would call it again (same config,
+    # same "[VFDD] Config from pb1000.ini: ..." line printed twice, purely
+    # cosmetic but avoidable) -- its result is reused directly via
+    # activate_pending_virtual_fdd() instead.
+    _vfdd_cfg = None
+    if hasattr(system, "discover_virtual_fdd_config"):
+        try:
+            _vfdd_cfg = system.discover_virtual_fdd_config()
+        except Exception:
+            _vfdd_cfg = None
+    _keep_rom_copy = bool(_vfdd_cfg and _vfdd_cfg.get("enabled"))
     for path, slot in (('/roms/rom0.bin', 0), ('/roms/rom1.bin', 1)):
         try:
             gc.collect()
-            if not system.load_rom(path, slot=slot):
+            if not system.load_rom(path, slot=slot, keep_copy=_keep_rom_copy):
                 failed.append(path)
         except MemoryError as e:
             print(f"ROM load warning ({path}): {e}")
@@ -165,14 +173,21 @@ def load_default_roms(system):
             print(f"ROM load error ({path}): {e}")
             failed.append(path)
     try:
-        if hasattr(system, "boot_virtual_fdd"):
+        if _vfdd_cfg is not None and hasattr(system, "activate_pending_virtual_fdd"):
+            if _vfdd_cfg.get("enabled"):
+                system.activate_pending_virtual_fdd()
+        elif hasattr(system, "boot_virtual_fdd"):
+            # discover_virtual_fdd_config() wasn't available above (very old
+            # firmware) -- fall back to the combined discovery+activation
+            # entry point instead.
             system.boot_virtual_fdd()
     except Exception as e:
         print(f"VFDD init warning: {e}")
     return failed
 
 
-def initialize_usb_host_and_pio(system, *, enable_usb_kbd, pio_uart_baudrate=9600):
+def initialize_usb_host_and_pio(system, *, enable_usb_kbd, pio_uart_baudrate=9600,
+                                 pio_uart_enable=True, pio_uart_tx_pin=6, pio_uart_rx_pin=13):
     if enable_usb_kbd:
         try:
             import usb_host
@@ -182,10 +197,21 @@ def initialize_usb_host_and_pio(system, *, enable_usb_kbd, pio_uart_baudrate=960
         except Exception as e:
             print(f"Failed to init USB Host: {e}")
 
+    if not pio_uart_enable:
+        # RS-232C off ([rs232c] enable=false in pb1000.ini, editable via the
+        # F1 setup menu). system.pio_uart stays None -- every caller already
+        # guards on that (service_pio_uart_bridge(), main.py's flush_rx()
+        # branch, PB1000System.service_pio_uart()), so simply not constructing
+        # it here is enough; no other code needs to know it was skipped.
+        print("PIO UART (RS-232C) disabled via config.")
+        return
+
     try:
-        pio_uart = PioUart(tx_pin=6, rx_pin=13, baudrate=pio_uart_baudrate, sm_tx=6, sm_rx=7)
+        from pio_uart import PioUart
+        pio_uart = PioUart(tx_pin=pio_uart_tx_pin, rx_pin=pio_uart_rx_pin,
+                            baudrate=pio_uart_baudrate, sm_tx=6, sm_rx=7)
         system.pio_uart = pio_uart
-        print(f"PIO UART (GP6/GP13) initialized on SM 6/7 @ {pio_uart_baudrate}bps.")
+        print(f"PIO UART (GP{pio_uart_tx_pin}/GP{pio_uart_rx_pin}) initialized on SM 6/7 @ {pio_uart_baudrate}bps.")
         import gc
         print(f"[MEM] after PIO init: free={gc.mem_free()} alloc={gc.mem_alloc()}")
     except Exception as e:

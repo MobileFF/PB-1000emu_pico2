@@ -6,34 +6,7 @@ import os
 import time
 
 from hdmi_menu_mirror import hdmi_flush
-
-
-# ---- helpers (mirrored from boot_session.py) ---------------------------------
-
-def _swap16(c):
-    return ((c & 0xFF) << 8) | (c >> 8)
-
-
-def _draw_text(display, x, y, text, fg, bg=0x0000):
-    W = display.width
-    max_chars = (W - x) // 8
-    text = text[:max_chars]
-    if not text:
-        return
-    record = getattr(display, 'record_text', None)
-    if record is not None:
-        # HDMIMirrorDisplay: record a compact text command instead of
-        # rasterizing to pixels (see hdmi_menu_mirror.py).
-        record(x, y, text, fg, bg)
-        return
-    import framebuf
-    tw = len(text) * 8
-    buf = bytearray(tw * 8 * 2)
-    fb = framebuf.FrameBuffer(buf, tw, 8, framebuf.RGB565)
-    fb.fill(_swap16(bg))
-    fb.text(text, 0, 0, _swap16(fg))
-    display.set_window(x, y, x + tw - 1, y + 7)
-    display.write_data(buf)
+from draw_text import draw_text as _draw_text
 
 
 # ---- disk image scanner ------------------------------------------------------

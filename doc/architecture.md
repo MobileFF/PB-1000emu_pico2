@@ -47,15 +47,24 @@
 
 依存先:
 
-- `pb1000.py`
-- `pio_uart.py`
+- `display_init.py`（`init_display()` -- モジュールレベルで import。ピッカーより前に必要なため、
+  `PB1000System` を丸ごと引き込む `pb1000.py` からは分離されている）
+- `pb1000.py`（`PB1000System` -- `create_system()` 内でのローカル import。プロファイル
+  ピッカー／F1セットアップメニューが終わるまでヒープを消費しないよう遅延している）
+- `pio_uart.py`（`PioUart` -- `initialize_usb_host_and_pio()` 内でのローカル import）
 - `usb_host`
 - `hd61700`
 - `keymap.py`
 
 ---
 
-### `mp/main_input.py`
+### `mp/main_input_keyboard.py` / `_touch.py` / `_joystick.py` / `_cursor.py`
+
+かつては `main_input.py` という1ファイル（535行）だったが、`main.py` の Step 8b
+（`load_state()` 直後、起動中で最もヒープに余裕がある地点で4つのマネージャを生成する箇所）
+で、一度に535行をコンパイルすると実機で `MemoryError` になる事例が観測されたため、
+用途ごとに4ファイルへ分割した。`main.py` はそれぞれを個別の `gc.collect()` を挟んで
+importする（`main_input_joystick.py` は `[joystick] enable=true` の時のみ）。
 
 役割:
 
@@ -68,10 +77,10 @@
 
 主な公開クラス:
 
-- `KeyboardInputManager`: UART キーボード入力管理
-- `TouchInputManager`: タッチパネル入力管理
-- `JoystickInputManager`: ジョイスティック入力管理（デフォルト GP18–21/26/27）
-- `CursorRepeatManager`: カーソルキー自動リピート（ROM の KEY_INT ISR に release/press サイクルを合成）
+- `KeyboardInputManager`（`main_input_keyboard.py`）: UART キーボード入力管理
+- `TouchInputManager`（`main_input_touch.py`）: タッチパネル入力管理
+- `JoystickInputManager`（`main_input_joystick.py`）: ジョイスティック入力管理（デフォルト GP18–21/26/27）
+- `CursorRepeatManager`（`main_input_cursor.py`）: カーソルキー自動リピート（ROM の KEY_INT ISR に release/press サイクルを合成）
 
 ---
 
@@ -120,7 +129,9 @@
 
 - GUI+F7 で起動するランタイム設定メニュー
 - メニュー中は CPU ステッピングが暗黙的に一時停止
-- シリアルコンソール / RS-232C / vFDD / ビープ / ジョイスティック / カラー VDP / RAM セーブ/ロード / VRAM セーブ / 色設定などをリアルタイムに切り替え
+- Toggles はビープのみ（他は `pb1000.ini`/F1 セットアップメニューに統一、2026-08-22）。
+  FD Swap / RAM セーブ / VRAM セーブ / Full Capture / 色設定 / Reset / Reboot / NEW ALL など
+  即時反映が必要な操作をリアルタイムに実行
 - メニュー終了後に `system.force_full_redraw()` でベゼル＋LCD を復元
 
 ---
@@ -181,20 +192,60 @@
 
 ---
 
+### `mp/display_init.py`
+
+役割:
+
+- LCD（ILI9341/ST7796）・SDカード・タッチパネルの起動時初期化（`init_display()`）
+- `PB1000System`（`pb1000.py`）が一切不要な、プロファイルピッカーより前の段階でだけ使う処理
+  なので、`pb1000.py` から分離されている（2000行超の `pb1000.py` を丸ごとコンパイル・常駐
+  させずに済む -- ヒープが最も逼迫するプロファイルピッカー／F1セットアップメニューの区間を
+  楽にするための分割。経緯は `mp/main_boot.py` 冒頭のコメント参照）
+
+---
+
 ### `mp/pb1000.py`
 
 役割:
 
-- `PB1000System` クラス（ボードレベルエミュレーション統括）
+- `PB1000System` クラス（ボードレベルエミュレーション統括）。`PB1000FddMixin`
+  （`pb1000_fdd.py`）と `PB1000StateIOMixin`（`pb1000_state_io.py`）を多重継承で
+  取り込む（2026-08-22、コンパイル時のヒープ断片化対策で分割。両ファイルの説明は下記）
 - メモリマップ管理（ROM / RAM / バンク切り替え / 拡張ワークエリア）
 - ポート I/O / MMIO コールバック
-- 仮想 FDD（`_handle_virtual_fdd_port_write`）
 - ビープ（PWM）制御
-- save-state / load-state
-- シリアルコンソール（LCD 文字検出 → UART 出力: `_on_lcd_char_output`）
 - サブルーチンフック登録（`register_call_hook` / `unregister_call_hook` / `enable_call_hook` / `disable_call_hook`）
 - 拡張 API ロード（`_ext_load_modules`）
 - 表示更新（`update_display` / `force_full_redraw`）
+
+シリアルコンソール（LCD 文字検出 → GP4/GP5 UART 出力）は 2026-08-22 に廃止された。
+検出パイプライン自体は C コア側に残るが、Python 側の唯一の呼び出し元
+（`console_uart` プロパティセッター）を削除したため恒久的に無効（詳細は `dev_guide.md` §7）。
+
+---
+
+### `mp/pb1000_fdd.py`
+
+役割:
+
+- `PB1000FddMixin`（`pb1000.py` の `PB1000System` に多重継承で統合）
+- 仮想 FDD（MD-100）制御（`_handle_virtual_fdd_port_write` / `configure_virtual_fdd` /
+  `swap_disk` / `discover_virtual_fdd_config` 等）
+- ストレージパス解決ヘルパー（`_get_storage_path` 等）
+
+`pb1000.py` 単体（旧 1943 行）が実機でコンパイル時 MemoryError を起こしたため split。
+
+---
+
+### `mp/pb1000_state_io.py`
+
+役割:
+
+- `PB1000StateIOMixin`（`pb1000.py` の `PB1000System` に多重継承で統合）
+- save-state / load-state（`save_state` / `load_state`）
+- CALL・メモリ書き込みフックレジストリ（`register_call_hook` 等）
+
+`pb1000_fdd.py` と同じ理由で split。
 
 ---
 
@@ -203,7 +254,7 @@
 役割:
 
 - RP2350 PIO ステートマシンを利用したソフト UART（RS-232C 仮想ポート）
-- ボーレートは `pb1000.ini` の `[pio_uart] baudrate` で設定（デフォルト 9600 bps）
+- ボーレートは `pb1000.ini` の `[rs232c] baudrate` で設定（デフォルト 9600 bps）
 
 ---
 
@@ -212,21 +263,27 @@
 ```text
 main.py
   -> main_boot.py
-  -> main_input.py
+  -> main_input_keyboard.py / _touch.py / _cursor.py (Step 8b, module-level gc.collect() each)
+  -> main_input_joystick.py (Step 8b, same, only when [joystick] enable=true)
   -> main_runtime.py
   -> main_actions.py
   -> main_cleanup.py
   -> emulator_menu.py   (lazy import, GUI+F7 時のみ)
 
 main_boot.py
-  -> pb1000.py
-  -> pio_uart.py
+  -> display_init.py     (module-level import -- needed before the profile picker)
+  -> pb1000.py            (lazy import, inside create_system() -- after the picker)
+     -> pb1000_fdd.py / pb1000_state_io.py (module-level, mixed into PB1000System)
+  -> pio_uart.py          (lazy import, inside initialize_usb_host_and_pio())
   -> hd61700 / usb_host / keymap
   -> boot_session.py
   -> config.py
 
-main_input.py
+main_input_keyboard.py / _touch.py / _joystick.py / _cursor.py
   -> system object API
+  -> keymap.py (main_input_joystick.py, for named-constant key names)
+  -> hd61700 (main_input_cursor.py: get_held_cursor_key()/steer_next_key_int())
+  -> machine.Pin (main_input_joystick.py)
 
 main_runtime.py
   -> system object API
@@ -242,6 +299,7 @@ emulator_menu.py
   -> main_actions.py (disk swap)
 
 pb1000.py
+  -> pb1000_fdd.py / pb1000_state_io.py (module-level, mixed in via multiple inheritance)
   -> lcd_controller_c.py (LCDControllerC)
   -> hd61700 (CPU core C module)
   -> lcd_c   (LCD controller C module)
@@ -282,28 +340,24 @@ pb1000.py
 
 ## Suggested Long-Term Package Layout
 
+`main_input.py` は既に `main_input_keyboard.py`/`_touch.py`/`_cursor.py`/`_joystick.py` に、
+`pb1000.py` は既に `pb1000_fdd.py`/`pb1000_state_io.py` に、`emulator_menu_ext.py` は既に
+`emulator_menu_ram.py`/`_capture.py`/`_debug.py` に分割済み（詳細は上記「Current Module
+Split」参照）。まだ実施していない、より大きな単位の将来オプションとしては、これらの
+機能別ファイル群をディレクトリ単位のパッケージへまとめ直すことが考えられる:
+
 ```text
 mp/
   main.py
-  main_boot.py
-  main_input.py
-  main_runtime.py
-  main_actions.py
-  main_diag.py
-  main_cleanup.py
-  emulator_menu.py
-  funckey_bar.py
-  boot_session.py
   config.py
   lcd_controller_c.py
-  pb1000.py
   pio_uart.py
 
-  # future option
-  boot/
-  input/
-  runtime/
-  actions/
-  diag/
+  boot/       # main_boot.py, boot_session.py, display_init.py
+  input/      # main_input_*.py
+  runtime/    # main_runtime.py
+  actions/    # main_actions.py, main_cleanup.py
+  pb1000/     # pb1000.py, pb1000_fdd.py, pb1000_state_io.py
+  menu/       # emulator_menu*.py, funckey_bar.py
   ext/        # 拡張 API モジュール
 ```

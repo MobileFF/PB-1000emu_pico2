@@ -8,14 +8,9 @@ import os
 _DEFAULTS = {
     "keyboard": {
         "enable_usb_kbd": "true",
-        "enable_uart_kbd": "false",
-        "uart_baudrate": "9600",
-        "uart_tx_pin": "4",
-        "uart_rx_pin": "5",
         "key_hold_ms": "120",
         "key_release_hard_timeout_ms": "1200",
         "inter_key_gap_ms": "80",
-        "uart_enter_always_exe": "true",
         "key_pulse_interval_ms": "25",
     },
     "emulator": {
@@ -56,8 +51,11 @@ _DEFAULTS = {
         "freq_hz":  "1000",
         "duty":     "50",
     },
-    "pio_uart": {
+    "rs232c": {
+        "enable": "true",
         "baudrate": "9600",
+        "tx_pin": "6",
+        "rx_pin": "13",
     },
     "display": {
         "fg_color": "0",
@@ -65,6 +63,7 @@ _DEFAULTS = {
         "driver":   "ILI9341",
         "scale":    "1.5",
         "rotation": "0",
+        "vdp_enable": "true",
     },
     "wifi": {
         "ssid": "",
@@ -80,13 +79,25 @@ _DEFAULTS = {
         "cpu_debug": "false",
         "key_debug": "false",
         "lcd_debug": "false",
-        "newall_debug": "false",
     },
     "hdmi": {
         "enable":    "false",
         "cs_pin":    "28",
         "baudrate":  "10000000",
         "frame_skip": "1",
+    },
+    # Unifies what used to be [boot_status]/[clock_overlay]/[mem_overlay] --
+    # three separately-toggleable on-screen info displays (BootStatusOverlay/
+    # ClockOverlay/MemOverlay classes remain separate implementations, since
+    # boot-time and runtime genuinely need different clock sources -- the CPU
+    # isn't stepping yet during boot, so TIME$/DATE$ can't be read from PB-1000
+    # RAM the way ClockOverlay does at runtime; BootStatusOverlay's clock reads
+    # the Pico's own RTC instead. See boot_status.py/clock_overlay.py docstrings).
+    "overlay": {
+        "show_profile_name": "true",   # boot-time only
+        "show_clock": "false",         # boot-time (Pico RTC) + runtime (PB-1000 TIME$/DATE$)
+        "show_mem_free": "false",      # runtime only
+        "show_log": "false",           # boot-time only -- mirrors the last REPL log line to the LCD
     },
 }
 

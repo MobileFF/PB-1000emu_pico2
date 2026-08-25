@@ -12,7 +12,7 @@ The emulator requires the original Casio PB-1000 ROM images to function. These a
 
 - `rom0.bin`: Internal ROM (6 KB, addresses 0x0000–0x17FF)
 - `rom1.bin`: System ROM (32 KB, addresses 0x8000–0xFFFF, Bank 0)
-- `charset.bin` (placed under `/roms/`, optional): used by the Serial Console feature (§6) for character recognition. If missing, no error occurs — character detection simply does not run
+- `charset.bin` (placed under `/roms/`, optional): glyph data used to render character codes as actual pixels in DRAW_CHAR mode. If missing, no error occurs, but characters drawn via DRAW_CHAR render as blank
 
 ### Directory Structure (SD Card / Flash)
 
@@ -179,21 +179,22 @@ as a hierarchy of four categories — Toggles / Storage / Display / System — s
 
 ## 6. Serial Features
 
-### Serial Console
-
-Detects characters on the PB-1000 LCD and outputs them in real time over the console UART (GP4/GP5).
-
-- The character set (`charset.bin`) is matched against the LCD VRAM to identify character codes.
-- A newline (CRLF) is output at the end of each screen row.
-- Toggle with **Serial Console** in the emulator menu.
+> [!NOTE]
+> This section used to also cover **Serial Console** (detecting characters on the PB-1000 LCD
+> and outputting them in real time over the console UART, GP4/GP5; toggled via `[keyboard]
+> enable_uart_kbd`), removed on 2026-08-22. The UART keyboard input feature (typing PB-1000
+> keys from a serial terminal), which shared the same GP4/GP5 UART1, was removed at the same
+> time. RS-232C (PIO UART, GP6/GP13) below is unrelated to that removal and remains available.
 
 ### RS-232C (PIO UART)
 
 Emulates the PB-1000's RS-232C interface using a PIO software UART (default GP6 TX / GP13 RX).
 
 - Connected to MMIO addresses 0x0C00–0x0C03 (SIO registers).
-- Baud rate is configured via `[pio_uart] baudrate` in `pb1000.ini` (default 9600 bps).
-- Toggle with **RS-232C (PIO)** in the emulator menu.
+- TX/RX pins are changeable via `[rs232c] tx_pin`/`rx_pin` in `pb1000.ini` (default GP6/GP13).
+- Baud rate is configured via `[rs232c] baudrate` in `pb1000.ini` (default 9600 bps).
+- Toggle it in the F1 boot-time setup menu (`[rs232c] enable`); it takes effect after saving
+  and the resulting MCU reboot.
 - Receiving an EOF byte (0x1A) automatically issues a BREAK.
 
 ---
@@ -212,8 +213,9 @@ Supports a direct-wired joystick (active-LOW with PULL_UP inputs).
 | FIRE2 | GP27 | SHIFT |
 
 - Key mapping can be changed in the `[joystick]` section of `pb1000.ini`.
-- Toggle with **Joystick** in the emulator menu.
-- Pin assignments can be changed by editing `JoystickInputManager.DEFAULT_PIN_MAP` in `mp/main_input.py`.
+- Toggle it in the F1 boot-time setup menu (`[joystick] enable`); it takes effect after saving
+  and the resulting MCU reboot.
+- Pin assignments can be changed by editing `JoystickInputManager.DEFAULT_PIN_MAP` in `mp/main_input_joystick.py`.
 
 ---
 
@@ -230,30 +232,30 @@ Press **F11** to save the current session state to the active profile directory.
 - `color_vram.bin`: Color VRAM (VDP, 192x64 = 12,288 B; only saved when the program actually
   uses VDP)
 
-### RAM Save / Load (Emulator Menu)
+### RAM Save (Emulator Menu)
 
-**RAM Save** / **RAM Load** save and restore snapshot sets independently of the profile.
+**RAM Save** saves a snapshot set independently of the profile.
 
 - Target directory: `/sd/rams/<folder name>/`
-- **RAM Load does not reset the CPU — execution resumes from the exact PC/registers captured
-  by RAM Save.** Since PC is not forced back to 0x0000, a game or program continues right
-  where it left off.
+
+To load a saved snapshot back, use **System > Reboot Emulator (MCU)** and pick it again at the
+boot-time profile picker (see Auto-Load below) — the EMULATOR MENU's old **RAM Load** item was
+removed on 2026-08-22 in favor of this single, unified path.
 
 ### Auto-Load
 
 On startup, the emulator loads the state files from the selected profile directory
-automatically. If no files are present, a cold boot is performed. Just like the EMULATOR MENU's
-RAM Load, **this does not reset the CPU — execution resumes from the exact PC/registers that
-were saved.**
+automatically. If no files are present, a cold boot is performed. **This does not reset the
+CPU — execution resumes from the exact PC/registers that were saved.**
 
 > [!NOTE]
 > In earlier versions, Auto-Load alone stayed conservative — restoring RAM contents only and
 > always resetting to PC=0x0000 — specifically to avoid an unattended boot (the profile picker
 > timing out with nobody at the keyboard) getting stuck resuming a bad/inconsistent save with no
-> way to reach the menu. It's now unified with the EMULATOR MENU's RAM Load behavior (full
-> resume). As a safety net for the unattended case, a separate mechanism still exists: within
-> the first 1.5 seconds of the main loop, if the CPU comes up stuck sleeping with KEY_INT
-> disabled, it force-resets (the "Startup sleep detected" guard in `mp/main.py`).
+> way to reach the menu. It's now unified into a single full-resume behavior. As a safety net for
+> the unattended case, a separate mechanism still exists: within the first 1.5 seconds of the
+> main loop, if the CPU comes up stuck sleeping with KEY_INT disabled, it force-resets (the
+> "Startup sleep detected" guard in `mp/main.py`).
 
 ---
 
@@ -324,9 +326,8 @@ mirror the main unit's screen to an HDMI monitor in real time. Has no effect if 
 the addon. See [hardware_guide_en.md](hardware_guide_en.md) §9 for wiring and
 [config_guide_en.md](config_guide_en.md) §14 for the settings.
 
-**Enabling it**: set `[hdmi] enable = true` in `pb1000.ini`, or toggle it ON/OFF from the
-EMULATOR MENU's **Display > HDMI** item ([emulator_menu_guide_en.md](emulator_menu_guide_en.md)
-§5). The EMULATOR MENU toggle takes effect immediately and is also saved to `pb1000.ini`.
+**Enabling it**: set `[hdmi] enable = true` in `pb1000.ini`, or toggle it from the boot-time F1
+setup menu. Takes effect after saving and an MCU reboot (there is no runtime toggle).
 
 **LCD and HDMI are exclusive outputs.** While HDMI is enabled, nothing is drawn to the physical
 LCD (or its status bar) at all — the following are shown exclusively on HDMI instead:
@@ -342,3 +343,34 @@ drift out of position relative to each other.
 > [!NOTE]
 > For how to obtain/build the receiver firmware, see the independent project
 > [`hdmi_bridge_receiver`](https://github.com/MobileFF/hdmi_bridge_receiver).
+
+---
+
+## 12. Always-On Clock (Optional)
+
+While the emulator is running, the current time can be shown continuously in the top-right
+corner of the screen. Enable it with `[overlay] show_clock = true` in `pb1000.ini` (off by
+default). See [config_guide_en.md](config_guide_en.md) §15 for details.
+
+This shares its config key (`show_clock`) with §2's boot-time status overlay clock, but is a
+separate implementation: that one only shows before boot finishes, reading the Pico's built-in
+RTC. This one, shown while the emulator is running, reads **`TIME$`/`DATE$` directly from
+PB-1000's own system variable RAM**, so it always matches what `PRINT TIME$` would show from
+BASIC — including when NTP isn't used, or the program has changed `TIME$` directly. It redraws
+once per second, in the margin above the bezel (never overlapping the game screen or
+FuncKeyBar). Not shown when `[hdmi] enable = true`, per §11's exclusivity policy.
+
+---
+
+## 13. Always-On Memory Usage Display (Optional)
+
+While the emulator is running, the Pico 2's free heap can be shown continuously at the
+**top-center** of the screen. Enable it with `[overlay] show_mem_free = true` in `pb1000.ini`
+(off by default). See [config_guide_en.md](config_guide_en.md) §15 for details.
+
+Same mechanism as the always-on clock above (runtime-only, redraws once per second), but a
+separate feature with a different position and content. No `gc.collect()` is called before
+reading the value, so it shows the actual free-memory pressure/fragmentation happening in real
+time. On narrower screens, enabling this together with the always-on clock can put the top-right
+and top-center text close together or overlapping. Not shown when `[hdmi] enable = true`, per
+§11's exclusivity policy.

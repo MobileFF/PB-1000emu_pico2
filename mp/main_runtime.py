@@ -20,8 +20,23 @@ def service_pio_uart_bridge(system, cpu_core):
     if not pio or cpu_core is None:
         return
 
+    # pio.write/service_tx/service_rx/any are bound-method accesses --
+    # allocate a fresh bound-method object every time otherwise, and this
+    # function runs once per main-loop iteration. pio_uart is a single
+    # persistent object for the session (main.py assigns it once before the
+    # loop starts; reset_emulator() clears its buffers, doesn't replace the
+    # object), so caching by identity is safe -- the id() check re-caches
+    # automatically in the unlikely event it's ever swapped. Was part of the
+    # small residual "pio" bucket in mem_overlay.py logs after
+    # clock/memovl/frame/input were fixed -- see
+    # [[project_mem_churn_investigation]].
+    _pc = getattr(system, '_pio_cache', None)
+    if _pc is None or _pc[0] != id(pio):
+        _pc = (id(pio), pio.write, pio.service_tx, pio.service_rx, pio.any)
+        system._pio_cache = _pc
+    _, _pio_write, _svc_tx, _svc_rx, _pio_any = _pc
+
     if _tx_get:
-        _pio_write = pio.write
         for _ in range(32):
             tx_data = _tx_get()
             if tx_data is None:
@@ -32,8 +47,8 @@ def service_pio_uart_bridge(system, cpu_core):
                 system.uart_xon = True
             _pio_write(tx_data)
 
-    pio.service_tx()
-    pio.service_rx()
+    _svc_tx()
+    _svc_rx()
 
     # Bytes remain in the Python PIO buffer (_rx_buffer) for the MMIO
     # callback at 0x0C02 (IO read path) to serve. Keep INT1 level-triggered:
@@ -41,15 +56,27 @@ def service_pio_uart_bridge(system, cpu_core):
     # Deasserting on every empty tick prevents stale INT1 between transfers
     # (e.g. after flush_rx() on BREAK without going through the MMIO read path).
     if _signal_rx:
-        if system.uart_xon and pio.any():
+        if system.uart_xon and _pio_any():
             _signal_rx()
-        elif _clear_rx and not pio.any():
+        elif _clear_rx and not _pio_any():
             _clear_rx()
 
 
 def step_with_input_service(system, steps, *, chunk=64, extra_svc=None):
-    _svc = getattr(system, 'service_pio_uart', None)
-    _step = system.step
+    # Cache both bound methods on system, same pattern as
+    # service_pio_uart_bridge()'s _ubr_cache -- this function runs once per
+    # main-loop iteration (via run_cpu_slice()), and a plain `system.step`/
+    # `getattr(system, 'service_pio_uart', ...)` attribute access allocates
+    # a fresh bound-method object every single call otherwise. Was part of
+    # the small residual "cpu" bucket in mem_overlay.py logs after
+    # clock/memovl/frame/input were fixed -- see
+    # [[project_mem_churn_investigation]].
+    if not hasattr(system, '_sws_cache'):
+        system._sws_cache = (
+            getattr(system, 'service_pio_uart', None),
+            system.step,
+        )
+    _svc, _step = system._sws_cache
     ran = 0
 
     while ran < steps:

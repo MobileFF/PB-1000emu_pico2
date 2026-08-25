@@ -128,6 +128,11 @@ A per-profile `ext/` is meant for program-specific patches — e.g. enabling
 `forex_pb_inkey_patch.py` only when the `FOREX_PB` profile is loaded. Unlike placing the same
 file under `/sd/ext/` or `/ext/`, it has zero effect when any other profile is running.
 
+A per-profile `ext/` is only re-evaluated once, at boot (profile selection time) — there is no
+live switch to a different profile's `ext/` set during a running session. To pick up a different
+profile's saved state, use System > Reboot Emulator (MCU) and choose it again at the boot-time
+profile picker.
+
 Both `.py` and precompiled `.mpy` (via `mpy-cross`) files are recognized for auto-loading. If
 both exist for the same module name, `.py` always wins, per MicroPython's own import
 resolution order. Larger extension modules benefit from shipping as `.mpy` to skip the
@@ -147,6 +152,9 @@ def register(system):
         # Perform any required hardware initialisation here
         # owner is the label shown on the emulator menu's "Hook Status" screen.
         # Recommended explicitly since lambdas can't be identified by name.
+        # Matching it to the module name (the filename minus its extension,
+        # "myext" here) makes it easy to tell which module a hook belongs
+        # to when reading Hook Status.
         system.register_call_hook(CALL_ADDR, lambda: _handler(system), owner="myext")
         print(f"myext: registered at {CALL_ADDR:#06x}")
     except Exception as e:
@@ -228,6 +236,9 @@ hd61700.set_call_hook_enabled(CALL_ADDR, True)   # enable
 | `system.register_call_hook(addr, fn, owner=None)` | `hd61700.set_call_hook(addr, fn)` | Register a hook (enabled by default). `owner` is the label shown in the Hook Status screen |
 | `system.unregister_call_hook(addr)` | `hd61700.clear_call_hook(addr)` | Remove a hook |
 | `system.list_call_hooks()` | — | Returns registered hooks as `(addr, owner, enabled)` tuples |
+| `system.register_mem_write_hook(addr_start, fn, addr_end=None, owner=None)` | `hd61700.set_mem_write_hook(...)` | Register a memory-write hook. Omit `addr_end` to watch a single address |
+| `system.unregister_mem_write_hook(addr_start)` | `hd61700.clear_mem_write_hook(addr_start)` | Remove a memory-write hook |
+| `system.list_mem_write_hooks()` | — | Returns registered memory-write hooks as `(addr_start, addr_end, owner, enabled)` tuples |
 
 Registration status can also be viewed from the Win+F7 emulator menu's **Hook Status** entry (see `dev_guide_en.md` §6.2).
 

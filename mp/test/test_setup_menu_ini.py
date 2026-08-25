@@ -131,6 +131,17 @@ def test_schema_has_no_duplicate_keys():
         t.in_(kind, ("bool", "enum", "int", "str"))
 
 
+def test_secret_key_masked_in_list_view():
+    t.eq(setup_menu._fmt_val("wifi", "password", "hunter2"), "*******")
+    t.eq(setup_menu._fmt_val("wifi", "password", None), "(unset)")
+    t.eq(setup_menu._fmt_val("wifi", "password", ""), "")
+    # a long password is still masked, just capped in on-screen width
+    t.eq(setup_menu._fmt_val("wifi", "password", "x" * 40), "*" * 12)
+    # unrelated str keys are shown in the clear
+    t.eq(setup_menu._fmt_val("wifi", "ssid", "myssid"), "myssid")
+    t.eq(setup_menu._fmt_val("disk", "path", "/sd/disks/disk1.img"), "/sd/disks/disk1.img")
+
+
 def test_list_targets_flash_always_present():
     targets = setup_menu._list_targets(sd_mounted=False, profiles=[])
     kinds = [k for _l, _p, k in targets]
@@ -153,6 +164,7 @@ _TESTS = [
     test_multi_section_change_in_one_call,
     test_missing_file_creates_it,
     test_schema_has_no_duplicate_keys,
+    test_secret_key_masked_in_list_view,
     test_list_targets_flash_always_present,
 ]
 

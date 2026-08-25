@@ -36,7 +36,7 @@ Every other `[display]` key (`scale` / `lcd_height` / `x_offset` / `y_offset` /
 / `funckey_x_offset` / `funckey_y_offset`) follow the normal priority chain and
 can be overridden from the SD card or a per-profile ini.
 
-Implementation: `_read_early_ini_sections()` / `init_display()` in `mp/pb1000.py`.
+Implementation: `_read_early_ini_sections()` / `init_display()` in `mp/display_init.py`.
 
 ### Exception 2: an entire section is flash-only (`[hdmi]`)
 
@@ -45,8 +45,7 @@ The **entire** `[hdmi]` section is honored only from the internal flash's
 per-profile ini has no effect — `load_config()` skips it at merge time (it
 does **not** follow the priority chain at the top of §1). This is a
 hardware-wiring setting, not something that should vary by SD card or
-profile. The EMULATOR MENU's HDMI toggle also always writes back to
-`/pb1000.ini` (`_save_hdmi_enable()` in `mp/emulator_menu.py`).
+profile.
 
 This uses a different mechanism from "Exception 1" above (`[display]`/
 `[touch]`'s early keys). That one naturally avoids SD/profile-ini influence
@@ -73,12 +72,14 @@ Implementation: `load_config()` / `_FLASH_ONLY_SECTIONS` in `mp/config.py`.
 | `rotation` | `0` | `0` = normal, `180` = upside down (to match how the board is physically mounted). Touch coordinates are flipped automatically to match. Falls back to `0` for any value other than 0/180. *Internal-flash-only key.* |
 | `fg_color` | `0` | Foreground (lit-pixel) color, RGB332 format, 0–255. Changing it via **Foreground Color** in the emulator menu writes it back automatically to `/sd/pb1000.ini` (or `/pb1000.ini` if no SD card). |
 | `bg_color` | `180` | Background (unlit-pixel) color, RGB332 format, 0–255. Write-back behaves the same as `fg_color`. |
+| `vdp_enable` | `true` | Enable color VRAM (VDP, per-pixel color rendering). `false` forces plain two-color monochrome rendering regardless of what `load_state()` tried to restore. Before 2026-08-22 this was a runtime-only toggle (EMULATOR MENU's "Color VRAM (VDP)"); it's now unified into this key. |
 
 RGB332 (8-bit) layout: bits 7-5 = R (3 bit), bits 4-2 = G (3 bit), bits 1-0 = B (2 bit).
 Representative values: `0` = black, `255` = white, `180` (0xB4) = slightly bluish gray, `7` = blue.
 
-Implementation: `init_display()` in `mp/pb1000.py` (driver/spi_baudrate/rotation),
-`create_system()` in `mp/main_boot.py` (scale/lcd_height/x_offset/y_offset/fg_color/bg_color).
+Implementation: `init_display()` in `mp/display_init.py` (driver/spi_baudrate/rotation),
+`create_system()` in `mp/main_boot.py` (scale/lcd_height/x_offset/y_offset/fg_color/bg_color),
+`mp/main.py` (applies `vdp_enable` right after `load_state()`).
 
 ---
 
@@ -87,17 +88,17 @@ Implementation: `init_display()` in `mp/pb1000.py` (driver/spi_baudrate/rotation
 | Key | Default | Description |
 | --- | --- | --- |
 | `enable_usb_kbd` | `true` | Enable the USB keyboard. |
-| `enable_uart_kbd` | `false` | Enable the UART keyboard (GP4/GP5, etc.). |
-| `uart_baudrate` | `9600` | UART keyboard baud rate. |
-| `uart_tx_pin` | `4` | UART keyboard TX pin (GPIO number). |
-| `uart_rx_pin` | `5` | UART keyboard RX pin (GPIO number). |
-| `uart_enter_always_exe` | `true` | Always treat the UART keyboard's Enter key as EXE. |
-| `key_pulse_interval_ms` | `25` | KEY_INT pulse interval (ms). The real hardware's Key/Pulse ISR runs every 3.9ms (256Hz). Lower values shorten how long the ROM's keyboard debounce takes to register a key. Other time-based tuning (cursor-key repeat, `dev_guide_en.md` §13) assumes this interval too, so re-check normal typing and cursor repeat behavior after changing it. Also settable live via REPL: `hd61700.set_key_pulse_interval_ms(ms)`. |
+| `key_pulse_interval_ms` | `25` | KEY_INT pulse interval (ms). The real hardware's Key/Pulse ISR runs every 3.9ms (256Hz). Lower values shorten how long the ROM's keyboard debounce takes to register a key. Other time-based tuning (cursor-key repeat, `dev_guide_en.md` §9) assumes this interval too, so re-check normal typing and cursor repeat behavior after changing it. Also settable live via REPL: `hd61700.set_key_pulse_interval_ms(ms)`. |
 | `key_hold_ms` | `120` | Key-press hold duration (ms). |
 | `key_release_hard_timeout_ms` | `1200` | Hard timeout for forcing a key release (ms). |
 | `inter_key_gap_ms` | `80` | Gap between successive key presses (ms). |
 
 Implementation: boot sequence in `mp/main.py`; defaults in `mp/config.py` `_DEFAULTS["keyboard"]`.
+
+> [!NOTE]
+> `enable_uart_kbd` / `uart_baudrate` / `uart_tx_pin` / `uart_rx_pin` / `uart_enter_always_exe`
+> (UART keyboard input over GP4/GP5, UART1 -- and the Serial Console feature that shared the
+> same UART object) were removed on 2026-08-22. RS-232C (`[pio_uart]`, GP6/GP13) is unaffected.
 
 ---
 
@@ -112,7 +113,7 @@ Implementation: boot sequence in `mp/main.py`; defaults in `mp/config.py` `_DEFA
 | `step_timer_tick_steps` | `40000` | CPU steps per timer-tick unit. |
 | `timer_tick_ms` | `1000` | Real-time timer tick interval (ms). Set to `0` or below to disable this tick processing. |
 | `loop_idle_ms` | `0` | Main-loop idle wait (ms). |
-| `step_chunk` | `2048` | Inner chunk size (in steps) used within a CPU execution slice; also paces how often the UART keyboard RX buffer is drained and the PIO UART bridge is serviced. |
+| `step_chunk` | `2048` | Inner chunk size (in steps) used within a CPU execution slice; also paces how often the PIO UART bridge is serviced. |
 
 Implementation: main-loop constant loading/usage in `mp/main.py`; `run_cpu_slice()` in `mp/main_runtime.py`.
 
@@ -153,9 +154,10 @@ Implementation: `mp/main.py`; `select_profile_ui()` in `mp/boot_session.py`.
 | `key_up` / `key_down` / `key_left` / `key_right` / `key_fire1` / `key_fire2` | (empty = built-in default) | PB-1000 key sent by each button. Accepts a named constant (`exe`, `ans`, `shift`, `up`, `down`, `left`, `right`, `bs`, `ins`, `brk`, `newall`, `menu`, `cal`, `cls`, `kana`, `a`-`z`, `0`-`9`) or a raw `row,col` coordinate (e.g. `10,4`). Built-in defaults: UP=cursor up, DOWN=cursor down, LEFT=cursor left, RIGHT=cursor right, FIRE1=EXE, FIRE2=SHIFT. |
 
 Pin assignments (GP18/19/20/21/26/27) cannot be changed via ini. Edit
-`JoystickInputManager.DEFAULT_PIN_MAP` in `mp/main_input.py` instead.
+`JoystickInputManager.DEFAULT_PIN_MAP` in `mp/main_input_joystick.py` instead.
 
-Implementation: `_parse_joystick_key()` in `mp/main.py`; `JoystickInputManager` in `mp/main_input.py`.
+Implementation: `_parse_joystick_key()` call site in `mp/main.py`; `_parse_joystick_key()` and
+`JoystickInputManager` in `mp/main_input_joystick.py`.
 
 ---
 
@@ -210,19 +212,25 @@ st7796.y_offset = -4
   hardware's physical touch pad only ever covers 32 dots, so the hit-test
   area does not grow in 64-dot extended mode.
 
-Implementation: `init_display()`, `_read_early_ini_sections()`, `_early_bool()`
-in `mp/pb1000.py`; `_setup_touch_offsets()` in `mp/main_boot.py`;
-`TouchInputManager.poll_coords()` in `mp/main_input.py`.
+Implementation: `init_display()`, `_read_early_ini_sections()`, `_early_bool()` (all in
+`mp/display_init.py`); `_setup_touch_offsets()` in `mp/main_boot.py`;
+`TouchInputManager.poll_coords()` in `mp/main_input_touch.py`.
 
 ---
 
-## 10. `[pio_uart]`
+## 10. `[rs232c]`
+
+Implemented internally as a PIO-based software UART (`pio_uart.py`), but the setting name
+matches the real PB-1000's feature name, "RS-232C".
 
 | Key | Default | Description |
 | --- | --- | --- |
-| `baudrate` | `9600` | Baud rate for the PIO UART (RS-232C, GP6=TX / GP13=RX). |
+| `enable` | `true` | Enable RS-232C. `false` means `system.pio_uart` is never constructed and stays `None` for the whole session (RS-232C disabled entirely). Before 2026-08-22 this was a runtime-only toggle (EMULATOR MENU's "RS-232C (PIO)"); it's now unified into this key. |
+| `baudrate` | `9600` | Baud rate. The real PB-1000's RS-232C interface only supports 300-9600bps. |
+| `tx_pin` | `6` | GPIO number used for TX (default GP6). |
+| `rx_pin` | `13` | GPIO number used for RX (default GP13). Pick pins that don't conflict with other features (LCD/SD/touch/BEEP/HDMI/joystick, etc). |
 
-Implementation: `mp/main.py`; `mp/pio_uart.py`.
+Implementation: `mp/main.py`; `initialize_usb_host_and_pio()` in `mp/main_boot.py`; `mp/pio_uart.py`.
 
 ---
 
@@ -257,10 +265,9 @@ Implementation: `mp/main.py`; `mp/ntp_sync.py`.
 | `cpu_debug` | `false` | CPU instruction trace (only emitted at specific PC breakpoints). |
 | `key_debug` | `false` | Key-input trace (KEYSCAN GRE, etc.). Very verbose — follows the ROM's key-scan loop continuously. |
 | `lcd_debug` | `false` | LCD write trace. |
-| `newall_debug` | `false` | Trace only the NEW ALL key (Win+F12) press/release. |
 
 Setting any of these to `true` emits `[HD61700] ...`-prefixed trace lines on
-the serial console. See `dev_guide_en.md` §11 "Debugging and Tracing" for details.
+the serial console. See `dev_guide_en.md` §12 "Debugging and Tracing" for details.
 
 Implementation: `mp/main.py`.
 
@@ -275,12 +282,14 @@ firmware details.
 
 > [!IMPORTANT]
 > **This entire section is flash-only** (see §1 "Exception 2"). An `[hdmi]` section in
-> `/sd/pb1000.ini` or a per-profile ini is ignored. Saving from the EMULATOR MENU also always
-> writes back to `/pb1000.ini`.
+> `/sd/pb1000.ini` or a per-profile ini is ignored.
+
+There is no runtime toggle -- edit this key (or use the boot-time F1 setup menu), save, and
+reboot the MCU for it to take effect.
 
 | Key | Default | Description |
 | --- | --- | --- |
-| `enable` | `false` | Enable HDMI mirror output. Can also be toggled and saved from the EMULATOR MENU (Display > HDMI). |
+| `enable` | `false` | Enable HDMI mirror output. |
 | `cs_pin` | `28` | The extra SPI1 CS pin (GPIO number) used to talk to the receiver. GP28 is recommended (the only free GPIO — see §7). |
 | `baudrate` | `10000000` | SPI communication speed with the receiver (Hz). Can be raised if the wiring is solid. |
 | `frame_skip` | `1` | How many frames pass between sends to the HDMI side. `1` = every frame. PB-1000's transfer volume is small enough that `1` should normally be fine. |
@@ -289,9 +298,59 @@ firmware details.
 is drawn to the physical LCD — the game screen, the EMULATOR MENU, and the boot-time profile
 picker are all shown on HDMI instead. See [usage_guide_en.md](usage_guide_en.md) §11 for details.
 
-Implementation: `mp/main.py` (boot-time init); `mp/emulator_menu.py` (`_do_hdmi_toggle` — live
-ON/OFF toggle and saving to `pb1000.ini`); `mp/pb1000.py` (`update_display()` — LCD/HDMI
-exclusivity); `src/lcd_controller.c` (`lcd_init_hdmi_output()`/`lcd_render_to_hdmi()`).
+Implementation: `mp/main.py` (boot-time init only -- no runtime toggle); `mp/pb1000.py`
+(`update_display()` — LCD/HDMI exclusivity); `src/lcd_controller.c`
+(`lcd_init_hdmi_output()`/`lcd_render_to_hdmi()`).
+
+---
+
+## 15. `[overlay]`
+
+Groups all the on-screen info displays into one section (unified from the former
+`[boot_status]`/`[clock_overlay]`/`[mem_overlay]` on 2026-08-24). Covers both the "boot" window
+(right after profile selection until the emulator finishes starting up) and the "runtime" window
+(after boot completes, during the main loop). If HDMI mirroring has taken over the screen
+(`[hdmi] enable=true`), none of these overlays are shown at all, per the physical LCD/HDMI
+exclusivity policy (see §14).
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `show_profile_name` | `true` | Boot only. Show the profile name in the top-left |
+| `show_clock` | `false` | Show a clock throughout both boot and runtime. **What the clock actually reads differs by phase** (see below) |
+| `show_mem_free` | `false` | Runtime only. Show the Pico 2's free heap (`gc.mem_free()`) at the top-center |
+| `show_log` | `false` | Boot only. Mirror the most recent REPL log line at the bottom of the screen |
+
+`show_clock` is a single key that toggles the clock for both phases, but the underlying
+implementation differs: the CPU isn't stepping yet during boot, so there's no PB-1000 time
+information to read yet. **During boot it reads the Pico's own built-in RTC** (if `[ntp]
+enable=true`, the display switches to the correct time once NTP sync finishes partway through
+this window); **during runtime it reads TIME$/DATE$ directly from PB-1000's own system variable
+RAM** (`DATE$` at `0x6BAD`, `TIME$` at `0x6BB0`, seconds in the timer register's low 6 bits), so
+it always matches what `PRINT TIME$` / `PRINT DATE$` would show from BASIC — including when NTP
+is disabled or the user has POKEd those addresses directly.
+
+Defaults to off because, unlike the one-time boot splash, `show_clock`/`show_mem_free` occupy
+part of the screen for the entire runtime session, and depending on layout
+(`scale`/`x_offset`/`y_offset`) may not fit cleanly in the margin above the bezel. Enabling both
+together on narrower displays (e.g. 320px wide) can visually overlap the top-right clock text
+with the top-center memory text — combining them is left to the user's judgment. Both
+temporarily disappear while the EMULATOR MENU occupies the whole screen, and repaint themselves
+automatically on the next once-per-second redraw after the menu closes.
+
+The bottom boot-time log line (no config key — always on) mirrors REPL output line-by-line via
+`os.dupterm()`, so anything printed during that window shows up there, not just `main.py`'s own
+prints but also output from `main_boot.py`, `ntp_sync.py`, etc. No `gc.collect()` is called
+before reading `gc.mem_free()` — doing that would defeat the point of that readout, which is to
+show the fragmentation/pressure actually happening during normal operation, not an artificially
+cleaned-up number.
+
+Implementation: `mp/boot_status.py` (`BootStatusOverlay`, boot-time), `mp/clock_overlay.py`
+(`ClockOverlay`, runtime), `mp/mem_overlay.py` (`MemOverlay`, runtime), `mp/main.py` (where
+`boot_status.start()`/`stop()` are called in the boot sequence, and where
+`clock_overlay.poll()`/`mem_overlay.poll()` are called from the main loop), `mp/ntp_sync.py`
+(writes to the TIME$/DATE$ addresses). `BootStatusOverlay` and `ClockOverlay` only share the
+`show_clock` config key -- they remain separate implementations, for the phase-dependent reason
+above.
 
 ---
 
@@ -300,4 +359,4 @@ exclusivity); `src/lcd_controller.c` (`lcd_init_hdmi_output()`/`lcd_render_to_hd
 - Feature-by-feature usage: `usage_guide_en.md`
 - Touch panel / FuncKeyBar behavior: `usage_guide_en.md` §4
 - Changing settings from the emulator menu: `emulator_menu_guide_en.md`
-- Debugging and tracing: `dev_guide_en.md` §11
+- Debugging and tracing: `dev_guide_en.md` §12

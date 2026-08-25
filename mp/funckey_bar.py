@@ -59,19 +59,35 @@ class FuncKeyBar:
     def _blit_raw(self, path):
         d = self._display
         x0 = self._x_offset
+        # CS is deasserted during each file read and only reasserted for the
+        # write of that chunk. RAMWR's pixel-write pointer isn't reset by
+        # toggling CS (only sending a new command byte would do that), so
+        # this still produces one continuous image -- but it means the LCD
+        # can never mistake another device's SPI traffic (e.g. an SD-card
+        # read on the same shared bus, see display_init.py) for RAMWR pixel
+        # data, since its CS is high while any such read happens.
+        #
+        # An earlier version of this function read the whole ~27KB image
+        # into one bytes object up front to get the same isolation; that
+        # traded the bus-sharing risk for a single large contiguous
+        # allocation on every draw() call, which intermittently failed
+        # under heap fragmentation (e.g. right after emulator_menu's
+        # Reset) and skipped the redraw entirely, since draw() only catches
+        # OSError, not MemoryError. A small reused chunk buffer avoids that.
         d.set_window(x0, self._y_top, x0 + _IMG_W - 1, self._y_top + _IMG_H - 1)
         d.dc.value(1)
-        d.cs.value(0)
         buf = bytearray(512)
-        try:
-            with open(path, 'rb') as f:
-                while True:
-                    n = f.readinto(buf)
-                    if not n:
-                        break
+        with open(path, 'rb') as f:
+            while True:
+                n = f.readinto(buf)
+                if not n:
+                    break
+                d._deselect_others()
+                d.cs.value(0)
+                try:
                     d.spi.write(buf if n == len(buf) else buf[:n])
-        finally:
-            d.cs.value(1)
+                finally:
+                    d.cs.value(1)
 
     def _draw_fallback(self):
         d = self._display

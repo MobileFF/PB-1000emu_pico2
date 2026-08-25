@@ -34,7 +34,7 @@
 `y_offset` / `funckey_x_offset` / `funckey_y_offset`）は通常どおり SD カード・
 プロファイル別 ini でも上書きできます。
 
-実装: `mp/pb1000.py` の `_read_early_ini_sections()` / `init_display()`。
+実装: `mp/display_init.py` の `_read_early_ini_sections()` / `init_display()`。
 
 ### 例外2: セクション丸ごとフラッシュ限定(`[hdmi]`)
 
@@ -42,8 +42,7 @@
 `/sd/pb1000.ini` やプロファイル別 ini に `[hdmi]` を書いても、`load_config()`が
 マージの時点で無視します(§1冒頭の優先順位マージには**従いません**)。固定のハードウェア
 配線に関する設定であり、SDカードやプロファイルごとに変わる性質のものではないための
-制限です。EMULATOR MENU の HDMI トグルも常に `/pb1000.ini` へ書き戻します
-(`mp/emulator_menu.py` の `_save_hdmi_enable()`)。
+制限です。
 
 上記の「例外1」(`[display]`/`[touch]` の一部キー)とは実装が異なります。あちらは
 SDカードがマウントされる**前**に読む(`_read_early_ini_sections()`)ことで自然に
@@ -69,12 +68,14 @@ SD/プロファイルiniの影響を受けない仕組みですが、`[hdmi]` �
 | `rotation` | `0` | `0`＝通常、`180`＝上下反転（基板の実装向きに合わせる）。タッチパネル座標も自動的に反転される。0/180以外は0にフォールバック。※内蔵フラッシュ限定キー |
 | `fg_color` | `0` | 前景色（点灯ピクセル）。RGB332形式 0–255。エミュレータメニューの Foreground Color から変更すると `/sd/pb1000.ini`（無ければ `/pb1000.ini`）に自動で書き戻される |
 | `bg_color` | `180` | 背景色（消灯ピクセル）。RGB332形式 0–255。書き戻し挙動は `fg_color` と同じ |
+| `vdp_enable` | `true` | カラー VRAM（VDP、ピクセル単位のカラー表示）を有効にする。`false` にすると `load_state()` が復元しようとした状態に関わらず常にモノクロ2色表示に強制される。2026-08-22 以前は EMULATOR MENU の「Color VRAM (VDP)」トグルで実行時に切り替えていたが、このキーに統一された |
 
 RGB332形式（8ビット）: ビット7-5=R(3bit)、ビット4-2=G(3bit)、ビット1-0=B(2bit)。
 代表値: `0`=黒、`255`=白、`180`(0xB4)=やや青みがかった灰、`7`=青。
 
-実装: `mp/pb1000.py` の `init_display()`（driver/spi_baudrate/rotation）、
-`mp/main_boot.py` の `create_system()`（scale/lcd_height/x_offset/y_offset/fg_color/bg_color）。
+実装: `mp/display_init.py` の `init_display()`（driver/spi_baudrate/rotation）、
+`mp/main_boot.py` の `create_system()`（scale/lcd_height/x_offset/y_offset/fg_color/bg_color）、
+`mp/main.py`（`load_state()` 直後に `vdp_enable` を適用）。
 
 ---
 
@@ -83,17 +84,17 @@ RGB332形式（8ビット）: ビット7-5=R(3bit)、ビット4-2=G(3bit)、ビ�
 | キー | デフォルト | 説明 |
 | --- | --- | --- |
 | `enable_usb_kbd` | `true` | USBキーボードを有効にする |
-| `enable_uart_kbd` | `false` | UARTキーボード（GP4/GP5等）を有効にする |
-| `uart_baudrate` | `9600` | UARTキーボードのボーレート |
-| `uart_tx_pin` | `4` | UARTキーボードのTXピン（GPIO番号） |
-| `uart_rx_pin` | `5` | UARTキーボードのRXピン（GPIO番号） |
-| `uart_enter_always_exe` | `true` | UARTキーボードのEnterキーを常にEXEキーとして扱う |
 | `key_pulse_interval_ms` | `25` | KEY_INTパルス間隔（ms）。実機のKey/Pulse ISRは3.9ms(256Hz)周期。値を小さくするほどキー確定までの体感時間が短くなる。カーソルキーリピート等、他の時間ベース調整（`dev_guide.md` §13）もこの間隔を前提に実測チューニングされているため、変更後は通常のタイピング・カーソルリピート動作も要確認。REPLからも変更可: `hd61700.set_key_pulse_interval_ms(ms)` |
 | `key_hold_ms` | `120` | キー押下継続時間（ms） |
 | `key_release_hard_timeout_ms` | `1200` | キーリリース強制タイムアウト（ms） |
 | `inter_key_gap_ms` | `80` | キー間のギャップ（ms） |
 
 実装: `mp/main.py`（起動処理）、`mp/config.py` の `_DEFAULTS["keyboard"]`。
+
+> [!NOTE]
+> `enable_uart_kbd` / `uart_baudrate` / `uart_tx_pin` / `uart_rx_pin` / `uart_enter_always_exe`
+> （GP4/GP5・UART1 経由のUARTキーボード入力、およびそれと表裏一体だったシリアルコンソール
+> 機能）は 2026-08-22 に廃止されました。RS-232C（`[pio_uart]`、GP6/GP13）には影響していません。
 
 ---
 
@@ -108,7 +109,7 @@ RGB332形式（8ビット）: ビット7-5=R(3bit)、ビット4-2=G(3bit)、ビ�
 | `step_timer_tick_steps` | `40000` | タイマーティック換算ステップ数 |
 | `timer_tick_ms` | `1000` | リアルタイムタイマーティックの間隔（ms）。`0`以下でこのティック処理自体を無効化 |
 | `loop_idle_ms` | `0` | メインループのアイドル待機（ms） |
-| `step_chunk` | `2048` | CPU実行スライスの内部チャンクサイズ（ステップ数）。UARTキーボード受信バッファのドレインやPIO UARTブリッジのサービス頻度にも使われる |
+| `step_chunk` | `2048` | CPU実行スライスの内部チャンクサイズ（ステップ数）。PIO UARTブリッジのサービス頻度にも使われる |
 
 実装: `mp/main.py`（メインループ定数の読み込み・使用箇所）、`mp/main_runtime.py`（`run_cpu_slice`）。
 
@@ -149,9 +150,10 @@ RGB332形式（8ビット）: ビット7-5=R(3bit)、ビット4-2=G(3bit)、ビ�
 | `key_up` / `key_down` / `key_left` / `key_right` / `key_fire1` / `key_fire2` | （空＝内蔵デフォルト） | 各ボタンが送出するPB-1000キー。名前指定（`exe`, `ans`, `shift`, `up`, `down`, `left`, `right`, `bs`, `ins`, `brk`, `newall`, `menu`, `cal`, `cls`, `kana`, `a`-`z`, `0`-`9`）または座標直接指定（`row,col` 例: `10,4`）。省略時のデフォルトはUP=カーソル上, DOWN=カーソル下, LEFT=カーソル左, RIGHT=カーソル右, FIRE1=EXE, FIRE2=SHIFT |
 
 ピンアサイン（GP18/19/20/21/26/27）はiniでは変更できません。変更する場合は
-`mp/main_input.py` の `JoystickInputManager.DEFAULT_PIN_MAP` を編集してください。
+`mp/main_input_joystick.py` の `JoystickInputManager.DEFAULT_PIN_MAP` を編集してください。
 
-実装: `mp/main.py`（`_parse_joystick_key`）、`mp/main_input.py`（`JoystickInputManager`）。
+実装: `mp/main.py`（`_parse_joystick_key` の呼び出し）、`mp/main_input_joystick.py`
+（`_parse_joystick_key`、`JoystickInputManager`）。
 
 ---
 
@@ -203,19 +205,25 @@ st7796.y_offset = -4
   **常に32ドット×`scale`固定**です。実機の物理タッチパッドが常に32ドット分の高さしか
   無いための仕様で、64ドット拡張モードにしても判定エリアは広がりません。
 
-実装: `mp/pb1000.py`（`init_display()`、`_read_early_ini_sections`、`_early_bool`）、
-`mp/main_boot.py`（`_setup_touch_offsets()`）、`mp/main_input.py`
+実装: `mp/display_init.py`（`init_display()`、`_read_early_ini_sections`、`_early_bool`）、
+`mp/main_boot.py`（`_setup_touch_offsets()`）、`mp/main_input_touch.py`
 （`TouchInputManager.poll_coords()`）。
 
 ---
 
-## 10. `[pio_uart]`
+## 10. `[rs232c]`
+
+内部実装はRP2350のPIOを使ったソフトUART（`pio_uart.py`）だが、設定名は実機PB-1000の
+機能名である「RS-232C」に統一している。
 
 | キー | デフォルト | 説明 |
 | --- | --- | --- |
-| `baudrate` | `9600` | PIO UART（RS-232C、GP6=TX / GP13=RX）のボーレート |
+| `enable` | `true` | RS-232Cを有効にする。`false` にすると `system.pio_uart` は生成されず終始 `None`（RS-232C機能全体がオフになる）。2026-08-22 以前は EMULATOR MENU の「RS-232C (PIO)」トグルで実行時に切り替えていたが、このキーに統一された |
+| `baudrate` | `9600` | ボーレート。実機PB-1000のRS-232Cが対応する範囲は300〜9600bps |
+| `tx_pin` | `6` | TX に使う GPIO 番号（デフォルトは GP6） |
+| `rx_pin` | `13` | RX に使う GPIO 番号（デフォルトは GP13）。他機能（LCD/SD/タッチ/BEEP/HDMI/ジョイスティック等）と重複しないピンを選ぶこと |
 
-実装: `mp/main.py`、`mp/pio_uart.py`。
+実装: `mp/main.py`、`mp/main_boot.py` の `initialize_usb_host_and_pio()`、`mp/pio_uart.py`。
 
 ---
 
@@ -250,7 +258,6 @@ st7796.y_offset = -4
 | `cpu_debug` | `false` | CPU命令トレース（特定PCブレークポイントでのみ出力） |
 | `key_debug` | `false` | キー入力トレース（KEYSCAN GRE等）。ROMのキースキャンループを常時追うため出力が非常に多い |
 | `lcd_debug` | `false` | LCD書き込みトレース |
-| `newall_debug` | `false` | NEW ALLキー（Win+F12）の押下/解放のみをトレース |
 
 いずれかを`true`にすると `[HD61700] ...` 形式のトレース行がシリアルコンソールに出力されます。
 詳細は `dev_guide.md` §11「デバッグとトレース」を参照してください。
@@ -267,12 +274,14 @@ st7796.y_offset = -4
 
 > [!IMPORTANT]
 > **このセクションは丸ごと内蔵フラッシュ限定です**（§1「例外2」参照）。`/sd/pb1000.ini` や
-> プロファイル別 ini に `[hdmi]` を書いても無視されます。EMULATOR MENU からの保存も常に
-> `/pb1000.ini` へ書き戻されます。
+> プロファイル別 ini に `[hdmi]` を書いても無視されます。
+
+実行中に切り替える手段はありません（起動時の F1 セットアップメニュー、または本キーの
+直接編集 → 保存 → MCU リブートで反映されます）。
 
 | キー | デフォルト | 説明 |
 | --- | --- | --- |
-| `enable` | `false` | HDMIミラー出力を有効にする。EMULATOR MENU（Display > HDMI）からも切り替え・保存可能 |
+| `enable` | `false` | HDMIミラー出力を有効にする |
 | `cs_pin` | `28` | 受信側との通信に使う追加SPI1 CSピン（GPIO番号）。GP28固定を推奨（唯一の空きGPIO、§7参照） |
 | `baudrate` | `10000000` | 受信側とのSPI通信速度（Hz）。配線がしっかりしていれば上げられる |
 | `frame_skip` | `1` | 何フレームに1回HDMI側へ送信するか。`1`＝毎フレーム。PB-1000の転送量は元々小さいため通常は`1`のままで問題ない |
@@ -281,9 +290,55 @@ st7796.y_offset = -4
 描画は行われず、ゲーム画面・EMULATOR MENU・起動時のプロファイル選択画面のすべてがHDMI側に
 表示されます。詳細は [usage_guide.md](usage_guide.md) §11。
 
-実装: `mp/main.py`（起動時の初期化）、`mp/emulator_menu.py`（`_do_hdmi_toggle`、ON/OFFの
-即時切り替えと `pb1000.ini` への保存）、`mp/pb1000.py`（`update_display()`、LCD/HDMI排他制御）、
-`src/lcd_controller.c`（`lcd_init_hdmi_output()`/`lcd_render_to_hdmi()`）。
+実装: `mp/main.py`（起動時の初期化のみ。実行中の切り替えはなし）、`mp/pb1000.py`
+（`update_display()`、LCD/HDMI排他制御）、`src/lcd_controller.c`
+（`lcd_init_hdmi_output()`/`lcd_render_to_hdmi()`）。
+
+---
+
+## 15. `[overlay]`
+
+画面上の情報表示をまとめて設定するセクションです（2026-08-24 に `[boot_status]`/
+`[clock_overlay]`/`[mem_overlay]` の3セクションを統合）。プロファイル選択直後から
+エミュレータ起動完了までの「起動中」区間と、起動完了後の「実行中（メインループ）」区間の
+両方にまたがる表示項目を含みます。HDMIミラーが画面を引き継いでいる場合（`[hdmi]
+enable=true`）は物理LCDとHDMIの排他方針により、これらのオーバーレイは一切表示されません
+（§14参照）。
+
+| キー | デフォルト | 説明 |
+| --- | --- | --- |
+| `show_profile_name` | `true` | 起動中のみ。左上にプロファイル名を表示するか |
+| `show_clock` | `false` | 起動中・実行中を通して常に時計を表示するか。**表示内容の出所はフェーズによって異なる**(下記参照) |
+| `show_mem_free` | `false` | 実行中のみ。画面中央上部に Pico 2 のヒープ空き容量（`gc.mem_free()`）を常時表示するか |
+| `show_log` | `false` | 起動中のみ。画面最下部に直近の REPL ログ1行をミラー表示するか |
+
+`show_clock` は1つのキーで起動中・実行中の両方をまとめて切り替えますが、実装(表示する時刻の
+出所)はフェーズごとに異なります。CPUがまだ実行されていない起動中は PB-1000 側の時刻情報を
+読み取れないため、**起動中は Pico 本体の内蔵RTC**（`[ntp] enable=true` の場合はこの起動区間の
+途中でNTP同期が完了すると表示も正しい時刻へ切り替わる）、**実行中は PB-1000本体のシステム
+変数RAM上のTIME$/DATE$の値そのもの**（`DATE$`=`&H6BAD`、`TIME$`=`&H6BB0`、秒はタイマー
+レジスタ下位6ビット）を直接読み取って表示します。実行中の表示はBASICから `PRINT TIME$`
+`PRINT DATE$` した場合と常に一致します（NTP無効時や、ユーザーがPOKEで書き換えた場合も含めて）。
+
+デフォルトが無効なのは、起動時だけの一時的な表示と異なり実行中ずっと画面の一部を占有し
+続けるため、レイアウト（`scale`・`x_offset`・`y_offset`）によってはベゼル上端の余白と
+重なる可能性があるためです。`show_clock`/`show_mem_free` を狭い画面（320px幅など）で同時に
+有効にした場合、右上の時計表示と中央上部のメモリ表示が視覚的に重なる可能性があります
+（組み合わせはユーザーの判断に委ねています）。EMULATOR MENU表示中など画面全体を使う操作の
+後は、次の1秒ごとの再描画タイミングで自動的に復帰します。
+
+最下部のログ行表示（起動中のみ・設定キーはなし・常時ON）は `os.dupterm()` 経由でREPL出力を
+1行単位でミラーする実装のため、この区間に出力されるログはmain.py自身のprintに限らず、
+`main_boot.py`・`ntp_sync.py`等が出力するものも含めて表示されます。`gc.mem_free()` の
+読み取り前に `gc.collect()` は行いません — 事前に回収してしまうと、このオーバーレイ本来の
+目的（実行中に実際に起きている断片化・メモリ逼迫をそのまま見せること）が損なわれるためです。
+
+実装: `mp/boot_status.py`（`BootStatusOverlay`、起動中）、`mp/clock_overlay.py`
+（`ClockOverlay`、実行中）、`mp/mem_overlay.py`（`MemOverlay`、実行中）、`mp/main.py`
+（起動シーケンスでの `boot_status.start()`/`stop()` 呼び出し位置、メインループでの
+`clock_overlay.poll()`/`mem_overlay.poll()` 呼び出し）、`mp/ntp_sync.py`（TIME$/DATE$への
+書き込み側）。BootStatusOverlay と ClockOverlay は設定キー(`show_clock`)を共有するのみで、
+実装は別クラスのまま独立しています（上記の通り時刻の出所が起動中/実行中で異なるため）。
 
 ---
 

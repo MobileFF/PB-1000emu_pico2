@@ -71,8 +71,11 @@ selected via `[display] driver` (`ILI9341` or `ST7796`) in `pb1000.ini`.
 | Device | Pico Pin | Function | Note |
 | :--- | :--- | :--- | :--- |
 | **REPL (UART0)** | **GP0 (TX), GP1 (RX)** | **MicroPython REPL / file transfer (`mpremote`)** | **Required.** The Pico's USB port is host-only (keyboard), so a USB-to-serial (3.3V TTL) adapter wired here is the *only* way to reach the REPL. Connect from the PC with e.g. `mpremote connect /dev/ttyUSB0` (`COMx` on Windows) |
-| Console (UART1) | GP4 (TX), GP5 (RX) | Debug / secondary REPL | Optional, a separate debug stream from REPL (UART0) above. Changeable via `uart_tx_pin` / `uart_rx_pin` in `pb1000.ini` |
-| PIO UART | GP6 (TX), GP13 (RX) | Virtual RS-232C | Optional. Default 9600 bps (changeable via `[pio_uart] baudrate` in `pb1000.ini`) |
+| PIO UART | GP6 (TX), GP13 (RX) (default) | Virtual RS-232C | Optional. Both pins and baud rate (default 9600 bps) are changeable via `[rs232c] tx_pin`/`rx_pin`/`baudrate` in `pb1000.ini` -- any free pins not used by another feature work |
+
+> [!NOTE]
+> GP4 (TX) / GP5 (RX) (UART1, the former "console"/UART keyboard input) was removed from the
+> firmware on 2026-08-22. Wiring anything there currently does nothing.
 
 > **Wiring**: connect the USB-to-serial adapter's TXD to the Pico's **GP1 (RX)**, its RXD to **GP0 (TX)**, and tie the grounds together (note the TX↔RX crossover).
 
@@ -98,25 +101,27 @@ Connected directly (PULL_UP inputs, active LOW).
 | FIRE2 | GP27 | `key_fire2` | SHIFT |
 
 The PB-1000 key assigned to each button can be changed in the `[joystick]` section of `pb1000.ini`; an empty value falls back to the default map.
-The pin assignments themselves are defined in `JoystickInputManager.DEFAULT_PIN_MAP` in `main_input.py` and can be changed by editing the code.
+The pin assignments themselves are defined in `JoystickInputManager.DEFAULT_PIN_MAP` in `main_input_joystick.py` and can be changed by editing the code.
 For details of a 3-bit connection circuit using a 74HC148 priority encoder, see `references/memo/joystick_3bit_encoding_circuit.md`.
 
 **GPIO availability with the joystick enabled**
 
-With the joystick using all of GP18–21 and GP26–27, **GP28** is the only GPIO left free for external devices (usable as ADC2). Other pins can be freed by disabling the corresponding feature below.
+With the joystick using all of GP18–21 and GP26–27, **GP4, GP5, and GP28** are free for external
+devices (GP28 also usable as ADC2). Other pins can be freed by disabling the corresponding
+feature below.
 
 | GPIO | Used For | Freed When |
 | :--- | :--- | :--- |
 | GP0, GP1 | **REPL (UART0)** | **Never — always required.** The USB port is host-only, so this is the sole REPL path |
 | GP2, GP3 | I2C1 (reserved, PR6 not yet implemented) | Currently unused — no I2C-based module ships in `mp/ext/`. Reserved for adding an I2C extension (e.g. `sample/mp/ext/dht20.py`) to `mp/ext/` in the future |
-| GP4, GP5 | UART1 (console keyboard) | `pb1000.ini`: `enable_uart_kbd=false` |
-| GP6, GP13 | PIO UART (RS-232C) | RS-232C not used |
+| GP4, GP5 | (unused -- the former UART1 console/UART keyboard input was removed 2026-08-22) | **Always available** |
+| GP6, GP13 | PIO UART (RS-232C, default) | RS-232C not used, or reassigned to other pins via `[rs232c] tx_pin`/`rx_pin` in `pb1000.ini` |
 | GP14 | BEEP PWM | `pb1000.ini`: `[beep] enable=false` |
 | **GP28** | **Free (ADC2)** | **Always available** |
 
 ### 7. External SPI Device (using GP28 as CS)
 
-The SPI1 bus is already shared by the LCD, SD card, and touch panel, each with its own CS pin; additional devices can be added the same way. In the standard configuration including the joystick, **GP28 is the only free GPIO**, so it is recommended as the CS pin for an additional device.
+The SPI1 bus is already shared by the LCD, SD card, and touch panel, each with its own CS pin; additional devices can be added the same way. In the standard configuration including the joystick, **GP28** is recommended as the CS pin for an additional device (GP4/GP5 are also free, but GP28's ADC2 capability makes it the more flexible default).
 
 | Signal | Pico Pin | Note |
 | :--- | :--- | :--- |
@@ -182,10 +187,10 @@ For the receiver's own HSTX output (GP12-19) → HDMI addon wiring, see the rece
 documentation.
 
 **Configuration**: the `[hdmi]` section of `pb1000.ini` (see [config_guide_en.md](config_guide_en.md)
-§14), or toggle ON/OFF from the EMULATOR MENU's Display > HDMI item
-([emulator_menu_guide_en.md](emulator_menu_guide_en.md) §5). **LCD and HDMI are exclusive
-outputs** — while HDMI is enabled, the physical LCD stops updating and everything is shown on
-HDMI instead (see [usage_guide_en.md](usage_guide_en.md) §11).
+§14), or toggle ON/OFF from the boot-time F1 setup menu (takes effect after saving and an MCU
+reboot). **LCD and HDMI are exclusive outputs** — while HDMI is enabled, the physical LCD stops
+updating and everything is shown on HDMI instead (see [usage_guide_en.md](usage_guide_en.md)
+§11).
 
 ## Wiring Considerations
 
