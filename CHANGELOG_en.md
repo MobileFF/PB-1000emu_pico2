@@ -7,6 +7,19 @@ date heading instead of a version number or "Unreleased" marker.
 
 ---
 
+## 2026-08-31
+
+### Added
+
+- **`[keyboard] poll_interval_ms` setting**: the USB HID keyboard polling interval (how often
+  `usb_host_core.c`'s background timer calls `tuh_task()`) was previously hardcoded to 8ms; now
+  configurable via the ini file and the boot-time setup menu (F1), default `8` (same as before).
+  Lower values make key input more responsive, at the cost of more frequent USB host servicing.
+  Documented alongside the existing `[emulator] active_step_count`/`loop_idle_ms` (adjustable
+  live from EMULATOR MENU -> System) as the settings to try when key input feels sluggish.
+
+---
+
 ## 2026-08-25
 
 ### Fixed

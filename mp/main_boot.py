@@ -14,9 +14,15 @@ from display_init import init_display
 _usb_host_initialized = False
 
 
-def init_usb_keyboard_early(*, enable_usb_kbd):
+def init_usb_keyboard_early(*, enable_usb_kbd, poll_interval_ms=8):
     """Initialize USB host + C keyboard routing before system creation.
     Called before select_profile_ui() so the selection UI accepts keyboard input.
+
+    poll_interval_ms: how often usb_host_core.c's background hardware timer
+    calls tuh_task() to service the USB HID keyboard (see `[keyboard]
+    poll_interval_ms` in pb1000.ini). Lower = more responsive key input, at
+    the cost of more frequent USB host servicing; the TinyUSB/pico-pio-usb
+    stack itself is the practical lower bound, not any check here.
     """
     global _usb_host_initialized
     if not enable_usb_kbd:
@@ -32,8 +38,8 @@ def init_usb_keyboard_early(*, enable_usb_kbd):
     try:
         import usb_host
         if hasattr(usb_host, 'start_bg_timer'):
-            usb_host.start_bg_timer(8)
-        print("USB keyboard routing enabled.")
+            usb_host.start_bg_timer(poll_interval_ms)
+        print(f"USB keyboard routing enabled (poll={poll_interval_ms}ms).")
     except Exception as e:
         print(f"USB keyboard routing failed: {e}")
 
@@ -255,7 +261,7 @@ def configure_c_keyboard(system, *, enable_usb_kbd):
         return None
 
 
-def configure_usb_keyboard_routing():
+def configure_usb_keyboard_routing(poll_interval_ms=8):
     print("Configuring C keyboard routing...")
     try:
         import usb_host
@@ -263,7 +269,7 @@ def configure_usb_keyboard_routing():
         # On Pico 2W, CYW43+BTstack+LwIP consume alarm pool slots; stop+start
         # after NTP causes add_repeating_timer_ms() to fail and kills keyboard input.
         if hasattr(usb_host, 'start_bg_timer'):
-            usb_host.start_bg_timer(8)  # no-op if already active
-            print("USB background timer active (8ms).")
+            usb_host.start_bg_timer(poll_interval_ms)  # no-op if already active
+            print(f"USB background timer active ({poll_interval_ms}ms).")
     except Exception as e:
         print(f"C keyboard routing setup failed: {e}")

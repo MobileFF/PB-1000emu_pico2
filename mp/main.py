@@ -105,7 +105,10 @@ def main():
             sys.print_exception(_e)
 
     # Step 3: Early USB keyboard init — must precede profile UI so keys are accepted
-    init_usb_keyboard_early(enable_usb_kbd=get_bool(global_cfg, "keyboard", "enable_usb_kbd"))
+    init_usb_keyboard_early(
+        enable_usb_kbd=get_bool(global_cfg, "keyboard", "enable_usb_kbd"),
+        poll_interval_ms=get_int(global_cfg, "keyboard", "poll_interval_ms"),
+    )
 
     # Step 4: Profile selection UI
     profiles = scan_profiles()
@@ -450,7 +453,7 @@ def main():
                                  pio_uart_tx_pin=pio_uart_tx_pin,
                                  pio_uart_rx_pin=pio_uart_rx_pin)
     cpu_core = configure_c_keyboard(system, enable_usb_kbd=enable_usb_kbd)
-    configure_usb_keyboard_routing()
+    configure_usb_keyboard_routing(get_int(cfg, "keyboard", "poll_interval_ms"))
 
     # KEY_INT pulse interval (see [keyboard] key_pulse_interval_ms in
     # pb1000.ini). Default 25ms; real hardware's Key/Pulse ISR runs every

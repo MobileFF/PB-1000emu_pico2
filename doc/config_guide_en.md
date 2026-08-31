@@ -88,6 +88,7 @@ Implementation: `init_display()` in `mp/display_init.py` (driver/spi_baudrate/ro
 | Key | Default | Description |
 | --- | --- | --- |
 | `enable_usb_kbd` | `true` | Enable the USB keyboard. |
+| `poll_interval_ms` | `8` | USB HID keyboard polling interval (ms) -- how often `usb_host_core.c`'s background timer calls `tuh_task()`. Lower values make key input more responsive, at the cost of more frequent USB host servicing. |
 | `key_pulse_interval_ms` | `25` | KEY_INT pulse interval (ms). The real hardware's Key/Pulse ISR runs every 3.9ms (256Hz). Lower values shorten how long the ROM's keyboard debounce takes to register a key. Other time-based tuning (cursor-key repeat, `dev_guide_en.md` §9) assumes this interval too, so re-check normal typing and cursor repeat behavior after changing it. Also settable live via REPL: `hd61700.set_key_pulse_interval_ms(ms)`. |
 | `key_hold_ms` | `120` | Key-press hold duration (ms). |
 | `key_release_hard_timeout_ms` | `1200` | Hard timeout for forcing a key release (ms). |

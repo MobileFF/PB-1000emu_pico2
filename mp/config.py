@@ -12,6 +12,7 @@ _DEFAULTS = {
         "key_release_hard_timeout_ms": "1200",
         "inter_key_gap_ms": "80",
         "key_pulse_interval_ms": "25",
+        "poll_interval_ms": "8",  # USB HID polling interval (usb_host_core.c's bg timer)
     },
     "emulator": {
         "frame_interval_ms": "33",

@@ -69,6 +69,7 @@ SCHEMA = [
 
     # keyboard
     ("keyboard", "enable_usb_kbd",              "bool", None,        True,  False),
+    ("keyboard", "poll_interval_ms",             "int",  (1, 100),    True,  False),
     ("keyboard", "key_pulse_interval_ms",        "int",  (1, 1000),   False, False),
     ("keyboard", "key_hold_ms",                  "int",  (1, 5000),   False, False),
     ("keyboard", "key_release_hard_timeout_ms",  "int",  (1, 10000),  False, False),

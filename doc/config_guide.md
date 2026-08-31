@@ -84,6 +84,7 @@ RGB332形式（8ビット）: ビット7-5=R(3bit)、ビット4-2=G(3bit)、ビ�
 | キー | デフォルト | 説明 |
 | --- | --- | --- |
 | `enable_usb_kbd` | `true` | USBキーボードを有効にする |
+| `poll_interval_ms` | `8` | USB HIDキーボードのポーリング間隔（ms）。`usb_host_core.c`のバックグラウンドタイマーが`tuh_task()`を呼ぶ周期。値を小さくするほどキー入力の反応が良くなる（その分USBホスト処理の頻度が上がる） |
 | `key_pulse_interval_ms` | `25` | KEY_INTパルス間隔（ms）。実機のKey/Pulse ISRは3.9ms(256Hz)周期。値を小さくするほどキー確定までの体感時間が短くなる。カーソルキーリピート等、他の時間ベース調整（`dev_guide.md` §13）もこの間隔を前提に実測チューニングされているため、変更後は通常のタイピング・カーソルリピート動作も要確認。REPLからも変更可: `hd61700.set_key_pulse_interval_ms(ms)` |
 | `key_hold_ms` | `120` | キー押下継続時間（ms） |
 | `key_release_hard_timeout_ms` | `1200` | キーリリース強制タイムアウト（ms） |
