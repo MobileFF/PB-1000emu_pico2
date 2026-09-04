@@ -3,6 +3,9 @@
 .claude/settings.local.json
 CLAUDE.md
 
+# 作業用メモ・分析（コミット対象外）
+references/
+
 # Python cache
 __pycache__/
 *.py[cod]
