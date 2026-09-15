@@ -59,6 +59,16 @@ static void set_display_on_state(lcd_state_t *lcd, bool enabled) {
   mark_all_dirty(lcd);
 }
 
+/* TEMP DEBUG (2026-09-14, remove after the "画面全体の色が変わる"
+   investigation is closed): counts how the data==0 branch below fires, to
+   find why pc_dev sees whole-screen color_vram recoloring on a single
+   PRINT that the real firmware doesn't reproduce with the same source. */
+uint32_t g_dbg_write_total = 0;
+uint32_t g_dbg_write_zero_restamp = 0;          /* data==0 branch taken at all */
+uint32_t g_dbg_write_zero_restamp_nochange = 0; /* ...and old byte was already 0 (true no-op re-stamp) */
+uint16_t (*g_dbg_get_pc)(void) = 0;
+void (*g_dbg_dump_history)(void) = 0;
+
 static void write_vram_pixel_byte(lcd_state_t *lcd, int chip, int x_local,
                                   int y_page, uint8_t data) {
   if (y_page < 0 || y_page >= (int)lcd->active_pages)
@@ -73,6 +83,21 @@ static void write_vram_pixel_byte(lcd_state_t *lcd, int chip, int x_local,
   if (off >= 0 && off < LCD_VRAM_SIZE) {
     uint8_t old = lcd->vram[off];
     lcd->vram[off] = data;
+    g_dbg_write_total++;
+    if (data == 0) {
+      g_dbg_write_zero_restamp++;
+      if (old == 0) {
+        g_dbg_write_zero_restamp_nochange++;
+        if (g_dbg_write_zero_restamp_nochange <= 40 || (g_dbg_write_zero_restamp_nochange % 200) == 0)
+          fprintf(stderr, "[ZWRITE #%u] pc=%04X chip=%d x_local=%d y_page=%d off=%d\n",
+                  g_dbg_write_zero_restamp_nochange, g_dbg_get_pc ? g_dbg_get_pc() : 0,
+                  chip, x_local, y_page, off);
+        if (g_dbg_write_zero_restamp_nochange == 1 && g_dbg_dump_history) {
+          fprintf(stderr, "--- call history at ZWRITE #41 ---\n");
+          g_dbg_dump_history();
+        }
+      }
+    }
     /* Update color_vram when:
        - pixel data changed (new content), OR
        - data is zero (CLS / blank write) so bg color is always current */

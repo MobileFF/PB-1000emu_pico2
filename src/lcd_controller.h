@@ -243,4 +243,15 @@ void lcd_send_hdmi_bezel_cmds(lcd_state_t *lcd, const uint8_t *buf,
  * session's stale content. */
 void lcd_send_hdmi_clear_screen(lcd_state_t *lcd);
 
+/* TEMP DEBUG (2026-09-14, remove after the "画面全体の色が変わる"
+ * investigation is closed) -- see lcd_controller.c's write_vram_pixel_byte().
+ * g_dbg_get_pc, if set by the host app, lets write_vram_pixel_byte() log
+ * which CPU instruction triggered a given write, without lcd_controller.c
+ * needing to know about hd61700_state_t. */
+extern uint32_t g_dbg_write_total;
+extern uint32_t g_dbg_write_zero_restamp;
+extern uint16_t (*g_dbg_get_pc)(void);
+extern void (*g_dbg_dump_history)(void);
+extern uint32_t g_dbg_write_zero_restamp_nochange;
+
 #endif /* LCD_CONTROLLER_H */

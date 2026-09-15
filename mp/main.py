@@ -287,15 +287,23 @@ def main():
     print("[MEM] after  load_state: free=%d alloc=%d" %
           (gc.mem_free(), gc.mem_alloc()))
 
-    # [display] vdp_enable=false (F1 setup menu) forces per-pixel color VRAM
-    # rendering off, overriding whatever load_state() just decided (VDP
-    # defaults to ON in the C core, and load_state() re-enables it whenever a
-    # saved color_vram.bin is found) -- this is the config-backed replacement
-    # for the EMULATOR MENU's old "Color VRAM (VDP)" runtime toggle (removed
-    # 2026-08-22), for programs where the VDP render path itself is
-    # undesirable regardless of what got saved.
-    if not get_bool(cfg, "display", "vdp_enable") and hasattr(system.lcd, "set_vdp_enable"):
-        system.lcd.set_vdp_enable(False)
+    # [display] vdp_enable overrides whatever load_state() just decided (VDP
+    # defaults to ON in the C core; load_state() explicitly re-enables it
+    # when a saved color_vram.bin is found, and just as explicitly disables
+    # it otherwise -- see pb1000_state_io.py's load_state(), the elif branch
+    # right after the color_vram.bin restore). This is the config-backed
+    # replacement for the EMULATOR MENU's old "Color VRAM (VDP)" runtime
+    # toggle (removed 2026-08-22).
+    #
+    # Both directions must be applied explicitly here, not just the
+    # vdp_enable=false one: a cold-boot profile has no color_vram.bin yet,
+    # so load_state()'s elif branch above always disables VDP first -- if
+    # this block only handled the false case, vdp_enable=true in pb1000.ini
+    # would silently have no effect on any profile that hasn't saved a
+    # color_vram.bin yet (found 2026-09-14: VDP stayed off even with
+    # vdp_enable=true set).
+    if hasattr(system.lcd, "set_vdp_enable"):
+        system.lcd.set_vdp_enable(get_bool(cfg, "display", "vdp_enable"))
 
     # Step 8b: Input managers -- deferred from Step 8 earlier (see the
     # comment there) to here specifically, ahead of the emulator_menu

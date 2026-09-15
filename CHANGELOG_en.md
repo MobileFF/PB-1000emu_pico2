@@ -7,6 +7,34 @@ date heading instead of a version number or "Unreleased" marker.
 
 ---
 
+## 2026-09-16
+
+### Fixed
+
+- **`tools/md100_gui.py` / `tools/md100.py`: incorrect decoding of BASIC programs stored on
+  disk images**: viewing or extracting a BASIC program (Type B) from an MD-100 disk image
+  went through `md100.py`'s `print_basic()` detokenizer, which had several bugs.
+  - Missing spacing where two keyword tokens are adjacent (e.g. `GOTO` right after `THEN`)
+    produced run-together output like `THENGOTO`. The same missing-space issue showed up
+    before string literals, right after `REM`, and before `&H` hex literals, e.g.
+    `PRINT"HELLO"`, `REM====`, `CALL&H1000`.
+  - **Root cause (the main one)**: cross-checking against a disassembly of the real PB-1000's
+    ROM (`references/rom1.src`, keyword table at `&H88ED`-`&H8BC9`) revealed that the tail
+    ends of the string-function table `_T6` and operator table `_T7` had their token codes
+    shifted well away from the real hardware's assignments. `AND`/`OR`/`XOR`/`MOD`/`NOT`/`TO`/
+    `STEP`/`USING`/`AS`/`APPEND`/`OFF`/`TAB`/`REV`/`NORM` and `CHR$`/`STR$`/`MID$`/`LEFT$`/
+    `RIGHT$`/`INKEY$`/`HEX$`/`DATE$`/`TIME$`/`INPUT`/`DMS$` all sat at the wrong code
+    positions, so decoding a genuine PB-1000-tokenized program would **show the wrong
+    keyword, or garbled output**, for any of these — all very common in real programs.
+    Rebuilt both tables from the verified ROM codes, and removed two fabricated keywords
+    (`CSR`/`ALL`) that had no basis in the ROM table and were actively squatting on the real
+    `NOT`/`XOR` codes.
+  - Verified with a tokenize/decode round-trip against real sample programs
+    (`sample/basic/CLVRAM1.BAS`/`CLVRAM2.BAS`/`BNK23TST.BAS`): several lines mismatched
+    before the fix, all match exactly after.
+
+---
+
 ## 2026-08-31
 
 ### Added

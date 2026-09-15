@@ -110,47 +110,72 @@ _T4 = [
     None,None,None,None,None,None,None,None,None,None,None,None,None,None,None, # C0
     None,None,None,None,None,None,None,None,None,None,None,None,None,None,None, # CF (pad)
 ]
+# Token byte assignments below are verified against the PB-1000 ROM
+# disassembly's BASIC keyword table (references/rom1.src, &H88ED-&H8BC9),
+# which lists each keyword's exact prefix and code. Some entries (CUR,
+# FACT, HYPSIN.. HYPATN, FRE, RND/VALF/RAN#, REC/POL/NPR/NCR, bare MID,
+# KEY, CALC$) are not present in that table and are kept at their
+# original positions unverified; they do not collide with any confirmed
+# keyword code.
 _T5 = [
-    None,None,None,None,None,None,None,None,None,None,None,None,None,None,None, # 40
-    "ERL","ERR","CNT","SUMX","SUMY","SUMX2","SUMY2","SUMXY",                    # 4F
-    "MEANX","MEANY","SDX","SDY","SDXN","SDYN","LRA","LRB","COR","PI",          # 57
-    None,None,"CUR ",None,None,None,"FACT ",None,"EOX ","EOY ",                 # 60
-    "SIN ","COS ","TAN ","ASN ","ACS ","ATN ",                                  # 6A
-    "HYPSIN ","HYPCOS ","HYPTAN ","HYPASN ","HYPACS ","HYPATN ",                # 70
-    "LOG ","LGT ","EXP ","SQR ","ABS ","SGN ","INT ","FIX ","FRAC ","RND ",    # 76
-    None,None,None,None,None,"PEEK ",None,None,"LOF ","EOF ",None,None,"FRE ", # 80
-    None,"POINT ","ROUND","RND","VALF","RAN#","ASC","LEN","VAL",                # 8D
-    None,None,None,None,None,"DEG",None,None,None,                              # 96
-    None,None,None,None,None,None,None,None,"REC","POL",None,"NPR","NCR","HYP",# 9F
-    None,None,None,None,None,None,None,None,None,None,None,None,None,None,None, # AD
-    None,None,None,None,None,None,None,None,None,None,None,None,None,None,None, # BC
-    None,None,None,None,None,None,None,None,None,None,None,None,None,None,None, # CB (pad)
+    None, None, None, None, None, None, None, None,  # 40
+    None, None, None, None, None, None, None, 'ERL',  # 48
+    'ERR', 'CNT', 'SUMX', 'SUMY', 'SUMX2', 'SUMY2', 'SUMXY', 'MEANX',  # 50
+    'MEANY', 'SDX', 'SDY', 'SDXN', 'SDYN', 'LRA', 'LRB', 'COR',  # 58
+    'PI', None, None, 'CUR ', None, None, None, 'FACT ',  # 60
+    None, 'EOX ', 'EOY ', 'SIN ', 'COS ', 'TAN ', 'ASN ', 'ACS ',  # 68
+    'ATN ', 'HYPSIN ', 'HYPCOS ', 'HYPTAN ', 'HYPASN ', 'HYPACS ', 'HYPATN ', 'LOG ',  # 70
+    'LGT ', 'EXP ', 'SQR ', 'ABS ', 'SGN ', 'INT ', 'FIX ', 'FRAC ',  # 78
+    'RND ', None, None, None, None, None, 'PEEK ', None,  # 80
+    None, 'LOF ', 'EOF ', None, None, 'FRE ', None, 'POINT ',  # 88
+    'ROUND', 'RND', 'VALF', 'RAN#', 'ASC', 'LEN', 'VAL', None,  # 90
+    None, None, None, 'HYP ', 'DEG', None, None, None,  # 98
+    None, None, None, None, None, None, None, None,  # A0
+    'REC', 'POL', None, 'NPR', 'NCR', None, None, None,  # A8
+    None, None, None, None, None, None, None, None,  # B0
+    None, None, None, None, None, None, None, None,  # B8
+    None, None, None, None, None, None, None, None,  # C0
+    None, None, None, None, None, None, None, None,  # C8 (pad)
 ]
 _T6 = [
-    None,None,None,None,None,None,None,None,None,None,None,None,None,None,None, # 40
-    None,None,None,None,None,None,None,None,None,None,None,None,None,None,None, # 4F
-    None,None,None,None,None,None,None,None,None,None,None,None,None,None,None, # 5E
-    None,None,None,None,None,None,None,None,None,None,None,None,None,None,None, # 6D
-    None,None,None,None,None,None,None,None,None,None,None,None,None,None,None, # 7C
-    None,None,None,None,None,None,None,None,None,None,None,None,None,None,None, # 8B
-    None,None,None,None,None,None,None,"DMS$",None,None,"MID","INPUT ",        # 94
-    "MID$","RIGHT$","LEFT$",None,"CHR$","STR$",None,"HEX$",None,None,None,None, # A0
-    "INKEY$","KEY",None,"DATE$","TIME$","CALC$",None,None,None,None,None,None,  # A8
-    None,None,None,None,None,None,None,None,None,None,None,None,None,None,None, # B4
-    None,None,None,None,None,None,None,None,None,None,None,None,None,None,None, # C3 (pad)
+    None, None, None, None, None, None, None, None,  # 40
+    None, None, None, None, None, None, None, None,  # 48
+    None, None, None, None, None, None, None, None,  # 50
+    None, None, None, None, None, None, None, None,  # 58
+    None, None, None, None, None, None, None, None,  # 60
+    None, None, None, None, None, None, None, None,  # 68
+    None, None, None, None, None, None, None, None,  # 70
+    None, None, None, None, None, None, None, None,  # 78
+    None, None, None, None, None, None, None, None,  # 80
+    None, None, None, None, None, None, None, None,  # 88
+    None, None, None, None, None, None, None, 'DMS$',  # 90
+    None, None, None, 'INPUT ', 'MID$', 'RIGHT$', 'LEFT$', None,  # 98
+    'CHR$', 'STR$', None, 'HEX$', 'MID', None, None, None,  # A0
+    'INKEY$', None, None, 'DATE$', 'TIME$', None, None, None,  # A8
+    None, None, None, 'KEY', None, None, None, 'CALC$',  # B0
+    None, None, None, None, None, None, None, None,  # B8
+    None, None, None, None, None, None, None, None,  # C0
+    None, None, None, None, None, None, None, None,  # C8 (pad)
 ]
 _T7 = [
-    None,None,None,None,None,None,None," THEN ","ELSE ",None,None,None,None,None,None, # 40
-    None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,    # 4F
-    None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,    # 5F
-    None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,    # 6F
-    None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,    # 7F
-    None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,    # 8F
-    None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,    # 9F
-    None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,None,    # AF
-    None,None,"TAB ",None,"CSR ","REV ","NORM ","ALL ",                                  # B2
-    " AS ","APPEND ",None,"OFF"," STEP "," TO ","USING ","NOT ",                        # BA
-    " AND "," OR "," XOR "," MOD ",None,None,None,None,None,None,None,None,None,None,   # C2 (pad)
+    None, None, None, None, None, None, None, ' THEN ',  # 40
+    'ELSE ', None, None, None, None, None, None, None,  # 48
+    None, None, None, None, None, None, None, None,  # 50
+    None, None, None, None, None, None, None, None,  # 58
+    None, None, None, None, None, None, None, None,  # 60
+    None, None, None, None, None, None, None, None,  # 68
+    None, None, None, None, None, None, None, None,  # 70
+    None, None, None, None, None, None, None, None,  # 78
+    None, None, None, None, None, None, None, None,  # 80
+    None, None, None, None, None, None, None, None,  # 88
+    None, None, None, None, None, None, None, None,  # 90
+    None, None, None, None, None, None, None, None,  # 98
+    None, None, None, None, None, None, None, None,  # A0
+    None, None, None, None, None, None, None, None,  # A8
+    None, None, None, None, None, None, 'TAB ', None,  # B0
+    None, 'REV ', 'NORM ', None, ' AS ', 'APPEND ', None, 'OFF',  # B8
+    ' STEP ', ' TO ', 'USING ', 'NOT ', ' AND ', ' OR ', ' XOR ', ' MOD ',  # C0
+    None, None, None, None, None, None, None, None,  # C8 (pad)
 ]
 # Pad each table to exactly 144 entries
 for _tab in (_T4, _T5, _T6, _T7):
@@ -691,6 +716,7 @@ def print_basic(data: bytes, escape: str, out) -> None:
                 lsb = c; continue
             else:
                 emit(str(lsb + c * 256))
+                insert_space = True
                 lsb = -1; prefix = 0; continue
 
         if prefix != 0:
@@ -698,11 +724,16 @@ def print_basic(data: bytes, escape: str, out) -> None:
             prefix = 0
             if pending_colon:
                 out.write(':'); pending_colon = False
+                insert_space = False
+            elif insert_space and not text.startswith(' '):
+                out.write(' ')
+                insert_space = False
             if text.endswith(' '):
                 out.write(text[:-1])
                 insert_space = True
             else:
                 out.write(text)
+                insert_space = False
             continue
 
         if length == -1:
@@ -740,10 +771,11 @@ def print_basic(data: bytes, escape: str, out) -> None:
                 text = chr(c) if 0x20 <= c < 0x80 else f"\\{c:02X}"
             if pending_colon and not text.startswith('ELSE'):
                 out.write(':'); pending_colon = False
+                insert_space = False
             if text == ' ':
                 out.write(' '); insert_space = False
             else:
-                if insert_space and (text[0].isalnum() or ord(text[0]) >= ord('A')):
+                if insert_space and text[0] not in '(,':
                     out.write(' ')
                 out.write(text)
                 insert_space = text.endswith(' ')
