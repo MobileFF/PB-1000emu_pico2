@@ -1,18 +1,24 @@
-# Built-in General-Purpose Hook Reference
+# General-Purpose Subroutine Hook Samples
 
-Reference for the general-purpose subroutine hooks bundled with the emulator,
-with BASIC usage examples.
+A collection of sample general-purpose subroutine hooks for the emulator, with BASIC usage
+examples.
 
-Every hook described in this document is an **optional** feature — it only does anything once a
-BASIC program explicitly `CALL`s it, and has no effect on the emulator's core operation (CPU, LCD,
-keyboard, etc.) otherwise. Whether to use any given hook, and which ones, is entirely up to you.
+**No subroutine hook ships as standard equipment.** Every hook described in this document is
+**sample code** — it only does anything once a BASIC program explicitly `CALL`s it, and has no
+effect on the emulator's core operation (CPU, LCD, keyboard, etc.) otherwise. Whether any given
+hook runs at all is entirely up to whether you choose to **place** its file on the SD card
+(`/sd/ext/`) or in flash (`/ext/`); which hooks you use, if any, is completely up to you.
 
-Hardware-specific hooks (DHT20 temperature sensor, etc.) are not covered here.  
+Hardware-specific hooks (the DHT20 temperature/humidity sensor, etc.) are included here too, as
+just another sample.  
 For the hook framework and how to write your own hooks, see [extension_api_en.md](extension_api_en.md).
 
-> **Note**: `bank_loader.py` (`mp/ext/`) ships by default and is auto-loaded, but `ram_test.py`
-> lives under `sample/mp/ext/ram_test.py` and is a sample — it is **not** auto-loaded on a stock
-> device unless copied into `mp/ext/`. CALL &H5E41/51/61/71 below require that copy first.
+> **Note**: In this repository's distributed state, `bank_loader.py` (`mp/ext/`) is already placed
+> there, so it works with no extra steps. `ram_test.py` and `dht20.py`, by contrast, live under
+> `sample/mp/ext/` and are **not** auto-loaded on a stock device unless copied into `mp/ext/` (or
+> `/sd/ext/`) first. There is no functional difference between the two groups — the only
+> difference is whether the file happens to be placed already. CALL &H5E41/51/61/71 (ram_test) and
+> &H5E10 (dht20) below all require that copy step first.
 
 ---
 
@@ -161,13 +167,13 @@ The virtual FDD must be enabled and a disk image must be mounted.
 
 ---
 
-## ram_test.py (sample, not shipped)
+## ram_test.py (sample, copy required)
 
 Provides bank-switching hooks and a RAM self-test for BANK2/3.  
 The bank-switching hooks are used when directly reading/writing bank RAM with POKE/PEEK.
 
-This is a sample module under `sample/mp/ext/ram_test.py`, not a module shipped by default in
-`mp/ext/`. To use it, copy it into `mp/ext/` (or `/sd/ext/`) first.
+This is a sample module under `sample/mp/ext/ram_test.py` — it is not placed in `mp/ext/` by
+default. To use it, copy it into `mp/ext/` (or `/sd/ext/`) first.
 
 ### CALL &H5E41 — Switch Data Bank to BANK2
 
@@ -243,13 +249,61 @@ Test suite:
 
 ---
 
+## dht20.py (sample, copy required)
+
+A hardware-specific hook that reads an I2C-connected DHT20 temperature/humidity sensor.  
+This is a sample module under `sample/mp/ext/dht20.py` — it is not auto-loaded on a stock device
+unless copied into `mp/ext/` (or `/sd/ext/`) first. The matching BASIC sample is
+`sample/basic/DHT20.BAS`.
+
+### Wiring
+
+| Signal | Pico 2 pin |
+|---|---|
+| SDA | GP2 (I2C1) |
+| SCL | GP3 (I2C1) |
+| VDD | 3.3V |
+| GND | GND |
+
+Pull SDA/SCL up with 4.7 kΩ resistors (GP2/GP3 are the PR6-reserved pins in `gpio_pin_map.md`).
+I2C initialization is deferred until the first CALL, so the sensor is recognized even if it is
+connected after the emulator has already booted. If a read fails, the initialization state is
+reset and re-initialization is retried on the next CALL.
+
+### CALL &H5E10 — Read DHT20
+
+#### Output (PEEK after CALL)
+
+| Offset | Content |
+|---|---|
+| `&H5F00` | Result code: `0x00`=OK / `0xFF`=error (sensor not responding, measurement not ready, etc.) |
+| `&H5F01` | Temperature×10 high byte (signed 16-bit, big-endian) |
+| `&H5F02` | Temperature×10 low byte (e.g. `&H00EB`=235 → 23.5°C) |
+| `&H5F03` | Humidity×10 high byte (unsigned 16-bit, big-endian) |
+| `&H5F04` | Humidity×10 low byte (e.g. `&H025D`=605 → 60.5%) |
+
+#### Example
+
+```basic
+1000 CALL &H5E10
+1010 IF PEEK(&H5F00)<>0 THEN PRINT "SENSOR ERROR": END
+1020 T=PEEK(&H5F01)*256+PEEK(&H5F02)
+1030 IF T>32767 THEN T=T-65536
+1040 H=PEEK(&H5F03)*256+PEEK(&H5F04)
+1050 PRINT "TEMP:";T/10;"C"
+1060 PRINT "HUMD:";H/10;"%"
+```
+
+---
+
 ## Hook Address Summary
 
 | Address | Module | Function |
 |---|---|---|
-| `&H5E41` | ram_test (sample, not shipped) | Switch data bank → BANK2 |
-| `&H5E51` | ram_test (sample, not shipped) | Switch data bank → BANK3 |
-| `&H5E61` | ram_test (sample, not shipped) | Restore data bank |
-| `&H5E71` | ram_test (sample, not shipped) | Run BANK2/3 RAM self-test |
-| `&H5E81` | bank_loader | SD card file → bank RAM |
-| `&H5E91` | bank_loader | FDD file → bank RAM |
+| `&H5E10` | dht20 (sample, copy required) | Read DHT20 temperature/humidity sensor |
+| `&H5E41` | ram_test (sample, copy required) | Switch data bank → BANK2 |
+| `&H5E51` | ram_test (sample, copy required) | Switch data bank → BANK3 |
+| `&H5E61` | ram_test (sample, copy required) | Restore data bank |
+| `&H5E71` | ram_test (sample, copy required) | Run BANK2/3 RAM self-test |
+| `&H5E81` | bank_loader (sample, already placed) | SD card file → bank RAM |
+| `&H5E91` | bank_loader (sample, already placed) | FDD file → bank RAM |

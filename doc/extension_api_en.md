@@ -6,13 +6,20 @@ The Extension API lets BASIC programs running on the PB-1000 call Pico 2 periphe
 
 It is built directly on the call_hook mechanism. Each extension function is registered as a call_hook at its own address, and BASIC calls it directly with `CALL <address>`. There is no single dispatch address or function-code scheme.
 
-> **Every module under `ext/` described in this document (`bank_loader.py`, `vram_loader.py`, etc.)
-> is an entirely optional feature** that only does anything when a BASIC program `CALL`s it.
-> None of them are required for the emulator's core operation (the HD61700 CPU core, LCD, keyboard,
-> etc.). Use whichever ones you want and ignore the rest — removing them from `ext/` has no effect
-> on running ordinary BASIC programs or booting the system (the one exception is `dotds_64dot.py`,
-> an internal fix that prevents display corruption in 64-dot mode and always ships enabled — see
-> below for details).
+> **No subroutine hook ships as standard equipment.** Every module under `ext/` described in this
+> document (`bank_loader.py`, `vram_loader.py`, `dht20.py`, `ram_test.py`, etc.) is **sample code**
+> that only does anything when a BASIC program `CALL`s it — an entirely optional feature. None of
+> them are required for the emulator's core operation (the HD61700 CPU core, LCD, keyboard, etc.).
+>
+> Whether any given hook is active or not is entirely up to you, decided simply by whether you
+> **place** its file on the SD card (`/sd/ext/`) or in flash (`/ext/`). `bank_loader.py` and
+> `vram_loader.py` are merely samples that happen to already be placed in this distribution's
+> `mp/ext/`; functionally and conceptually there is no difference between them and `dht20.py` /
+> `ram_test.py` (placed under `sample/mp/ext/`, see below). Remove any of them from `ext/` if you
+> don't need them — doing so has no effect on running ordinary BASIC programs or booting the system
+> (the one exception is `dotds_64dot.py`, an internal fix that prevents display corruption in
+> 64-dot mode and always ships enabled. It is not a BASIC-callable subroutine hook, so it falls
+> outside the scope of this document's hook list — see below for details).
 
 ---
 
@@ -83,16 +90,19 @@ No changes to `pb1000.py` are needed. Place an extension module in the `ext/` di
 mp/
 └── ext/
     ├── __init__.py       # empty file (package declaration)
-    ├── bank_loader.py    # bank RAM loader (bundled, optional — only used if BASIC calls it)
-    ├── vram_loader.py    # colour VRAM image loader (bundled, optional — only used if BASIC calls it)
+    ├── bank_loader.py    # bank RAM loader (sample, already placed, optional — only used if BASIC calls it)
+    ├── vram_loader.py    # colour VRAM image loader (sample, already placed, optional — only used if BASIC calls it)
     ├── dotds_64dot.py    # DOTDS / single-char display SCTOP-independence fix (internal, 64-dot mode only)
     └── myext.py          # add your own extensions here
 ```
 
-`bank_loader.py` and `vram_loader.py` ship inside `mp/ext/` and are auto-loaded at boot, but they
-only actually do anything when a BASIC program executes the matching `CALL &Hxxxx`. If you never
-call them, nothing happens and the emulator's behavior is unaffected — treat them as optional
-extras you can pick and choose to use.
+`bank_loader.py` and `vram_loader.py` happen to already be placed inside this distribution's
+`mp/ext/`, so they get auto-loaded at boot — but that isn't "standard equipment," it's simply
+**sample code placed there in advance**. They only actually do anything when a BASIC program
+executes the matching `CALL &Hxxxx`. If you never call them, nothing happens and the emulator's
+behavior is unaffected. Feel free to remove them from `ext/` if you don't need them, or to add
+`dht20.py` / `ram_test.py` (under `sample/mp/ext/`, described below) by copying them into `mp/ext/`
+or `/sd/ext/` — treat all of them as sample extras you can pick and choose to use.
 
 `dotds_64dot.py`, in contrast, is not something you call from BASIC — it's an internal fix that
 prevents display corruption in 64-dot display mode. The file always ships in `mp/ext/`, but it is
@@ -104,7 +114,9 @@ near the end of this document for details.
 `sample/mp/ext/` contains ready-to-use sample extensions (`dht20.py` — DHT20 temperature/humidity
 sensor, `ram_test.py`, etc.), but these are **not** auto-loaded unless copied into `mp/ext/`
 (`_ext_load_modules()` only scans `<profile>/ext/`, `/sd/ext/`, and `/ext/`; `sample/` is never
-scanned). These, too, are purely optional add-ons that only take effect once copied in.
+scanned). The only difference from `bank_loader.py` / `vram_loader.py` is whether the file happens
+to already be copied into `mp/ext/` in this distribution — there is no difference in function or
+status. These, too, are purely optional sample add-ons that only take effect once copied in.
 
 On the Pico 2, place files under `/ext/` or `/sd/ext/` (see the priority order below).
 
@@ -250,22 +262,72 @@ Registration status can also be viewed from the Win+F7 emulator menu's **Hook St
 
 | Address | Module | Function |
 | --- | --- | --- |
-| `0x5E10` | `dht20.py` (sample, not shipped) | Read DHT20 temperature/humidity sensor |
-| `0x5E20` | `vram_loader.py` | SD/flash file → bank RAM → colour VRAM transfer |
-| `0x5E21` | `vram_loader.py` | Virtual FDD image file → bank RAM → colour VRAM transfer |
-| `0x5E41`/`0x5E51`/`0x5E61`/`0x5E71` | `ram_test.py` (sample, not shipped) | Various RAM tests |
-| `0x5E81` | `bank_loader.py` | Load SD/flash file into bank RAM |
-| `0x5E91` | `bank_loader.py` | Load virtual FDD image file into bank RAM |
+| `0x5E10` | `dht20.py` (sample, copy required) | Read DHT20 temperature/humidity sensor |
+| `0x5E20` | `vram_loader.py` (sample, already placed) | SD/flash file → bank RAM → colour VRAM transfer |
+| `0x5E21` | `vram_loader.py` (sample, already placed) | Virtual FDD image file → bank RAM → colour VRAM transfer |
+| `0x5E41`/`0x5E51`/`0x5E61`/`0x5E71` | `ram_test.py` (sample, copy required) | Various RAM tests |
+| `0x5E81` | `bank_loader.py` (sample, already placed) | Load SD/flash file into bank RAM |
+| `0x5E91` | `bank_loader.py` (sample, already placed) | Load virtual FDD image file into bank RAM |
 | `0x022C` | `dotds_64dot.py` (internal fix, active in 64-dot mode only) | DOTDS: bulk LEDTP → monochrome VRAM transfer (SCTOP-independent) |
 | `0x02BD` | `dotds_64dot.py` (internal fix, active in 64-dot mode only) | Single-char quick display: direct EDCSR write (SCTOP-independent) |
 
-`dht20.py` / `ram_test.py` live under `sample/mp/ext/` and do not run on a stock device unless
-copied into `mp/ext/` (marked "sample, not shipped" above). `dotds_64dot.py` is not a general-purpose
+Every hook in the table above is the same kind of **sample code** — there is no "standard
+equipment vs. not" distinction. The only difference is where the file happens to be placed at
+distribution time: `vram_loader.py` and `bank_loader.py` are already placed in `mp/ext/` and so
+work out of the box, while `dht20.py` and `ram_test.py` live under `sample/mp/ext/` and do not run
+on a stock device unless copied into `mp/ext/` (or `/sd/ext/`) first — hence "copy required" above.
+`dotds_64dot.py` is not a general-purpose
 BASIC extension but an internal fix module for 64-dot display mode, and it always ships as part of
 `mp/ext/`. Its `0x022C`/`0x02BD` call_hooks themselves are only enabled when
 `[display] lcd_height = 64`; in 32-dot mode (the default) they are always disabled and the ROM's
 native DOTDS/02BD run untouched, so there is no collision risk with those two addresses in 32-dot
 mode. When adding your own extensions, it's still good practice to avoid those two call addresses.
+
+---
+
+### `dht20.py` — Read DHT20 Temperature/Humidity Sensor (sample, copy required)
+
+**CALL &H5E10**: Reads an I2C-connected DHT20 temperature/humidity sensor.
+
+This is a sample module under `sample/mp/ext/dht20.py` — it does not run on a stock device unless
+copied into `mp/ext/` (or `/sd/ext/`) first. The matching BASIC sample is
+`sample/basic/DHT20.BAS`.
+
+#### Wiring
+
+| Signal | Pico 2 pin |
+| --- | --- |
+| SDA | GP2 (I2C1) |
+| SCL | GP3 (I2C1) |
+| VDD | 3.3V |
+| GND | GND |
+
+Pull SDA/SCL up with 4.7 kΩ resistors (GP2/GP3 are the PR6-reserved pins in `gpio_pin_map.md`). I2C
+initialization is deferred until the first CALL, so the sensor is recognized even if it's connected
+after the emulator has already booted. If a read fails, the initialization state is reset and
+re-initialization is retried on the next CALL.
+
+#### ext_work Layout (CALL &H5E10)
+
+| Offset | Dir | Contents |
+| --- | --- | --- |
+| `0x5F00` | OUT | Result code: `0x00`=OK / `0xFF`=error (sensor not responding, measurement not ready, etc.) |
+| `0x5F01` | OUT | Temperature×10 high byte (signed 16-bit, big-endian) |
+| `0x5F02` | OUT | Temperature×10 low byte (e.g. `0x00EB`=235 → 23.5°C) |
+| `0x5F03` | OUT | Humidity×10 high byte (unsigned 16-bit, big-endian) |
+| `0x5F04` | OUT | Humidity×10 low byte (e.g. `0x025D`=605 → 60.5%) |
+
+#### Example
+
+```basic
+CALL &H5E10
+IF PEEK(&H5F00)<>0 THEN PRINT "SENSOR ERROR": END
+T=PEEK(&H5F01)*256+PEEK(&H5F02)
+IF T>32767 THEN T=T-65536
+H=PEEK(&H5F03)*256+PEEK(&H5F04)
+PRINT "TEMP:";T/10;"C"
+PRINT "HUMD:";H/10;"%"
+```
 
 ---
 
@@ -389,3 +451,4 @@ described above are unaffected. See the `dotds64` module entry in `dev_guide_en.
 | 2026-07-13 | `dotds_64dot.py`: moved the DOTDS / single-char quick display hot paths to native C for faster rendering, implemented as a standalone `dotds64` module (`src/moddotds64.c`) kept out of the `hd61700` core. Automatically falls back to the Python implementation on older firmware |
 | 2026-07-13 | `moddotds64.c`: fixed DOTDS's LEDTP bulk copy calling `hd61700_mem_read()` (which has a UART-RX interrupt/sleep-wake side effect) up to 1536 times per call. Added side-effect-free `hd61700_ram_read()` and switched to it |
 | 2026-08-13 | `_ext_load_modules()` now also recognizes `.mpy` files, not just `.py`, as auto-load candidates (`.py` still wins when both exist) |
+| 2026-09-19 | Reframed the positioning of subroutine hooks: dropped the "standard equipment" distinction, unifying `bank_loader.py`/`vram_loader.py` with every other hook as "sample code whose activation depends solely on where it's placed (`mp/ext/`, `/sd/ext/`, `/ext/`)." Added a dedicated `dht20.py` section |
