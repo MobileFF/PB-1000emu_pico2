@@ -115,6 +115,7 @@ The central module for CPU control and all peripheral I/O.
 | `set_mem_write_hook(addr, fn)` | Register a memory write hook (see §6.1) |
 | `clear_mem_write_hook(addr)` | Remove a memory write hook |
 | `set_mem_write_hook_enabled(addr, bool)` | Enable or disable a memory write hook |
+| `set_uart_repl_enabled(bool)` | Enable/disable only the RX interrupt of the native UART0 REPL on GP0/GP1 (`irq_set_enabled()` only -- never re-registers the exclusive IRQ handler). Does not affect output (print()/REPL TX) |
 | `set_port_direct(tx, rx, beep, freq, duty)` | Initialise C-direct UART and beep PWM |
 | `press_row_ki(row, ki)` | Assert a key in the keyboard matrix |
 | `release_row_ki(row, ki)` | Release a key from the matrix (also sets post-release KEY_INT pulses) |

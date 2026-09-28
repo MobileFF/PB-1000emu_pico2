@@ -113,6 +113,7 @@ CPU コアの制御と周辺 I/O 全般を担う中心モジュール。主な A
 | `set_mem_write_hook(addr, fn)` | メモリ書き込みフック登録（詳細は §6.1） |
 | `clear_mem_write_hook(addr)` | メモリ書き込みフック解除 |
 | `set_mem_write_hook_enabled(addr, bool)` | メモリ書き込みフックの有効・無効切り替え |
+| `set_uart_repl_enabled(bool)` | GP0/GP1 のネイティブ UART0 REPL の受信(RX)割り込みだけを有効・無効切り替え(`irq_set_enabled()` のみ、排他 IRQ ハンドラの再登録はしない)。出力(print()/REPL の TX)には影響しない |
 | `set_port_direct(tx, rx, beep, freq, duty)` | C ダイレクト UART・ビープ初期化 |
 | `press_row_ki(row, ki)` | キーマトリクスへのキー入力 |
 | `release_row_ki(row, ki)` | キーマトリクスからキーを解放（解放後にポストリリースパルスを自動設定） |

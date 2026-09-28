@@ -59,7 +59,7 @@ def _show_rom_load_error(display, failed_paths):
         _draw_text(display, 4, y, path, 0xFFE0)
         y += 12
     y += 4
-    _draw_text(display, 4, y, "Check /roms/ on the SD card.", 0xFFFF)
+    _draw_text(display, 4, y, "Check /roms/ on internal flash.", 0xFFFF)
     _draw_text(display, 4, y + 12, "Emulator startup halted.", 0xFFFF)
     if hasattr(display, "lcd_sync"):
         display.lcd_sync()
@@ -93,12 +93,17 @@ def main():
     # Step 2: Global config (needed for timeout, default_profile)
     global_cfg = load_config()
 
-    # Step 2a: REPL UART 制御 — boot.py が os.dupterm(uart) で有効にした UART REPL を
-    # enable_repl_uart=false の場合に無効化する。USB CDC REPL (slot 0) は維持される。
+    # Step 2a: REPL UART 制御 — ファームウェアの MICROPY_HW_ENABLE_UART_REPL=1 で
+    # GP0/GP1 に常時有効化されているネイティブ UART REPL を enable_repl_uart=false
+    # の場合に無効化する。dupterm はこのネイティブ REPL とは無関係(そもそも boot.py
+    # は os.dupterm(uart) を呼んでいない -- machine.UART(0, ...) 経由での登録は
+    # UART0 の排他 IRQ ハンドラの二重登録となり hard_assert() でクラッシュするため
+    # 禁止されている。boot.py 参照)なので、_uos.dupterm(None, 1) では無効化できない。
+    # 代わりに hd61700.set_uart_repl_enabled() で UART0 の IRQ (受信) だけを止める。
+    # ログ出力(print()/REPL の TX)には影響しない。
     if not get_bool(global_cfg, "emulator", "enable_repl_uart"):
         try:
-            import uos as _uos
-            _uos.dupterm(None, 1)
+            hd61700.set_uart_repl_enabled(False)
             print("REPL UART disabled.")
         except Exception as _e:
             print(f"REPL UART disable failed: {_e}")

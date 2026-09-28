@@ -28,7 +28,7 @@ HD61700 CPUを搭載したカシオのポケットコンピュータ PB-1000 を
 
 1.  **ハードウェア**: Raspberry Pi Pico 2 W(推奨。無印 Pico 2 でも動作しますが NTP 時刻同期のみ利用不可)、ILI9341 または ST7796 の LCD、(任意) SD カードモジュールを用意します。詳細は [Hardware Guide](doc/hardware_guide.md) を参照してください。
 2.  **ビルド**: カスタム MicroPython ファームウェアをコンパイルします。詳細は [Build Guide](doc/build_guide.md) を参照してください。
-3.  **書き込み**: 生成された `firmware_pb1000.uf2` を Pico 2 にコピーします。
+3.  **書き込み**: 生成された `firmware_pb1000_pico2w.uf2`（Pico 2 W）または `firmware_pb1000_pico2.uf2`（無印 Pico 2）を実機に合わせてコピーします。
 4.  **セットアップ**: `mp/` ディレクトリの Python ファイルと ROM イメージを `/roms/` または `/sd/` にアップロードします。詳細は [Usage Guide](doc/usage_guide.md) を参照してください。
 5.  **実行**: `main.py` が存在すれば、エミュレータは自動的に起動します。
 

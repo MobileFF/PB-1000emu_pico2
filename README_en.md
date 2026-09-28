@@ -28,7 +28,7 @@ This project emulates the Casio PB-1000 pocket computer, which is equipped with 
 
 1.  **Hardware**: Prepare a Raspberry Pi Pico 2 W (recommended -- a plain Pico 2 also works, minus NTP time sync), an ILI9341 or ST7796 LCD, and (optional) SD card module. See [Hardware Guide](doc/hardware_guide_en.md) for details.
 2.  **Build**: Compile the custom MicroPython firmware. See [Build Guide](doc/build_guide_en.md).
-3.  **Flash**: Copy the generated `firmware_pb1000.uf2` to your Pico 2.
+3.  **Flash**: Copy the generated `firmware_pb1000_pico2w.uf2` (Pico 2 W) or `firmware_pb1000_pico2.uf2` (plain Pico 2) to your Pico 2, matching your hardware.
 4.  **Setup**: Upload the Python files from `mp/` and your ROM images to `/roms/` or `/sd/`. See [Usage Guide](doc/usage_guide_en.md).
 5.  **Run**: The emulator starts automatically if `main.py` is present.
 

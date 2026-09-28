@@ -90,7 +90,7 @@ static void write_vram_pixel_byte(lcd_state_t *lcd, int chip, int x_local,
         g_dbg_write_zero_restamp_nochange++;
         if (g_dbg_write_zero_restamp_nochange <= 40 || (g_dbg_write_zero_restamp_nochange % 200) == 0)
           fprintf(stderr, "[ZWRITE #%u] pc=%04X chip=%d x_local=%d y_page=%d off=%d\n",
-                  g_dbg_write_zero_restamp_nochange, g_dbg_get_pc ? g_dbg_get_pc() : 0,
+                  (unsigned int)g_dbg_write_zero_restamp_nochange, g_dbg_get_pc ? g_dbg_get_pc() : 0,
                   chip, x_local, y_page, off);
         if (g_dbg_write_zero_restamp_nochange == 1 && g_dbg_dump_history) {
           fprintf(stderr, "--- call history at ZWRITE #41 ---\n");

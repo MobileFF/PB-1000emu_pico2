@@ -11,6 +11,8 @@
 #include "hardware/gpio.h"
 #include "hardware/pwm.h"
 #include "hardware/clocks.h"
+#include "hardware/uart.h"
+#include "hardware/irq.h"
 
 /* Static CPU state */
 static hd61700_state_t cpu_state;
@@ -1918,6 +1920,33 @@ static mp_obj_t mod_set_call_hook_enabled(mp_obj_t addr_obj, mp_obj_t enabled_ob
 }
 static MP_DEFINE_CONST_FUN_OBJ_2(mod_set_call_hook_enabled_obj, mod_set_call_hook_enabled);
 
+/* hd61700.set_uart_repl_enabled(enabled)
+ * Enable/disable the native UART0 REPL's RX interrupt (GP0/GP1 -- see
+ * MICROPY_HW_ENABLE_UART_REPL / PICO_DEFAULT_UART* in micropython.cmake).
+ *
+ * This only gates the NVIC enable bit for the UART's IRQ line, never
+ * touching its *exclusive* IRQ handler registration. main.c installs that
+ * handler once at boot via mp_uart_init(); re-registering a different
+ * handler for the same IRQ (e.g. by constructing machine.UART(0, ...), or
+ * calling mp_uart_init() a second time from a differently-built context)
+ * hits pico-sdk's hard_assert() in irq_set_exclusive_handler() and crashes
+ * the board -- see mp/boot.py's comment for why machine.UART(0, ...) must
+ * never be called while this firmware's native UART REPL is active.
+ * Disabling here only stops new RX bytes from being queued as REPL input;
+ * REPL/print() output (TX) is unconditionally written by
+ * mp_hal_stdout_tx_strn() in mphalport.c regardless of this setting. */
+static mp_obj_t mod_set_uart_repl_enabled(mp_obj_t enabled_obj) {
+#if MICROPY_HW_ENABLE_UART_REPL
+  bool enabled = mp_obj_is_true(enabled_obj);
+  uint irq_num = uart_get_index(uart_default) ? UART1_IRQ : UART0_IRQ;
+  irq_set_enabled(irq_num, enabled);
+#else
+  (void)enabled_obj;
+#endif
+  return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(mod_set_uart_repl_enabled_obj, mod_set_uart_repl_enabled);
+
 /* hd61700.set_mem_write_hook(addr, fn)              — watch a single address
  * hd61700.set_mem_write_hook(addr_start, addr_end, fn) — watch a range
  * fn(addr, data, bank) is called before the byte is written; returning True
@@ -2378,6 +2407,8 @@ static const mp_rom_map_elem_t hd61700_module_globals_table[] = {
      MP_ROM_PTR(&mod_clear_call_hook_obj)},
     {MP_ROM_QSTR(MP_QSTR_set_call_hook_enabled),
      MP_ROM_PTR(&mod_set_call_hook_enabled_obj)},
+    {MP_ROM_QSTR(MP_QSTR_set_uart_repl_enabled),
+     MP_ROM_PTR(&mod_set_uart_repl_enabled_obj)},
     {MP_ROM_QSTR(MP_QSTR_set_mem_write_hook),
      MP_ROM_PTR(&mod_set_mem_write_hook_obj)},
     {MP_ROM_QSTR(MP_QSTR_clear_mem_write_hook),

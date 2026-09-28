@@ -52,10 +52,17 @@ make submodules
 ### 4. Build with PB-1000 Module
 
 > [!IMPORTANT]
-> The real hardware is a **Raspberry Pi Pico 2 W**, so the board target must always be
-> **`RPI_PICO2_W`**. Building for plain `RPI_PICO2` uses different CFLAGS for TinyUSB's PIO-USB
-> host configuration, and firmware built that way will not work correctly (e.g. USB keyboard input)
-> even though it flashes without error.
+> The real hardware is supported in **two variants**: **Raspberry Pi Pico 2 W (`RPI_PICO2_W`)**
+> and **plain Raspberry Pi Pico 2 (`RPI_PICO2`)**. Pick the `BOARD=` value and output filename
+> (`firmware_pb1000_pico2w.uf2` / `firmware_pb1000_pico2.uf2`) matching your hardware; CFLAGS and
+> `USER_C_MODULES` are identical for both. The `RPI_PICO2` build excludes WiFi/Bluetooth code
+> (the CYW43 driver, etc.), so it boots correctly on hardware without a CYW43439 chip instead of
+> hanging at `cyw43_init()`.
+
+If you're building multiple Pico projects on the same machine, we strongly recommend giving each
+one its own MicroPython clone rather than sharing one. `ports/rp2/build-<BOARD>/` holds build
+caches (including `USER_C_MODULES` in `CMakeCache.txt`), and sharing a checkout across projects
+risks one project silently reusing a cache configured for another, pulling in the wrong C modules.
 
 Rather than pointing `USER_C_MODULES` directly at this repository's `src/micropython.cmake`, this
 project's standard workflow syncs the C sources to a separate build-copy directory first (e.g.
@@ -69,26 +76,31 @@ overwritten by the build).
 cp -r /path/to/PB-1000_emu_AG2/src/* ~/projects/hd61700/src/
 ```
 
-Then build with the CFLAGS required for TinyUSB PIO-USB host mode:
+Then build with the CFLAGS required for TinyUSB's host mode:
 
 **Example (Linux/WSL2):**
 ```bash
 cd ports/rp2
 export USER_C_MODULES="/home/<user>/projects/hd61700/src/micropython.cmake"
-export CFLAGS='-Wno-error=unused-parameter -Wno-error=unused-variable
-  -DCFG_TUSB_MCU=OPT_MCU_RP2350
-  -DCFG_TUSB_OS=OPT_OS_PICO
-  -DCFG_TUH_ENABLED=1
-  -DCFG_TUD_ENABLED=0
-  -DCFG_TUSB_RHPORT1_MODE=(OPT_MODE_HOST|0x0100)
-  -DMICROPY_HW_USB_CDC=0
-  -DMICROPY_HW_USB_MSC=0
-  -DMICROPY_HW_USB_HID=0
-  -DMICROPY_PY_PIO_USB=1
-  -I/home/<user>/projects/hd61700/src'
+export CFLAGS="-Wno-error=unused-parameter -Wno-error=unused-variable -DCFG_TUH_ENABLED=1 -DCFG_TUD_ENABLED=0 -DMICROPY_HW_USB_CDC=0 -DMICROPY_HW_USB_MSC=0 -DMICROPY_HW_USB_HID=0 -DMICROPY_PY_PIO_USB=1 -I/home/<user>/projects/hd61700/src"
 make BOARD=RPI_PICO2_W USER_C_MODULES="$USER_C_MODULES" clean
 make BOARD=RPI_PICO2_W USER_C_MODULES="$USER_C_MODULES" WERROR=0 -j$(nproc)
+# For the plain Pico 2, just swap in BOARD=RPI_PICO2
 ```
+
+Keep `CFLAGS` on a single line as shown above. A multi-line value (with embedded newlines) breaks
+cmake's initial compiler-check Makefile generation on a completely fresh build (no existing
+`build-<BOARD>/`), failing with a `missing separator` error.
+
+**Do not include `-DCFG_TUSB_MCU=...` or `-DCFG_TUSB_RHPORT1_MODE=(OPT_MODE_HOST|0x0100)` in
+CFLAGS.** These are leftovers from when this project used a PIO-USB host implementation; the
+current "Native Host mode" (`src/usb_host_core.c`, using RHPORT0) doesn't need them. Passing them
+on a completely fresh cmake configure collides with a macro MicroPython itself defines for the
+`firmware` target, and `-Werror` then fails the build on files like `py/asmarm.c` with
+`"CFG_TUSB_MCU" redefined [-Werror]` (easy to miss if you're reusing an existing build cache, since
+it only surfaces on a fresh configure). `src/usb_host/tusb_config.h` already provides its own
+`#ifndef`-guarded fallback values for `usb_host_core.c`, so dropping these from CFLAGS doesn't
+affect USB host functionality.
 
 **Do not add `-DDEBUG_SKIP_CORE_INIT` to CFLAGS.** It bypasses the
 `USB_HOST_SKIP_INIT` cmake option in `src/micropython.cmake` (default OFF,
@@ -96,19 +108,26 @@ i.e. real USB host init runs by default), forcing `usb_host.init()` to always
 skip the actual `tuh_init()` call. The build and boot still succeed, so this
 is easy to miss, but no USB keyboard will ever be recognized.
 
+**CMake caches `CMAKE_C_FLAGS`.** Changing CFLAGS while reusing the same `build-<BOARD>/`
+directory has no effect — the old cached value keeps being used. Whenever you change CFLAGS,
+`rm -rf build-<BOARD>` first and rebuild.
+
 Native Windows builds are not recommended given the CFLAGS above — use WSL2 with the commands shown.
 
-The output firmware will be located at `build-RPI_PICO2_W/firmware.uf2`. When
-copying it out for flashing, rename it to `firmware_pb1000.uf2` so it's not
-confused with builds from other parallel projects.
+The output firmware will be located at `build-RPI_PICO2_W/firmware.uf2` (or
+`build-RPI_PICO2/firmware.uf2` for the plain Pico 2). When copying it out for flashing, rename it
+to `firmware_pb1000_pico2w.uf2` (or `firmware_pb1000_pico2.uf2`) so it's not confused with builds
+from other parallel projects.
 
-> See `/home/flex/projects/micropython/ports/rp2/bldfrm.sh` for this project's actual (environment-specific) build script.
+> See `/home/flex/projects/micropython.pb1000/ports/rp2/bldfrm.sh` (this project's own dedicated
+> MicroPython checkout) for this project's actual (environment-specific) build script.
 
 ## Flashing
 
-1.  **Enter BOOTSEL mode**: Hold the BOOTSEL button on your Pico 2 while connecting it to your PC via USB.
+1.  **Enter BOOTSEL mode**: Hold the BOOTSEL button on your Pico 2 (W) while connecting it to your PC via USB.
 2.  **Mount**: The Pico 2 will appear as a USB mass storage device named `RPI-RP2`.
-3.  **Copy**: Drag and drop `firmware_pb1000.uf2` onto the `RPI-RP2` drive. The Pico 2 will reboot automatically.
+3.  **Copy**: Drag and drop `firmware_pb1000_pico2w.uf2` (Pico 2 W) or `firmware_pb1000_pico2.uf2`
+    (plain Pico 2) onto the `RPI-RP2` drive, matching your hardware. The Pico 2 will reboot automatically.
 
 ## Post-Build Setup
 
