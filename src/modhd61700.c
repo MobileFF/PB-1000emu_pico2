@@ -13,6 +13,7 @@
 #include "hardware/clocks.h"
 #include "hardware/uart.h"
 #include "hardware/irq.h"
+#include "usb_host_core.h"
 
 /* Static CPU state */
 static hd61700_state_t cpu_state;
@@ -42,9 +43,28 @@ static uint8_t ram_buf[0x2000];     // 8KB RAM (0x6000-0x7FFF)
  * in set_bank_present()/set_has_exp_ram(), so a failed allocation can never
  * leave has_bank[]=true paired with a NULL buffer. */
 #define BANK_BUF_SIZE 0x8000
-static uint8_t *bank1_buf = NULL;
-static uint8_t *bank2_buf = NULL;
-static uint8_t *bank3_buf = NULL;
+/* Registered as a GC root pointer array, NOT a plain `static uint8_t *`.
+ * A plain static global holding a pointer into the GC heap is invisible to
+ * this port's gc_collect() (ports/rp2/main.c's gc_collect() only scans the
+ * stack/registers via gc_helper_collect_regs_and_stack(), not .bss/.data),
+ * so a block reachable only through such a pointer can be swept and handed
+ * out to an unrelated Python object as soon as nothing else marks it --
+ * corrupting both the "bank RAM" and whatever object now aliases it. This
+ * was a real bug (see [[project_bank_dynamic_alloc]]): pre-allocating a
+ * bank buffer early (before anything wraps it in a Python-visible object)
+ * let it get swept and reused during later boot, manifesting as unstable
+ * TypeError/NotImplementedError symptoms far from the actual cause.
+ * MP_REGISTER_ROOT_POINTER() moves the storage into mp_state_ctx.vm (see
+ * py/mpstate.h, py/obj.h), which gc_collect() DOES scan, so accessed via
+ * MP_STATE_PORT()/bank_buf_get() below, never as a plain C global again. */
+MP_REGISTER_ROOT_POINTER(void *hd61700_bank_buf[3]);
+
+/* Read the given bank's buffer pointer (1..3) without allocating. Returns
+ * NULL if that bank hasn't been allocated yet. */
+static inline uint8_t *bank_buf_get(int bank /* 1..3 */) {
+  if (bank < 1 || bank > 3) return NULL;
+  return (uint8_t *)MP_STATE_PORT(hd61700_bank_buf[bank - 1]);
+}
 
 /* Lazily allocate the given bank's buffer (1..3) from the GC heap if it
  * doesn't exist yet. Returns the (now guaranteed non-NULL) pointer.
@@ -54,15 +74,13 @@ static uint8_t *bank3_buf = NULL;
  * before that caller has set has_bank[]=true, so has_bank[]/buffer state
  * can never end up inconsistent even on allocation failure. */
 static uint8_t *ensure_bank_buf(int bank /* 1..3 */) {
-  uint8_t **slot;
-  if (bank == 1) slot = &bank1_buf;
-  else if (bank == 2) slot = &bank2_buf;
-  else if (bank == 3) slot = &bank3_buf;
-  else return NULL;
-  if (*slot == NULL) {
-    *slot = (uint8_t *)m_malloc(BANK_BUF_SIZE);
+  if (bank < 1 || bank > 3) return NULL;
+  uint8_t *buf = bank_buf_get(bank);
+  if (buf == NULL) {
+    buf = (uint8_t *)m_malloc(BANK_BUF_SIZE);
+    MP_STATE_PORT(hd61700_bank_buf[bank - 1]) = buf;
   }
-  return *slot;
+  return buf;
 }
 static uint8_t ext_work_buf[0x100]; // 256B Extension API work area (0x5F00-0x5FFF)
 
@@ -92,7 +110,7 @@ static void _dma_execute(void) {
         dma_status = 0x01;
         return;
     }
-    uint8_t * const bufs[3] = {bank1_buf, bank2_buf, bank3_buf};
+    uint8_t * const bufs[3] = {bank_buf_get(1), bank_buf_get(2), bank_buf_get(3)};
     uint8_t *src = bufs[dma_src_bank - 1];
     if (src == NULL) {
         dma_status = 0x01;
@@ -993,8 +1011,8 @@ static uint8_t c_mem_direct_read(void *ctx, uint8_t segment, uint32_t offset) {
      * (or any other path) before the buffer is actually allocated; without
      * this check that would be a NULL-pointer dereference on this hot path
      * (called on every emulated memory access). See the 2026-08-23 postmortem
-     * comment above bank1_buf's declaration. */
-    uint8_t * const bank_bufs[3] = {bank1_buf, bank2_buf, bank3_buf};
+     * comment above the hd61700_bank_buf root-pointer declaration. */
+    uint8_t * const bank_bufs[3] = {bank_buf_get(1), bank_buf_get(2), bank_buf_get(3)};
     if (bank >= 1 && bank <= 3 && has_bank[bank] && bank_bufs[bank - 1] != NULL)
       return bank_bufs[bank - 1][off];
     return 0xFF;
@@ -1088,7 +1106,7 @@ static void c_mem_direct_write(void *ctx, uint8_t segment, uint32_t offset,
   /* Banks 1-3: RAM Write (0x8000-0xFFFF) */
   else if (offset >= 0x8000 && bank >= 1 && bank <= 3) {
     uint32_t off = offset - 0x8000;
-    uint8_t * const bank_bufs[3] = {bank1_buf, bank2_buf, bank3_buf};
+    uint8_t * const bank_bufs[3] = {bank_buf_get(1), bank_buf_get(2), bank_buf_get(3)};
     /* See c_mem_direct_read()'s matching comment: bank_bufs[]!=NULL must be
      * checked alongside has_bank[], not instead of it. */
     if (off < 0x8000 && has_bank[bank] && bank_bufs[bank - 1] != NULL) {
@@ -1332,7 +1350,7 @@ static mp_obj_t mod_reset(size_t n_args, const mp_obj_t *args) {
 
   /* Connect direct memory pointers for high-performance path */
   {
-    uint8_t * const bank_bufs[3] = {bank1_buf, bank2_buf, bank3_buf};
+    uint8_t * const bank_bufs[3] = {bank_buf_get(1), bank_buf_get(2), bank_buf_get(3)};
     cpu_state.rom0_ptr    = rom0_buf;
     cpu_state.ram_ptr     = ram_buf;
     cpu_state.bank_ptr[0] = rom1_buf;
@@ -1737,19 +1755,17 @@ static MP_DEFINE_CONST_FUN_OBJ_0(mod_get_ram_view_obj, mod_get_ram_view);
  * Returns None if bank 1 hasn't been allocated (Python should only call this
  * for banks it just enabled via set_has_exp_ram/set_bank_present). */
 static mp_obj_t mod_get_exp_ram_view(void) {
-  if (bank1_buf == NULL) return mp_const_none;
-  return mp_obj_new_bytearray_by_ref(BANK_BUF_SIZE, bank1_buf);
+  uint8_t *buf = bank_buf_get(1);
+  if (buf == NULL) return mp_const_none;
+  return mp_obj_new_bytearray_by_ref(BANK_BUF_SIZE, buf);
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(mod_get_exp_ram_view_obj, mod_get_exp_ram_view);
 
 /* hd61700.get_bank_view(bank)  bank: 1..3. Returns None if unallocated. */
 static mp_obj_t mod_get_bank_view(mp_obj_t bank_obj) {
   int bank = mp_obj_get_int(bank_obj);
-  uint8_t *ptr = NULL;
-  if      (bank == 1) { ptr = bank1_buf; }
-  else if (bank == 2) { ptr = bank2_buf; }
-  else if (bank == 3) { ptr = bank3_buf; }
-  else return mp_const_none;
+  uint8_t *ptr = bank_buf_get(bank);
+  if (bank < 1 || bank > 3) return mp_const_none;
   if (ptr == NULL) return mp_const_none;
   return mp_obj_new_bytearray_by_ref(BANK_BUF_SIZE, ptr);
 }
@@ -1799,7 +1815,7 @@ static MP_DEFINE_CONST_FUN_OBJ_0(mod_lcd_clear_read_queue_obj, mod_lcd_clear_rea
  * function before has_bank[1] is touched -- so a failed allocation can never
  * leave has_bank[1]=true paired with a NULL buffer (the exact inconsistency
  * that made the unchecked c_mem_direct_read/write hot path unsafe the first
- * time this feature was attempted; see bank1_buf's declaration comment). */
+ * time this feature was attempted; see the hd61700_bank_buf root-pointer declaration comment above). */
 static mp_obj_t mod_set_has_exp_ram(mp_obj_t enable_obj) {
   bool enable = mp_obj_is_true(enable_obj);
   uint8_t *buf = enable ? ensure_bank_buf(1) : NULL;
@@ -2147,7 +2163,14 @@ static mp_obj_t mod_keyboard_config_base(mp_obj_t list_obj) {
 static MP_DEFINE_CONST_FUN_OBJ_1(mod_keyboard_config_base_obj, mod_keyboard_config_base);
 
 // module.get_last_key() -> int (-1 if none, read-and-clear)
+// Services the USB host first (usb_host_core_task(): no-op in native builds,
+// where the background timer does this; required in PIO-USB builds, where
+// it doesn't) -- every keyboard-polling loop in mp/ (menus included, not
+// just main.py's own interactive loop) calls this one function, so putting
+// the service call here instead of in each loop individually keeps all of
+// them serviced uniformly.
 static mp_obj_t mod_get_last_key(void) {
+  usb_host_core_task();
   int16_t sc = c_kb_last_pressed_scancode;
   c_kb_last_pressed_scancode = -1;
   return MP_OBJ_NEW_SMALL_INT(sc);

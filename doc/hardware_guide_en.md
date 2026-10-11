@@ -7,17 +7,29 @@ This guide describes the hardware components and wiring required to build the PB
 - **Microcontroller**: Raspberry Pi Pico 2 (RP2350) or Pico (RP2040). Pico 2 is recommended for better performance.
 - **Display**: ILI9341 320x240 or ST7796 480x320 TFT LCD (SPI interface), selectable via `[display] driver` in `pb1000.ini`. Modules with integrated touch (XPT2046) are supported.
 - **Storage**: Micro SD card module (SPI interface).
-- **USB Host**: USB OTG (On-The-Go) adapter (Micro-USB to USB-A Female) for connecting a keyboard.
-- **USB-to-serial adapter (required)**: for reaching the MicroPython REPL (wired to GP0/GP1). See "UART and Serial" below.
+- **USB keyboard connection (pick one)**:
+  - **PIO-USB (default)**: wire the USB keyboard directly to GP4/GP5 (see "8. USB Keyboard"
+    below). This frees the Pico's own USB-C port to run as a CDC device, so `mpremote` can
+    connect directly over it.
+  - **Native USB host (`USE_PIO_USB=OFF` build)**: USB OTG (On-The-Go) adapter (Micro-USB to
+    USB-A Female) for connecting a keyboard to the Pico's own USB port. In this configuration
+    the Pico's USB port is keyboard-only, so a separate USB-to-serial adapter is needed for the
+    REPL.
+- **USB-to-serial adapter (required only for the native USB host option)**: for reaching the
+  MicroPython REPL (wired to GP0/GP1). See "UART and Serial" below. Not needed with the default
+  PIO-USB build, which exposes the REPL as a CDC device on the USB-C port instead.
 - **Power**: USB power supply (5V via Micro-USB port).
 - **Other**: Breadboard, jumper wires, and (optional) 100-ohm resistor for backlight PWM.
+  The PIO-USB option additionally needs a USB connector and two 22-ohm resistors (see "8. USB
+  Keyboard" below).
 
 > [!IMPORTANT]
-> This project's firmware builds the Pico's USB port as **USB host only** (for the keyboard,
-> `CFG_TUD_ENABLED=0` / `MICROPY_HW_USB_CDC=0`), so you **cannot** reach the MicroPython REPL
-> (`mpremote`, etc.) over the Pico's own USB port. The REPL needed for file transfer, config
-> changes, and debugging is reachable **only through the UART wired to GP0/GP1**. See the
-> "REPL (UART0)" entry under "UART and Serial" below for wiring details.
+> In the default build (`USE_PIO_USB=ON`), the USB keyboard host moves to PIO-USB on GP4/GP5,
+> and the Pico's own USB-C port runs as a CDC device. Connect with a single USB-C cable using
+> `mpremote connect /dev/ttyACM0` (`COMx` on Windows) for the REPL and file transfer. If built
+> with `USE_PIO_USB=OFF`, the Pico's USB port becomes **host-only** and you **cannot** reach the
+> MicroPython REPL over it; the REPL is then reachable **only through the UART wired to GP0/GP1**.
+> See the "REPL (UART0)" entry under "UART and Serial" below for wiring details.
 
 ## Pin Assignments
 
@@ -70,14 +82,11 @@ selected via `[display] driver` (`ILI9341` or `ST7796`) in `pb1000.ini`.
 
 | Device | Pico Pin | Function | Note |
 | :--- | :--- | :--- | :--- |
-| **REPL (UART0)** | **GP0 (TX), GP1 (RX)** | **MicroPython REPL / file transfer (`mpremote`)** | **Required.** The Pico's USB port is host-only (keyboard), so a USB-to-serial (3.3V TTL) adapter wired here is the *only* way to reach the REPL. Connect from the PC with e.g. `mpremote connect /dev/ttyUSB0` (`COMx` on Windows) |
+| **REPL (UART0)** | **GP0 (TX), GP1 (RX)** | **MicroPython REPL / file transfer (`mpremote`)** | Not needed in the default build (`USE_PIO_USB=ON`) — use the USB-C CDC port instead. **Required** with `USE_PIO_USB=OFF` (the Pico's USB port is then keyboard-only). If wired, use a USB-to-serial (3.3V TTL) adapter and connect from the PC with e.g. `mpremote connect /dev/ttyUSB0` (`COMx` on Windows) |
+| **USB keyboard host (PIO-USB)** | **GP4 (D+), GP5 (D-)** | **USB keyboard connection** | Used in the default build (`USE_PIO_USB=ON`). See "8. USB Keyboard" below for wiring |
 | PIO UART | GP6 (TX), GP13 (RX) (default) | Virtual RS-232C | Optional. Both pins and baud rate (default 9600 bps) are changeable via `[rs232c] tx_pin`/`rx_pin`/`baudrate` in `pb1000.ini` -- any free pins not used by another feature work |
 
-> [!NOTE]
-> GP4 (TX) / GP5 (RX) (UART1, the former "console"/UART keyboard input) was removed from the
-> firmware on 2026-08-22. Wiring anything there currently does nothing.
-
-> **Wiring**: connect the USB-to-serial adapter's TXD to the Pico's **GP1 (RX)**, its RXD to **GP0 (TX)**, and tie the grounds together (note the TX↔RX crossover).
+> **Wiring (native USB host option, UART-based REPL)**: connect the USB-to-serial adapter's TXD to the Pico's **GP1 (RX)**, its RXD to **GP0 (TX)**, and tie the grounds together (note the TX↔RX crossover).
 
 ### 5. Beep (PWM)
 
@@ -106,22 +115,22 @@ For details of a 3-bit connection circuit using a 74HC148 priority encoder, see 
 
 **GPIO availability with the joystick enabled**
 
-With the joystick using all of GP18–21 and GP26–27, **GP4, GP5, and GP28** are free for external
-devices (GP28 also usable as ADC2). Other pins can be freed by disabling the corresponding
-feature below.
+With the joystick using all of GP18–21 and GP26–27, only **GP28** is free for external devices in
+the default build (`USE_PIO_USB=ON`); with `USE_PIO_USB=OFF`, **GP4, GP5, and GP28** are free
+(GP28 also usable as ADC2). Other pins can be freed by disabling the corresponding feature below.
 
 | GPIO | Used For | Freed When |
 | :--- | :--- | :--- |
-| GP0, GP1 | **REPL (UART0)** | **Never — always required.** The USB port is host-only, so this is the sole REPL path |
+| GP0, GP1 | **REPL (UART0)** | Freeable in the default build (CDC over USB-C substitutes for it). **Never freeable with `USE_PIO_USB=OFF`** |
 | GP2, GP3 | I2C1 (reserved, PR6 not yet implemented) | Currently unused — no I2C-based module ships in `mp/ext/`. Reserved for adding an I2C extension (e.g. `sample/mp/ext/dht20.py`) to `mp/ext/` in the future |
-| GP4, GP5 | (unused -- the former UART1 console/UART keyboard input was removed 2026-08-22) | **Always available** |
+| GP4, GP5 | **USB keyboard host (PIO-USB)**. Used in the default build (`USE_PIO_USB=ON`) | Always available only with `USE_PIO_USB=OFF` (native USB host option) |
 | GP6, GP13 | PIO UART (RS-232C, default) | RS-232C not used, or reassigned to other pins via `[rs232c] tx_pin`/`rx_pin` in `pb1000.ini` |
 | GP14 | BEEP PWM | `pb1000.ini`: `[beep] enable=false` |
 | **GP28** | **Free (ADC2)** | **Always available** |
 
 ### 7. External SPI Device (using GP28 as CS)
 
-The SPI1 bus is already shared by the LCD, SD card, and touch panel, each with its own CS pin; additional devices can be added the same way. In the standard configuration including the joystick, **GP28** is recommended as the CS pin for an additional device (GP4/GP5 are also free, but GP28's ADC2 capability makes it the more flexible default).
+The SPI1 bus is already shared by the LCD, SD card, and touch panel, each with its own CS pin; additional devices can be added the same way. In the standard configuration including the joystick, **GP28** is recommended as the CS pin for an additional device (with `USE_PIO_USB=OFF`, GP4/GP5 are also free, but GP28's ADC2 capability makes it the more flexible default).
 
 | Signal | Pico Pin | Note |
 | :--- | :--- | :--- |
@@ -156,7 +165,38 @@ def _callback(system, cs):
 
 ### 8. USB Keyboard
 
-- Connect the USB keyboard to the Pico's Micro-USB port via a **USB OTG adapter**.
+Which wiring applies depends on the `USE_PIO_USB` build option (see [build_guide.md](build_guide.md)).
+
+**PIO-USB (default, `USE_PIO_USB=ON`)**
+
+Wire the USB keyboard directly to GP4/GP5. No USB OTG adapter is needed, but you do need a
+USB-A connector (or a cut USB cable) and two resistors.
+
+| Signal | Pico Pin | Note |
+| :--- | :--- | :--- |
+| D+ | GP4 | Through a 22-ohm series resistor |
+| D- | GP5 | Through a 22-ohm series resistor |
+| VBUS | 5V (VBUS) | Powers the keyboard |
+| GND | GND | |
+
+- **No external pull-up or pull-down resistor is needed** — RP2350's internal pull-down alone is
+  sufficient. Adding an external pull-down (e.g. 15kΩ) has been observed to cause unstable
+  enumeration failures where SETUP (control transfers) succeed but longer data transfers fail
+  CRC.
+- ESD protection diodes (bidirectional, D+/D- to GND, e.g. ESD5302F) are optional but recommended
+  for a real build.
+- **Wiring quality matters**: a breadboard + jumper-wire prototype has been observed to pass
+  SETUP but fail CRC on subsequent data transfers, breaking enumeration. Use a soldered
+  perfboard or similar solid construction.
+- **Known limitation**: some USB keyboards are not recognized over this path (a compatibility
+  issue; root cause not identified). Try a different keyboard if yours isn't recognized.
+
+**Native USB host (`USE_PIO_USB=OFF` build)**
+
+- Connect the USB keyboard to the Pico's own USB port via a **USB OTG adapter**. In this
+  configuration the Pico's USB port is keyboard-only, so the REPL requires the GP0/GP1 UART
+  wiring (see "4. UART and Serial" above).
+
 
 ### 9. HDMI Mirror Output (Optional, Second Pico 2)
 

@@ -232,6 +232,32 @@ PIO ソフト UART（デフォルト GP6 TX / GP13 RX）で CASIO PB-1000 の RS
   保存後 MCU リブートで反映されます。
 - ピンアサインの変更は `mp/main_input_joystick.py` の `JoystickInputManager.DEFAULT_PIN_MAP` を編集。
 
+### キーマッピングの指定方法
+
+`[joystick]` セクションの `key_up`/`key_down`/`key_left`/`key_right`/`key_fire1`/`key_fire2` には、
+以下のいずれかを指定できます。
+
+- **名前**: `exe`, `ans`, `shift`, `up`, `down`, `left`, `right`, `bs`, `ins`, `brk`,
+  `newall`, `menu`, `cal`, `cls`, `kana`, `space`, `caps`, `eng`, `stop`, `func`,
+  `contr.`, `in`, `out`, `calc`, `memo`, `memo in`, `lckey`, `f1`-`f4`, `tk1`-`tk16`,
+  `a`-`z`, `0`-`9`（PB-1000 の特殊キーをほぼ全てカバーしています）
+- **座標直接指定**: `row,col`（例: `10,4`）
+
+### 2ボタン同時押しへの割り当て（`[joystick_combo]`）
+
+2つ以上のボタンを同時に押した時だけ発火する専用のキー割り当てを定義できます。
+
+```ini
+[joystick_combo]
+fire1+fire2 = exe   ; FIRE1+FIRE2 同時押し = EXE
+up+fire1    = brk   ; 上+FIRE1 同時押し = BREAK
+```
+
+- ボタン名は `up`, `down`, `left`, `right`, `fire1`, `fire2` を `+` で連結して指定します。
+- より多くのボタンを含む組み合わせが優先されます（例: `up+fire1+fire2` を定義している場合、
+  3つ同時押しではそちらが優先され、`up+fire1` 単体の組み合わせは発火しません）。
+- 組み合わせが成立している間、該当ボタン個別のキー割り当て（`key_fire1` 等）は発火しません。
+
 ---
 
 ## 8. ステート管理

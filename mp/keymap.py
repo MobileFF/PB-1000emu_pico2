@@ -175,6 +175,18 @@ KEY_MAP.update({
     'tk13': ( 7,  9), 'tk14': ( 8,  9), 'tk15': ( 9,  9), 'tk16': (10,  9),
 })
 
+# Multi-character named keys (e.g. "bs", "exe", "menu") -- what pb1000.ini's
+# [joystick] key_* options document as valid names. KEY_MAP above only ever
+# covers single-character labels (a-z, 0-9, punctuation), so a name like
+# "bs" was previously unresolvable by _parse_joystick_key() in
+# main_input_joystick.py and silently fell back to the default key.
+NAMED_KEYS = {v[1].lower(): v[0] for v in USB_MAP.values() if len(v[1]) > 1}
+NAMED_KEYS.update({label.lower(): coords[0]
+                    for (sc, mod), (coords, label) in ADV_MAP.items()
+                    if len(label) > 1 and len(coords) == 1})
+# pb1000.ini documents "brk", but the actual USB_MAP label is "BREAK".
+NAMED_KEYS.setdefault('brk', NAMED_KEYS.get('break'))
+
 
 # ── Public helpers ────────────────────────────────────────────────────────────
 

@@ -76,30 +76,44 @@ MicroPython チェックアウトを共有すると、あるプロジェクト�
 cp -r /path/to/PB-1000_emu_AG2/src/* ~/projects/hd61700/src/
 ```
 
-TinyUSB のホストモードに必要な CFLAGS を設定してビルドします。
-
 **例 (Linux/WSL2):**
 ```bash
 cd ports/rp2
 export USER_C_MODULES="/home/<user>/projects/hd61700/src/micropython.cmake"
-export CFLAGS="-Wno-error=unused-parameter -Wno-error=unused-variable -DCFG_TUH_ENABLED=1 -DCFG_TUD_ENABLED=0 -DMICROPY_HW_USB_CDC=0 -DMICROPY_HW_USB_MSC=0 -DMICROPY_HW_USB_HID=0 -DMICROPY_PY_PIO_USB=1 -I/home/<user>/projects/hd61700/src"
+export CFLAGS="-Wno-error=unused-parameter -Wno-error=unused-variable -I/home/<user>/projects/hd61700/src"
 make BOARD=RPI_PICO2_W USER_C_MODULES="$USER_C_MODULES" clean
 make BOARD=RPI_PICO2_W USER_C_MODULES="$USER_C_MODULES" WERROR=0 -j$(nproc)
 # 無印 Pico 2 向けは BOARD=RPI_PICO2 に差し替えるだけ
+```
+
+これで **PIO-USB ホストモード（GP4/GP5 でキーボード接続、USB-C ポートは CDC デバイス）**が
+デフォルトでビルドされます（`src/micropython.cmake` の `option(USE_PIO_USB ... ON)`）。
+配線は [Hardware Guide](hardware_guide.md) の「8. USB キーボード」を参照してください。
+
+**従来方式（ネイティブ USB ホスト専用、USB-C ポートはキーボード専用）でビルドする場合**:
+
+```bash
+# 新規の build-<BOARD>/ を作る場合 (CMAKE_ARGS で渡せる)
+make BOARD=RPI_PICO2_W USER_C_MODULES="$USER_C_MODULES" CMAKE_ARGS="-DUSE_PIO_USB=OFF" WERROR=0 -j$(nproc)
+
+# 既存の build-<BOARD>/ がある場合は、CMAKE_ARGS は無視される（cmake の再設定は
+# build-<BOARD>/Makefile が無いときだけ走る）ので、先に cmake で明示的に再設定する
+cmake -S . -B build-RPI_PICO2_W -DUSE_PIO_USB=OFF
+make BOARD=RPI_PICO2_W USER_C_MODULES="$USER_C_MODULES" WERROR=0 -j$(nproc)
 ```
 
 `CFLAGS` は上記のように必ず1行にすること。複数行（埋め込み改行入り）で `export` すると、
 `build-<BOARD>/` が存在しない完全新規のビルド（cmake の初回コンパイラチェック）で
 Makefile 生成が改行によって壊れ、`missing separator` エラーで構成自体が失敗します。
 
-**注意:** `-DCFG_TUSB_MCU=...` や `-DCFG_TUSB_RHPORT1_MODE=(OPT_MODE_HOST|0x0100)` を
-CFLAGS に含めないこと。これは以前 PIO-USB ホスト方式だった頃の名残で、現在の USB ホスト実装
-（`src/usb_host_core.c`、RHPORT0 を使うネイティブホストモード）では不要です。完全新規の
-cmake 構成でこれを渡すと、MicroPython 本体が `firmware` ターゲット向けに別途定義している
-同名マクロと衝突し、`-Werror` により `py/asmarm.c` 等が `"CFG_TUSB_MCU" redefined [-Werror]`
-のようなエラーでビルド失敗します（既存のビルドキャッシュを使い回している間は表面化しないため
-気付きにくい）。`usb_host_core.c` 用の値は `src/usb_host/tusb_config.h` が `#ifndef` 付きの
-フォールバックとして独自に持っているため、外しても USB ホスト機能に影響しません。
+**注意:** `-DCFG_TUSB_MCU=...` や `-DCFG_TUSB_RHPORT1_MODE=(OPT_MODE_HOST|0x0100)`、
+`-DCFG_TUH_ENABLED=1`、`-DCFG_TUD_ENABLED=0` 等の TinyUSB 関連マクロを CFLAGS に含めないこと。
+これらは全て `src/micropython.cmake` が `USE_PIO_USB` オプションに応じて `add_compile_definitions()`
+で設定するため、CFLAGS 側で重複して渡す必要はなく、渡すと完全新規の cmake 構成で
+MicroPython 本体が `firmware` ターゲット向けに別途定義している同名マクロと衝突し、
+`-Werror` により `py/asmarm.c` 等が `"CFG_TUSB_MCU" redefined [-Werror]` のようなエラーで
+ビルド失敗することがあります（既存のビルドキャッシュを使い回している間は表面化しないため
+気付きにくい）。
 
 **注意:** `-DDEBUG_SKIP_CORE_INIT` を CFLAGS に含めないこと。`src/micropython.cmake`
 の `USB_HOST_SKIP_INIT` オプション（デフォルト OFF）を迂回してしまい、実際の
@@ -114,8 +128,12 @@ Windows ネイティブビルドは上記 CFLAGS の関係で非推奨です。W
 
 出力されるファームウェアは `build-RPI_PICO2_W/firmware.uf2`（無印 Pico 2 なら
 `build-RPI_PICO2/firmware.uf2`）に配置されます。これをそのまま `RPI-RP2` ドライブへコピーするか、
-他プロジェクトと見分けがつくよう `firmware/firmware_pb1000_pico2w.uf2`（無印 Pico 2 なら
-`firmware/firmware_pb1000_pico2.uf2`）という名前でコピーしておきます。
+他プロジェクトと見分けがつき、かつ `USE_PIO_USB` の値も分かるよう、以下の名前でコピーしておきます。
+
+| ボード | `USE_PIO_USB=ON`（デフォルト） | `USE_PIO_USB=OFF`（従来方式） |
+| :--- | :--- | :--- |
+| Pico 2 W | `firmware/firmware_pb1000_pico2w.uf2` | `firmware/firmware_pb1000_pico2w_native_usb.uf2` |
+| 無印 Pico 2 | `firmware/firmware_pb1000_pico2.uf2` | `firmware/firmware_pb1000_pico2_native_usb.uf2` |
 
 > 実際のビルドスクリプトの例は `/home/flex/projects/micropython.pb1000/ports/rp2/bldfrm.sh`
 >（このプロジェクト専用のチェックアウト、このプロジェクト固有の作業環境向け）を参照してください。
@@ -124,21 +142,23 @@ Windows ネイティブビルドは上記 CFLAGS の関係で非推奨です。W
 
 1.  **BOOTSEL モードへの移行**: Pico 2 (W) の BOOTSEL ボタンを押しながら、USB で PC に接続します。
 2.  **マウント**: Pico 2 が `RPI-RP2` という名前の USB マスストレージとして認識されます。
-3.  **コピー**: 実機に応じて `firmware_pb1000_pico2w.uf2`（Pico 2 W）または `firmware_pb1000_pico2.uf2`
-    （無印 Pico 2）を `RPI-RP2` ドライブにドラッグ＆ドロップします。コピー後に Pico 2 は
-    自動的に再起動します。
+3.  **コピー**: 実機とビルド方式に応じて、上表のファイル名の `.uf2` を `RPI-RP2` ドライブに
+    ドラッグ＆ドロップします。コピー後に Pico 2 は自動的に再起動します。
 
 ## ビルド後のセットアップ
 
 ファームウェアの書き込みが終わったら、Python のロジックと ROM ファイルをアップロードする必要があります。
 
 > [!IMPORTANT]
-> このファームウェアは Pico の USB ポートを **USB ホスト専用**でビルドしているため（`CFG_TUD_ENABLED=0`）、
-> `mpremote` は Pico 本体の USB ポート経由では接続できません。**GP0/GP1 に配線した UART REPL** に
-> USB-シリアル変換アダプタを接続し、そのシリアルポート（例: `/dev/ttyUSB0`、Windows は `COMx`）を
-> 明示的に指定して接続してください（配線は [Hardware Guide](hardware_guide.md) の「UART およびシリアル」参照）。
-> 下記コマンド例の `mpremote` はすべて `mpremote connect <ポート>` を先頭に読み替えるか、
-> 環境変数 `MPREMOTE_TTY=/dev/ttyUSB0` 等を設定してから実行してください。
+> デフォルト（`USE_PIO_USB=ON`）でビルドした場合、Pico 本体の USB-C ポートは CDC デバイスとして
+> 動作するため、`mpremote connect /dev/ttyACM0`（Windows は `COMx`）のように USB-C ケーブル1本で
+> 接続できます。`USE_PIO_USB=OFF` でビルドした場合は、Pico の USB ポートが **USB ホスト専用**に
+> なるため（`CFG_TUD_ENABLED=0`）、`mpremote` は Pico 本体の USB ポート経由では接続できません。
+> その場合は **GP0/GP1 に配線した UART REPL** に USB-シリアル変換アダプタを接続し、そのシリアル
+> ポート（例: `/dev/ttyUSB0`、Windows は `COMx`）を明示的に指定して接続してください（配線は
+> [Hardware Guide](hardware_guide.md) の「UART およびシリアル」参照）。
+> 下記コマンド例の `mpremote connect /dev/ttyACM0` は、`USE_PIO_USB=OFF` ビルドの場合
+> `mpremote connect /dev/ttyUSB0` に読み替えてください。
 
 1.  **mpremote のインストール**:
     ```bash
@@ -148,16 +168,16 @@ Windows ネイティブビルドは上記 CFLAGS の関係で非推奨です。W
 
     ```bash
     cd PB-1000_emu_AG2/mp
-    mpremote connect /dev/ttyUSB0 fs cp * :
+    mpremote connect /dev/ttyACM0 fs cp * :
     ```
 
 3.  **ROM のアップロード**:
     ```bash
     # Pico 側に roms ディレクトリを作成
-    mpremote connect /dev/ttyUSB0 fs mkdir :roms
+    mpremote connect /dev/ttyACM0 fs mkdir :roms
     # ROM ファイル (rom0.bin, rom1.bin) をアップロード
     cd ../roms
-    mpremote connect /dev/ttyUSB0 fs cp *.bin :roms/
+    mpremote connect /dev/ttyACM0 fs cp *.bin :roms/
     ```
 
 ## トラブルシューティング

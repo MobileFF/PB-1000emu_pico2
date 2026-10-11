@@ -31,14 +31,40 @@ add_compile_definitions(CFG_TUH_HID_EP_BUFSIZE=64)
 # terminate the program; USB host module will handle NULL returns gracefully
 add_definitions(-DPICO_MALLOC_PANIC=0)
 
-# USB: device mode disabled (USB-C port is used for USB keyboard host).
-# CFG_TUH_ENABLED=1 must be global so MicroPython's build pulls in TinyUSB
-# host utility symbols (tu_edpt_*, tusb_time_delay_ms_api) needed by usbh.c.
+# Declared here too (also declared again, identically, further below next
+# to usb_host_core_lib) so it's available for the device-mode block right
+# below -- CMake's option() is idempotent, only setting the default once.
+# Default ON: this is the project's default build as of 2026-10 (PIO-USB
+# keyboard host + native USB-C CDC) -- see doc/hardware_guide.md. Pass
+# -DUSE_PIO_USB=OFF to build the previous native-USB-host-only
+# configuration (no USB-C CDC; use the UART0 REPL instead) if needed.
+option(USE_PIO_USB "Use PIO-USB (GP4/GP5) instead of the native USB host controller" ON)
+
+# USB host: CFG_TUH_ENABLED=1 must be global so MicroPython's build pulls
+# in TinyUSB host utility symbols (tu_edpt_*, tusb_time_delay_ms_api)
+# needed by usbh.c.
 add_compile_definitions(CFG_TUH_ENABLED=1)
-add_compile_definitions(CFG_TUD_ENABLED=0)
 add_compile_definitions(CFG_TUSB_RHPORT1_MODE=0x0101)
-add_compile_definitions(MICROPY_HW_ENABLE_USBDEV=0)
-add_compile_definitions(MICROPY_HW_USB_CDC=0)
+
+if(USE_PIO_USB)
+    # The USB keyboard host moved to PIO-USB (GP4/GP5, rhport1, see
+    # USE_PIO_USB below) -- rhport0's native controller is free, so the
+    # native USB-C port can run in device mode (CDC REPL) instead of
+    # being left idle. CFG_TUSB_RHPORT0_MODE must be explicit: TinyUSB's
+    # own tusb_option.h only defaults it to OPT_MODE_DEVICE when NEITHER
+    # RHPORT0_MODE nor RHPORT1_MODE is defined, and this file already
+    # defines RHPORT1_MODE above, so without this rhport0 would get no
+    # mode at all and CDC would silently never come up (confirmed on
+    # real hardware: flashed fine, enumerated as PIO-USB host correctly,
+    # but USB-C CDC never appeared, not even at the OS USB-device level).
+    add_compile_definitions(CFG_TUSB_RHPORT0_MODE=OPT_MODE_DEVICE)
+else()
+    # Native-host build (default): USB-C port is the keyboard host itself
+    # (rhport0), so device mode must stay off.
+    add_compile_definitions(CFG_TUD_ENABLED=0)
+    add_compile_definitions(MICROPY_HW_ENABLE_USBDEV=0)
+    add_compile_definitions(MICROPY_HW_USB_CDC=0)
+endif()
 add_compile_definitions(MICROPY_HW_USB_MSC=0)
 add_compile_definitions(MICROPY_HW_USB_HID=0)
 
@@ -88,15 +114,76 @@ endif()
 #    Using a STATIC (not INTERFACE) library ensures PRIVATE
 #    settings stay private.
 # ============================================================
-add_library(usb_host_core_lib STATIC
+
+# USE_PIO_USB: build the USB keyboard host on PIO-USB (GP4/GP5) instead
+# of the native RP2350 USB controller (hcd_rp2040.c). Default ON (see the
+# option() call near the top of this file) -- this frees the native
+# USB-C port to run as a CDC device (mpremote) instead of sitting idle.
+# Pass -DUSE_PIO_USB=OFF to build the previous native-USB-host-only
+# configuration instead. See src/usb_host/pio_usb/PROVENANCE.md and
+# src/usb_host/hcd_pio_usb_pb1000.c for the full rationale; this is a
+# from-scratch re-implementation (ported from a sibling RP2350
+# MicroPython project's own validated code) of what an earlier, abandoned
+# attempt at this ("Pico-PIO-USB removed for Native Host mode", below)
+# never finished — src/usb_host/hcd_pio_usb_custom.c is that old attempt,
+# kept only as historical background, not built by either setting.
+option(USE_PIO_USB "Use PIO-USB (GP4/GP5) instead of the native USB host controller" ON)
+
+set(_usb_host_core_lib_sources
     ${CMAKE_CURRENT_LIST_DIR}/usb_host_core.c
     ${PICO_SDK_PATH}/lib/tinyusb/src/host/usbh.c
     ${PICO_SDK_PATH}/lib/tinyusb/src/host/hub.c
     ${PICO_SDK_PATH}/lib/tinyusb/src/class/hid/hid_host.c
-    ${PICO_SDK_PATH}/lib/tinyusb/src/portable/raspberrypi/rp2040/hcd_rp2040.c
 )
+if(USE_PIO_USB)
+    list(APPEND _usb_host_core_lib_sources
+        ${CMAKE_CURRENT_LIST_DIR}/usb_host/hcd_pio_usb_pb1000.c
+        ${CMAKE_CURRENT_LIST_DIR}/usb_host/pio_usb/pio_usb.c
+        ${CMAKE_CURRENT_LIST_DIR}/usb_host/pio_usb/pio_usb_host.c
+        ${CMAKE_CURRENT_LIST_DIR}/usb_host/pio_usb/usb_crc.c
+        # pio_usb_device.c (upstream's DEVICE-mode implementation) is not
+        # even vendored here — this project only ever uses pio_usb as a
+        # HOST (keyboard). See PROVENANCE.md.
+    )
+else()
+    list(APPEND _usb_host_core_lib_sources
+        ${PICO_SDK_PATH}/lib/tinyusb/src/portable/raspberrypi/rp2040/hcd_rp2040.c
+    )
+endif()
 
-# Pico-PIO-USB removed for Native Host mode
+add_library(usb_host_core_lib STATIC ${_usb_host_core_lib_sources})
+
+if(USE_PIO_USB)
+    # usb_tx.pio.h/usb_rx.pio.h are upstream's own pre-generated (pioasm)
+    # headers, vendored as plain static files rather than regenerated via
+    # pico_generate_pio_header() at build time -- MicroPython's separate
+    # QSTR-extraction pre-pass runs a raw preprocessor invocation over
+    # every USER_C_MODULES source file before that custom command's
+    # dependency graph guarantees the header would exist yet. See
+    # src/usb_host/pio_usb/PROVENANCE.md.
+    target_include_directories(usb_host_core_lib PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR}/usb_host/pio_usb
+    )
+    target_compile_definitions(usb_host_core_lib PRIVATE
+        CFG_TUH_RPI_PIO_USB=1
+        PB1000_USE_PIO_USB=1
+    )
+    # NOTE: raising CFG_TUSB_DEBUG/CFG_TUH_LOG_LEVEL here was tried for
+    # bring-up tracing and reverted -- usbh.c's debug paths call
+    # tu_print_mem(), which only exists in TinyUSB's own src/tusb.c (not
+    # built here; this project calls tuh_init() directly instead of the
+    # generic tusb_init()), so enabling them is a link error
+    # ("undefined reference to `tu_print_mem'") rather than something
+    # fixable by just adding compile definitions. Use
+    # usb_host_core_debug_pio_usb() (usb_host.debug() in Python) and/or
+    # prints added directly in hcd_pio_usb_pb1000.c's event handler
+    # instead.
+    target_link_libraries(usb_host_core_lib PRIVATE
+        hardware_pio
+        hardware_dma
+        hardware_timer
+    )
+endif()
 
 # PRIVATE link/include: these do NOT propagate to the main firmware
 target_link_libraries(usb_host_core_lib PRIVATE

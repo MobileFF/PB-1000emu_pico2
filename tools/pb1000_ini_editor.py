@@ -117,11 +117,24 @@ SCHEMA = {
 
 # Order sections are shown in, even if the file doesn't contain them yet.
 SECTION_ORDER = ['display', 'keyboard', 'emulator', 'disk', 'profile',
-                 'joystick', 'beep', 'touch', 'pio_uart', 'wifi', 'ntp']
+                 'joystick', 'joystick_combo', 'beep', 'touch', 'pio_uart', 'wifi', 'ntp']
+
+# [joystick_combo] has arbitrary "btn1+btn2+..." keys rather than a fixed
+# field set, so it gets its own tab UI (_build_combo_tab) instead of the
+# generic SCHEMA-driven one -- see IniEditorApp._rebuild_tabs().
+JOYSTICK_COMBO_SECTION = 'joystick_combo'
+JOYSTICK_BUTTONS = ('up', 'down', 'left', 'right', 'fire1', 'fire2')
+JOYSTICK_KEY_NAME_HINT = (
+    'キー名: exe, ans, shift, up, down, left, right, bs, ins, brk, newall,\n'
+    'menu, cal, cls, kana, space, caps, eng, stop, func, contr., in, out,\n'
+    'calc, memo, "memo in", lckey, f1-f4, tk1-tk16, a-z, 0-9\n'
+    '座標直接指定も可: row,col (例: 10,4)'
+)
 
 _SECTION_RE = re.compile(r'^\s*\[([^\]]+)\]\s*$')
-_KV_RE = re.compile(r'^(\s*)([\w.]+)(\s*=\s*)([^;#]*)(.*)$')
-_COMMENTED_KV_RE = re.compile(r'^(\s*)[;#]\s*([\w.]+)(\s*=\s*)([^;#]*)(.*)$')
+# Key chars include "+" for [joystick_combo]'s "fire1+fire2"-style keys.
+_KV_RE = re.compile(r'^(\s*)([\w.+]+)(\s*=\s*)([^;#]*)(.*)$')
+_COMMENTED_KV_RE = re.compile(r'^(\s*)[;#]\s*([\w.+]+)(\s*=\s*)([^;#]*)(.*)$')
 
 
 # ─── Data Model ───────────────────────────────────────────────────────────────
@@ -531,7 +544,10 @@ class IniEditorApp(tk.Tk):
         for section in sections:
             frame = ttk.Frame(self.notebook, padding=10)
             self.notebook.add(frame, text=section)
-            self._build_section_tab(frame, section)
+            if section == JOYSTICK_COMBO_SECTION:
+                self._build_combo_tab(frame, section)
+            else:
+                self._build_section_tab(frame, section)
 
     def _build_section_tab(self, frame, section):
         keys = list(SCHEMA.get(section, {}).keys())
@@ -571,6 +587,107 @@ class IniEditorApp(tk.Tk):
             self._rebuild_tabs()
 
         ttk.Button(add_frame, text='Add', command=_add).grid(row=0, column=4, padx=(6, 0))
+
+    # ── [joystick_combo] tab (arbitrary multi-button keys, not a fixed schema) ─
+
+    def _build_combo_tab(self, frame, section):
+        ttk.Label(
+            frame,
+            text=('2つ以上のボタンを同時に押した時だけ発火するキーを割り当てます。\n'
+                  '下のチェックボックスでボタンを2つ以上選び、割り当てるキーを入力して Add。'),
+            justify='left', foreground='#555555',
+        ).grid(row=0, column=0, sticky='w', pady=(0, 10))
+
+        rows_frame = ttk.Frame(frame)
+        rows_frame.grid(row=1, column=0, sticky='w')
+        self._combo_rows_frame = rows_frame
+        self._combo_section = section
+        self._rebuild_combo_rows()
+
+        ttk.Separator(frame, orient='horizontal').grid(row=2, column=0, sticky='ew', pady=10)
+        self._build_add_combo_row(frame, section, 3)
+
+    def _rebuild_combo_rows(self):
+        section = self._combo_section
+        for w in self._combo_rows_frame.winfo_children():
+            w.destroy()
+
+        combo_keys = sorted(
+            key for (sec, key) in self.doc.entries
+            if sec == section and self.doc.is_active(sec, key)
+        )
+        if not combo_keys:
+            ttk.Label(self._combo_rows_frame, text='(組み合わせは未設定です)',
+                      foreground='#888888').grid(row=0, column=0, sticky='w')
+            return
+
+        for row_i, key in enumerate(combo_keys):
+            value = self.doc.get_value(section, key) or ''
+            row = ttk.Frame(self._combo_rows_frame)
+            row.grid(row=row_i, column=0, sticky='w', pady=1)
+
+            label = ' + '.join(b.upper() for b in key.split('+'))
+            ttk.Label(row, text=label, width=24, anchor='w').grid(row=0, column=0)
+            ttk.Label(row, text='=').grid(row=0, column=1, padx=4)
+
+            val_var = tk.StringVar(value=value)
+            entry = ttk.Entry(row, textvariable=val_var, width=16)
+            entry.grid(row=0, column=2)
+
+            def _on_change(_e=None, key=key, val_var=val_var):
+                v = val_var.get().strip()
+                if v and self.doc.is_active(section, key):
+                    self.doc.set_value(section, key, v)
+                    self._mark_dirty()
+            val_var.trace_add('write', lambda *_a, cb=_on_change: cb())
+
+            def _remove(key=key):
+                self.doc.deactivate(section, key)
+                self._mark_dirty()
+                self._rebuild_combo_rows()
+            ttk.Button(row, text='Remove', command=_remove).grid(row=0, column=3, padx=(8, 0))
+
+    def _build_add_combo_row(self, frame, section, row_i):
+        add_frame = ttk.LabelFrame(frame, text='新しい組み合わせを追加')
+        add_frame.grid(row=row_i, column=0, sticky='w')
+
+        btn_vars = {}
+        for i, btn in enumerate(JOYSTICK_BUTTONS):
+            var = tk.BooleanVar(value=False)
+            btn_vars[btn] = var
+            ttk.Checkbutton(add_frame, text=btn.upper(), variable=var).grid(
+                row=0, column=i, padx=4, pady=(4, 2), sticky='w')
+
+        ttk.Label(add_frame, text='キー:').grid(row=1, column=0, sticky='e', padx=(4, 2), pady=(0, 6))
+        key_var = tk.StringVar()
+        key_entry = ttk.Entry(add_frame, textvariable=key_var, width=16)
+        key_entry.grid(row=1, column=1, columnspan=2, sticky='w', pady=(0, 6))
+        Tooltip(key_entry, lambda: JOYSTICK_KEY_NAME_HINT)
+
+        def _add():
+            selected = sorted(b for b, v in btn_vars.items() if v.get())
+            if len(selected) < 2:
+                messagebox.showerror('組み合わせを追加', '2つ以上のボタンを選択してください。')
+                return
+            key_name = '+'.join(selected)
+            value = key_var.get().strip()
+            if not value:
+                messagebox.showerror('組み合わせを追加', 'キーを入力してください。')
+                return
+            if self.doc.is_active(section, key_name):
+                messagebox.showerror(
+                    '組み合わせを追加',
+                    ' + '.join(b.upper() for b in selected) + ' は既に設定されています。')
+                return
+            self.doc.activate(section, key_name, value)
+            for v in btn_vars.values():
+                v.set(False)
+            key_var.set('')
+            self._mark_dirty()
+            self._rebuild_combo_rows()
+
+        ttk.Button(add_frame, text='Add', command=_add).grid(
+            row=1, column=3, padx=(8, 0), pady=(0, 6))
 
     # ── File operations ──────────────────────────────────────────────────────
 

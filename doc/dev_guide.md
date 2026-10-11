@@ -117,7 +117,7 @@ CPU コアの制御と周辺 I/O 全般を担う中心モジュール。主な A
 | `set_port_direct(tx, rx, beep, freq, duty)` | C ダイレクト UART・ビープ初期化 |
 | `press_row_ki(row, ki)` | キーマトリクスへのキー入力 |
 | `release_row_ki(row, ki)` | キーマトリクスからキーを解放（解放後にポストリリースパルスを自動設定） |
-| `get_last_key()` | 最後に受信した HID スキャンコードを取得（読み出しでクリア） |
+| `get_last_key()` | 最後に受信した HID スキャンコードを取得（読み出しでクリア）。PIO-USB ビルド（`USE_PIO_USB=ON`）では、このタイミングで `usb_host_core_task()`（USB ホストのサービス処理）も内部で呼び出す。`mp/` 内のキー入力ループ（起動時メニュー・Emulator Menu を含む）は全てこの関数経由でキーを読むため、ここに集約することで個々のループ側で明示的にサービス呼び出しを行う必要がない |
 | `get_held_cursor_key()` | 現在物理的に押下中のカーソルキースキャンコードを返す（0=なし） |
 | `steer_next_key_int(row)` | 次の KEY_INT を指定行に向け即時発火させる（カーソルリピートで使用） |
 | `process_usb_key(scancode, pressed)` | キーイベントを手動で C コアへ投入するテスト用フック（実際の USB HID レポート解析は `usb_host_core.c` が C 内部で直接処理しており、このモジュールを経由しない） |
@@ -156,10 +156,25 @@ Python ラッパー `lcd_controller_c.py` の `LCDControllerC` クラスを通�
 
 ### `usb_host` モジュール（`src/modusb_host.c`）
 
-RP2350 の USB ホスト機能（TinyUSB HID）を MicroPython から操作。
+RP2350 の USB ホスト機能（TinyUSB HID）を MicroPython から操作。ネイティブホスト方式
+（`USE_PIO_USB=OFF`、デフォルトでは不使用）と PIO-USB 方式（`USE_PIO_USB=ON`、デフォルト、
+GP4/GP5）のどちらでも同じ API で操作できる（`src/usb_host_core.c` が内部で分岐）。
 
 - `init()` / `probe()` / `task()`: USB ホストスタックの初期化・デバイス検出・タスク処理。
+  `task()` は PIO-USB ビルドでのみ意味を持つ（`tuh_task()` を呼ぶ）。ネイティブビルドでは
+  no-op（バックグラウンドタイマ経由で ISR 駆動されるため）。
 - `start_bg_timer()` / `stop_bg_timer()`: バックグラウンドタスク実行用タイマの開始・停止。
+  ネイティブビルドのみ有効。PIO-USB ビルドでは no-op（`tuh_task()` はメインループ・
+  `hd61700.get_last_key()` から呼ばれる、下記参照）。
+- **PIO-USB ビルドでのサービス呼び出しの一元化**: ISR 駆動のバックグラウンドタイマが使えない
+  ため、`tuh_task()` 相当（`usb_host_core_task()`）を非ISRコンテキストから定期的に呼ぶ必要が
+  ある。メインループ（`mp/main.py`）だけでなく、起動時メニュー（`boot_session.py`）や
+  Emulator Menu（`emulator_menu.py`）等、全てのキー入力ループが呼ぶ `hd61700.get_last_key()`
+  の内部からも呼ばれる（`src/modhd61700.c`）。**新しいキー入力ループを追加する場合は、
+  必ず `hd61700.get_last_key()` 経由でキーを読むこと** — 独自に HID 状態を読むループを
+  作ると、PIO-USB ビルドでは USB ホストがサービスされずキー入力が効かなくなる。
+- `debug()` / `debug2()` / `debug3()` / `debug4()`: PIO-USB の実機ブリングアップ用診断関数
+  （列挙イベント履歴・EP0 エラー等）。ネイティブビルドでは全て 0 を返す。
 - 実際の HID レポート解析（キー押下・解放の判定）は C 内部で完結する: `src/usb_host_core.c` の `tuh_hid_report_received_cb()` が `c_kb_process_usb_key_extern()` を直接呼び出し、Python 側を経由しない。
 - `hd61700.keyboard_config_adv()` / `keyboard_config_base()` とセットで使用（キーマップ設定）。
 - `hd61700.process_usb_key(scancode, pressed)` は手動でキーイベントを注入するテスト用フックであり、`usb_host` モジュールではなく `hd61700` モジュールに属する。

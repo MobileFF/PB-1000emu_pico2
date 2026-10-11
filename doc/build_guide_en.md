@@ -76,31 +76,44 @@ overwritten by the build).
 cp -r /path/to/PB-1000_emu_AG2/src/* ~/projects/hd61700/src/
 ```
 
-Then build with the CFLAGS required for TinyUSB's host mode:
-
 **Example (Linux/WSL2):**
 ```bash
 cd ports/rp2
 export USER_C_MODULES="/home/<user>/projects/hd61700/src/micropython.cmake"
-export CFLAGS="-Wno-error=unused-parameter -Wno-error=unused-variable -DCFG_TUH_ENABLED=1 -DCFG_TUD_ENABLED=0 -DMICROPY_HW_USB_CDC=0 -DMICROPY_HW_USB_MSC=0 -DMICROPY_HW_USB_HID=0 -DMICROPY_PY_PIO_USB=1 -I/home/<user>/projects/hd61700/src"
+export CFLAGS="-Wno-error=unused-parameter -Wno-error=unused-variable -I/home/<user>/projects/hd61700/src"
 make BOARD=RPI_PICO2_W USER_C_MODULES="$USER_C_MODULES" clean
 make BOARD=RPI_PICO2_W USER_C_MODULES="$USER_C_MODULES" WERROR=0 -j$(nproc)
 # For the plain Pico 2, just swap in BOARD=RPI_PICO2
+```
+
+This builds the **PIO-USB host mode** (keyboard on GP4/GP5, USB-C port as a CDC device) by
+default (`src/micropython.cmake`'s `option(USE_PIO_USB ... ON)`). See "8. USB Keyboard" in the
+[Hardware Guide](hardware_guide_en.md) for wiring.
+
+**To build the previous configuration (native USB host only, USB-C port is keyboard-only)**:
+
+```bash
+# For a fresh build-<BOARD>/ directory, pass it via CMAKE_ARGS
+make BOARD=RPI_PICO2_W USER_C_MODULES="$USER_C_MODULES" CMAKE_ARGS="-DUSE_PIO_USB=OFF" WERROR=0 -j$(nproc)
+
+# If build-<BOARD>/ already exists, CMAKE_ARGS is ignored (the configure step only
+# re-runs when build-<BOARD>/Makefile is missing) -- reconfigure explicitly first
+cmake -S . -B build-RPI_PICO2_W -DUSE_PIO_USB=OFF
+make BOARD=RPI_PICO2_W USER_C_MODULES="$USER_C_MODULES" WERROR=0 -j$(nproc)
 ```
 
 Keep `CFLAGS` on a single line as shown above. A multi-line value (with embedded newlines) breaks
 cmake's initial compiler-check Makefile generation on a completely fresh build (no existing
 `build-<BOARD>/`), failing with a `missing separator` error.
 
-**Do not include `-DCFG_TUSB_MCU=...` or `-DCFG_TUSB_RHPORT1_MODE=(OPT_MODE_HOST|0x0100)` in
-CFLAGS.** These are leftovers from when this project used a PIO-USB host implementation; the
-current "Native Host mode" (`src/usb_host_core.c`, using RHPORT0) doesn't need them. Passing them
-on a completely fresh cmake configure collides with a macro MicroPython itself defines for the
-`firmware` target, and `-Werror` then fails the build on files like `py/asmarm.c` with
-`"CFG_TUSB_MCU" redefined [-Werror]` (easy to miss if you're reusing an existing build cache, since
-it only surfaces on a fresh configure). `src/usb_host/tusb_config.h` already provides its own
-`#ifndef`-guarded fallback values for `usb_host_core.c`, so dropping these from CFLAGS doesn't
-affect USB host functionality.
+**Do not include `-DCFG_TUSB_MCU=...`, `-DCFG_TUSB_RHPORT1_MODE=(OPT_MODE_HOST|0x0100)`,
+`-DCFG_TUH_ENABLED=1`, `-DCFG_TUD_ENABLED=0`, or similar TinyUSB macros in CFLAGS.** All of these
+are already set by `src/micropython.cmake`'s `add_compile_definitions()` depending on
+`USE_PIO_USB`, so passing them again via CFLAGS is redundant, and on a completely fresh cmake
+configure it collides with a macro MicroPython itself defines for the `firmware` target —
+`-Werror` then fails the build on files like `py/asmarm.c` with `"CFG_TUSB_MCU" redefined
+[-Werror]` (easy to miss if you're reusing an existing build cache, since it only surfaces on a
+fresh configure).
 
 **Do not add `-DDEBUG_SKIP_CORE_INIT` to CFLAGS.** It bypasses the
 `USB_HOST_SKIP_INIT` cmake option in `src/micropython.cmake` (default OFF,
@@ -116,8 +129,13 @@ Native Windows builds are not recommended given the CFLAGS above — use WSL2 wi
 
 The output firmware will be located at `build-RPI_PICO2_W/firmware.uf2` (or
 `build-RPI_PICO2/firmware.uf2` for the plain Pico 2). When copying it out for flashing, rename it
-to `firmware_pb1000_pico2w.uf2` (or `firmware_pb1000_pico2.uf2`) so it's not confused with builds
-from other parallel projects.
+so it's not confused with builds from other parallel projects, and so the `USE_PIO_USB` setting
+it was built with is clear from the filename:
+
+| Board | `USE_PIO_USB=ON` (default) | `USE_PIO_USB=OFF` (previous config) |
+| :--- | :--- | :--- |
+| Pico 2 W | `firmware/firmware_pb1000_pico2w.uf2` | `firmware/firmware_pb1000_pico2w_native_usb.uf2` |
+| Plain Pico 2 | `firmware/firmware_pb1000_pico2.uf2` | `firmware/firmware_pb1000_pico2_native_usb.uf2` |
 
 > See `/home/flex/projects/micropython.pb1000/ports/rp2/bldfrm.sh` (this project's own dedicated
 > MicroPython checkout) for this project's actual (environment-specific) build script.
@@ -126,20 +144,22 @@ from other parallel projects.
 
 1.  **Enter BOOTSEL mode**: Hold the BOOTSEL button on your Pico 2 (W) while connecting it to your PC via USB.
 2.  **Mount**: The Pico 2 will appear as a USB mass storage device named `RPI-RP2`.
-3.  **Copy**: Drag and drop `firmware_pb1000_pico2w.uf2` (Pico 2 W) or `firmware_pb1000_pico2.uf2`
-    (plain Pico 2) onto the `RPI-RP2` drive, matching your hardware. The Pico 2 will reboot automatically.
+3.  **Copy**: Drag and drop the `.uf2` file named per the table above, matching your hardware and
+    build, onto the `RPI-RP2` drive. The Pico 2 will reboot automatically.
 
 ## Post-Build Setup
 
 Once the firmware is flashed, you need to upload the Python logic and ROM files.
 
 > [!IMPORTANT]
-> This firmware builds the Pico's USB port as **USB host only** (`CFG_TUD_ENABLED=0`), so
-> `mpremote` cannot connect over the Pico's own USB port. Wire a USB-to-serial adapter to
-> **GP0/GP1 (UART0 REPL)** and connect to that serial port explicitly (e.g. `/dev/ttyUSB0`,
-> `COMx` on Windows) — see "UART and Serial" in the [Hardware Guide](hardware_guide_en.md) for
-> wiring. Read every `mpremote` command below as `mpremote connect <port> ...`, or set
-> `MPREMOTE_TTY=/dev/ttyUSB0` before running them.
+> With the default build (`USE_PIO_USB=ON`), the Pico's own USB-C port runs as a CDC device, so
+> `mpremote connect /dev/ttyACM0` (`COMx` on Windows) connects directly over a single USB-C
+> cable. With a `USE_PIO_USB=OFF` build, the Pico's USB port is **host-only**
+> (`CFG_TUD_ENABLED=0`), so `mpremote` cannot connect over it. In that case, wire a
+> USB-to-serial adapter to **GP0/GP1 (UART0 REPL)** and connect to that serial port explicitly
+> (e.g. `/dev/ttyUSB0`, `COMx` on Windows) — see "UART and Serial" in the
+> [Hardware Guide](hardware_guide_en.md) for wiring. Read `mpremote connect /dev/ttyACM0` below
+> as `mpremote connect /dev/ttyUSB0` for a `USE_PIO_USB=OFF` build.
 
 1.  **Install mpremote**:
     ```bash
@@ -149,16 +169,16 @@ Once the firmware is flashed, you need to upload the Python logic and ROM files.
 
     ```bash
     cd PB-1000_emu_AG2/mp
-    mpremote connect /dev/ttyUSB0 fs cp * :
+    mpremote connect /dev/ttyACM0 fs cp * :
     ```
 
 3.  **Upload ROMs**:
     ```bash
     # Create roms directory on Pico
-    mpremote connect /dev/ttyUSB0 fs mkdir :roms
+    mpremote connect /dev/ttyACM0 fs mkdir :roms
     # Upload ROM files (rom0.bin, rom1.bin)
     cd ../roms
-    mpremote connect /dev/ttyUSB0 fs cp *.bin :roms/
+    mpremote connect /dev/ttyACM0 fs cp *.bin :roms/
     ```
 
 ## Troubleshooting

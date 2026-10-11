@@ -217,6 +217,33 @@ Supports a direct-wired joystick (active-LOW with PULL_UP inputs).
   and the resulting MCU reboot.
 - Pin assignments can be changed by editing `JoystickInputManager.DEFAULT_PIN_MAP` in `mp/main_input_joystick.py`.
 
+### Specifying a key mapping
+
+`[joystick]`'s `key_up`/`key_down`/`key_left`/`key_right`/`key_fire1`/`key_fire2` each accept
+either of the following:
+
+- **A name**: `exe`, `ans`, `shift`, `up`, `down`, `left`, `right`, `bs`, `ins`, `brk`,
+  `newall`, `menu`, `cal`, `cls`, `kana`, `space`, `caps`, `eng`, `stop`, `func`,
+  `contr.`, `in`, `out`, `calc`, `memo`, `memo in`, `lckey`, `f1`-`f4`, `tk1`-`tk16`,
+  `a`-`z`, `0`-`9` (covers essentially every PB-1000 special key)
+- **A raw coordinate**: `row,col` (e.g. `10,4`)
+
+### Assigning a key to a 2-button combo (`[joystick_combo]`)
+
+You can define a key that only fires when two or more buttons are held down together.
+
+```ini
+[joystick_combo]
+fire1+fire2 = exe   ; FIRE1+FIRE2 held together = EXE
+up+fire1    = brk   ; Up+FIRE1 held together = BREAK
+```
+
+- Button names are `up`, `down`, `left`, `right`, `fire1`, `fire2`, joined with `+`.
+- A combo covering more buttons takes priority (e.g. if `up+fire1+fire2` is also defined,
+  holding all three fires that combo instead of the smaller `up+fire1` one).
+- While a combo is active, the individual button mappings it covers (`key_fire1`, etc.) don't
+  fire on their own.
+
 ---
 
 ## 8. State Management

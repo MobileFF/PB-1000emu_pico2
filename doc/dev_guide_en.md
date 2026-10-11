@@ -119,7 +119,7 @@ The central module for CPU control and all peripheral I/O.
 | `set_port_direct(tx, rx, beep, freq, duty)` | Initialise C-direct UART and beep PWM |
 | `press_row_ki(row, ki)` | Assert a key in the keyboard matrix |
 | `release_row_ki(row, ki)` | Release a key from the matrix (also sets post-release KEY_INT pulses) |
-| `get_last_key()` | Return the last received HID scancode (read-and-clear) |
+| `get_last_key()` | Return the last received HID scancode (read-and-clear). In the PIO-USB build (`USE_PIO_USB=ON`), this also internally calls `usb_host_core_task()` (services the USB host) on every call. Every key-polling loop in `mp/` (boot-time menus and the Emulator Menu included) reads keys through this one function, so centralizing the service call here means no individual loop has to call it explicitly |
 | `get_held_cursor_key()` | Return the physically-held cursor key scancode (0 = none) |
 | `steer_next_key_int(row)` | Steer the next KEY_INT to a specific row and fire it immediately |
 | `process_usb_key(scancode, pressed)` | Manual test hook to inject a single key event into the C core. Actual USB HID report parsing happens entirely inside `usb_host_core.c` and never goes through this module |
@@ -161,10 +161,26 @@ Use the `LCDControllerC` wrapper class in `lcd_controller_c.py` in normal code.
 
 ### `usb_host` module (`src/modusb_host.c`)
 
-Exposes RP2350 USB host (TinyUSB HID) to MicroPython.
+Exposes RP2350 USB host (TinyUSB HID) to MicroPython. The same API works for both the native
+host (`USE_PIO_USB=OFF`, not the default) and PIO-USB (`USE_PIO_USB=ON`, default, GP4/GP5) paths
+-- `src/usb_host_core.c` branches internally.
 
 - `init()` / `probe()` / `task()`: initialise the USB host stack, probe devices, and service the host task.
-- `start_bg_timer()` / `stop_bg_timer()`: start/stop the background task timer.
+  `task()` only does anything on a PIO-USB build (calls `tuh_task()`); it's a no-op on a native
+  build, where an ISR-driven background timer services the host instead.
+- `start_bg_timer()` / `stop_bg_timer()`: start/stop the background task timer. Only meaningful
+  on a native build. A no-op on a PIO-USB build (`tuh_task()` is called from the main loop and
+  from `hd61700.get_last_key()` instead -- see below).
+- **Centralized servicing on PIO-USB builds**: since an ISR-driven background timer isn't
+  available there, something has to call `tuh_task()` (`usb_host_core_task()`) periodically
+  from non-ISR code. This happens both in the main loop (`mp/main.py`) and, centrally, inside
+  `hd61700.get_last_key()` (`src/modhd61700.c`) -- which every key-polling loop calls, including
+  the boot-time menu (`boot_session.py`) and the Emulator Menu (`emulator_menu.py`).
+  **Any new key-polling loop must read keys through `hd61700.get_last_key()`** -- a loop that
+  reads HID state some other way won't service the USB host on a PIO-USB build, and keys will
+  silently stop working.
+- `debug()` / `debug2()` / `debug3()` / `debug4()`: real-hardware PIO-USB bring-up diagnostics
+  (enumeration event history, EP0 errors, etc.). All return zero on a native build.
 - Actual HID report parsing (press/release detection) happens entirely in C: `tuh_hid_report_received_cb()` in `src/usb_host_core.c` calls `c_kb_process_usb_key_extern()` directly and never goes through Python.
 - Used together with `hd61700.keyboard_config_adv()` / `keyboard_config_base()` for keymap configuration.
 - `hd61700.process_usb_key(scancode, pressed)` is a manual test-injection hook and belongs to the `hd61700` module, not `usb_host`.

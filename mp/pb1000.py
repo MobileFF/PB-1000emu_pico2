@@ -211,6 +211,15 @@ class PB1000System(PB1000FddMixin, PB1000StateIOMixin):
             path = self._get_storage_path(f"ram{slot}.bin")
             self.has_bank[slot] = self._file_exists(path)
             print(f"Bank detection: RAM{slot}={'Y' if self.has_bank[slot] else 'N'}")
+        # set_has_exp_ram()/set_bank_present() below lazily m_malloc() a
+        # 32KB buffer per enabled bank from the GC heap (not a fixed
+        # static reservation, to avoid always paying for banks most
+        # profiles don't use -- see modhd61700.c's bank1_buf comment).
+        # m_malloc() needs a single CONTIGUOUS 32KB run; collecting here
+        # reclaims whatever's unreachable from the preceding boot/profile
+        # selection work so it doesn't sit between free blocks and block
+        # them from being seen as one run.
+        gc.collect()
         if hasattr(cpu_core, "set_has_exp_ram"):
             cpu_core.set_has_exp_ram(self.has_bank[1])
         if hasattr(cpu_core, "set_bank_present"):

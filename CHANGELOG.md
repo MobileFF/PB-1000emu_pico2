@@ -7,6 +7,62 @@ push される運用のため、バージョン番号や「未リリース」の
 
 ---
 
+## 2026-10-11
+
+### 追加
+
+- **PIO-USBホストモード（GP4/GP5）を追加し、デフォルトを切り替え**: USBキーボードホストを
+  PIO-USB（GP4/GP5）に移し、ネイティブUSB-CポートをCDCデバイス（`mpremote`直結）として
+  使えるようにした。`USE_PIO_USB`ビルドオプション（デフォルト`ON`）で有効・`OFF`で従来の
+  ネイティブUSBホスト専用ビルドに戻せる。配線・ビルド手順は`doc/hardware_guide.md`・
+  `doc/build_guide.md`を参照。既知の制限: 一部のUSBキーボードはPIO-USB方式で認識しない
+  場合がある。
+
+### 修正
+
+- **GCヒープ上のバンクRAMバッファ用ポインタがGCのルートとして認識されていなかった不具合を
+  修正**（`src/modhd61700.c`）: `bank1_buf`等を`MP_REGISTER_ROOT_POINTER()`でGCルート登録
+  するよう変更。登録していない状態では、`gc.collect()`によってそのバッファが到達不能と
+  誤判定され、別のPythonオブジェクトに再利用されてしまうことがあった。
+
+---
+
+## 2026-10-04
+
+### 修正
+
+- **`[joystick] key_fire1`/`key_fire2`デフォルト座標の不具合を修正**（`mp/main_input_joystick.py`
+  `JoystickInputManager.DEFAULT_KEY_MAP`）: コメント・`pb1000.ini`の記載ではFIRE1=EXE、
+  FIRE2=SHIFTとなるはずだったが、実際に書かれていた座標は`fire1: (10,1)`（実際はSPACE）・
+  `fire2: (10,4)`（実際はEXE）であり、デフォルト設定のままではFIRE1を押すとSPACE、FIRE2を
+  押すとEXEが入力される状態になっていた（`key_fire1`/`key_fire2`を明示的に設定していれば
+  問題なかったため気づかれにくかった）。`fire1: (10,4)`・`fire2: (11,2)`に修正し、
+  意図通りEXE/SHIFTになるようにした。
+- **`[joystick]`のキー名指定（`bs`・`exe`・`menu`等）が実際には全く機能していなかった不具合を
+  修正**（`mp/keymap.py`・`mp/main_input_joystick.py`）: `pb1000.ini`は複数文字の名前指定
+  （`bs`, `exe`, `ans`, `shift`, `up`, `down`, `left`, `right`, `ins`, `brk`, `newall`,
+  `menu`, `cal`, `cls`, `kana`等）を文書化していたが、名前解決を行う`_parse_joystick_key()`
+  は1文字ラベルのみを収録する`keymap.KEY_MAP`と、存在しない`keymap.KEY_<名前>`モジュール
+  定数しか見ておらず、これらの名前は常に解決失敗（エラーも警告も出さずデフォルト値へ
+  黙ってフォールバック）していた。`keymap.py`に複数文字ラベル用の`NAMED_KEYS`辞書を追加し
+  （`USB_MAP`/`ADV_MAP`から自動収集、ラベル表記が食い違う`brk`→`BREAK`のみ明示エイリアス）、
+  `_parse_joystick_key()`から参照するようにした。`space`・`caps`・`eng`・`stop`・`func`・
+  `contr.`・`in`・`out`・`calc`・`memo`・`memo in`・`lckey`・`f1`-`f4`等、ドキュメントに
+  なかった名前も含め、`references/keyboard_layout.md`記載の特殊キーを名前指定で網羅できる
+  ようになった。
+
+### 追加
+
+- **ジョイスティックの2ボタン同時押しへの任意キー割り当て（`[joystick_combo]`）を追加**
+  （`mp/main_input_joystick.py`・`mp/pb1000.ini`）: `fire1+fire2 = exe`、
+  `up+fire1 = brk`のように、2つ以上のボタンを同時に押した時だけ発火する専用のキーを
+  定義できるようにした。より多くのボタンを含む組み合わせが優先され、組み合わせ成立中は
+  該当ボタン個別のキー割り当てを発火しない。ポーリングを「ボタン毎に即時press/release」
+  方式から「毎ポーリングで物理ボタン状態＋コンボ定義から目標キー集合を再計算し差分だけ
+  press/release」方式（`_apply_state()`）に変更して実装（コンボ未設定時は従来と同じ挙動）。
+
+---
+
 ## 2026-09-16
 
 ### 修正

@@ -3,6 +3,7 @@ PB-1000 Emulator - Normal Run ScriptCL
 """
 import machine
 import hd61700
+import usb_host
 import gc
 
 import sys
@@ -114,6 +115,28 @@ def main():
         enable_usb_kbd=get_bool(global_cfg, "keyboard", "enable_usb_kbd"),
         poll_interval_ms=get_int(global_cfg, "keyboard", "poll_interval_ms"),
     )
+
+    # Step 3.5: Pre-allocate the RAM1 expansion bank's 32KB buffer here, on
+    # the least-fragmented heap of the whole boot sequence (see
+    # init_usb_keyboard_early()'s docstring above). hd61700.set_has_exp_ram()
+    # lazily m_malloc()s this from the GC heap on first enable and never
+    # frees it even if later called with False (see modhd61700.c's
+    # bank1_buf comment) -- PB1000System.__init__() calls it again later,
+    # once it knows the actual per-profile has_bank[1] from ram1.bin's
+    # presence, which just reuses this same buffer (no new allocation) or
+    # leaves it allocated-but-unused. Doing the malloc only there, after
+    # profile selection UI / SD mount / the [ext] loader have already run,
+    # was observed on real hardware to fail with MemoryError even when
+    # gc.mem_free() reported far more than 32KB free: this allocator is
+    # non-compacting, so a single contiguous 32KB run can simply not exist
+    # among otherwise-plentiful free space once the heap is this
+    # fragmented. Always paying the 32KB here (regardless of whether the
+    # selected profile turns out to need it) trades a fixed RAM cost for
+    # eliminating that failure mode.
+    try:
+        hd61700.set_has_exp_ram(True)
+    except MemoryError as _e:
+        print(f"RAM1 bank pre-allocation failed: {_e}")
 
     # Step 4: Profile selection UI
     profiles = scan_profiles()
@@ -345,7 +368,7 @@ def main():
     joystick_input = None
     if get_bool(cfg, "joystick", "enable"):
         gc.collect()
-        from main_input_joystick import _parse_joystick_key, JoystickInputManager
+        from main_input_joystick import _parse_joystick_key, _parse_combo_config, JoystickInputManager
         _joy_key_map = dict(JoystickInputManager.DEFAULT_KEY_MAP)
         for _btn, _cfg_key in (
             ("up",    "key_up"),
@@ -363,6 +386,7 @@ def main():
             poll_interval_ms=get_int(cfg, "joystick", "poll_interval_ms"),
             enable_fire2=get_bool(cfg, "joystick", "enable_fire2"),
             key_map=_joy_key_map,
+            combos=_parse_combo_config(cfg),
         )
         print("Joystick input enabled.")
 
@@ -582,6 +606,7 @@ def main():
                 sleep_ms=sleep_poll_ms,
                 step_chunk=step_chunk,
             )
+            usb_host.task()
 
             now = time.ticks_ms()
 

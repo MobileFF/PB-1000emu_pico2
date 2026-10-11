@@ -7,6 +7,63 @@ date heading instead of a version number or "Unreleased" marker.
 
 ---
 
+## 2026-10-11
+
+### Added
+
+- **Added a PIO-USB host mode (GP4/GP5) and switched the default to it**: the USB keyboard host
+  moved to PIO-USB (GP4/GP5), freeing the native USB-C port to run as a CDC device (direct
+  `mpremote` access). Controlled by the `USE_PIO_USB` build option (default `ON`); pass `OFF` to
+  build the previous native-USB-host-only configuration instead. See `doc/hardware_guide_en.md`
+  and `doc/build_guide.md` for wiring and build instructions. Known limitation: some USB
+  keyboards aren't recognized over PIO-USB.
+
+### Fixed
+
+- **Fixed a GC-heap pointer for the bank RAM buffers not being registered as a GC root**
+  (`src/modhd61700.c`): `bank1_buf` etc. are now registered via `MP_REGISTER_ROOT_POINTER()`.
+  Without that registration, `gc.collect()` could mistake the buffer for unreachable and hand its
+  memory to an unrelated Python object.
+
+---
+
+## 2026-10-04
+
+### Fixed
+
+- **Fixed `[joystick] key_fire1`/`key_fire2` default coordinates** (`mp/main_input_joystick.py`'s
+  `JoystickInputManager.DEFAULT_KEY_MAP`): comments and `pb1000.ini` both documented FIRE1=EXE and
+  FIRE2=SHIFT as the defaults, but the actual coordinates were `fire1: (10,1)` (really SPACE) and
+  `fire2: (10,4)` (really EXE) -- so with the default config, pressing FIRE1 typed SPACE and FIRE2
+  typed EXE. Easy to miss since explicitly setting `key_fire1`/`key_fire2` worked fine. Fixed to
+  `fire1: (10,4)` / `fire2: (11,2)` so they resolve to EXE/SHIFT as intended.
+- **Fixed named `[joystick]` key mappings (`bs`, `exe`, `menu`, etc.) not working at all**
+  (`mp/keymap.py`, `mp/main_input_joystick.py`): `pb1000.ini` documented multi-character name
+  options (`bs`, `exe`, `ans`, `shift`, `up`, `down`, `left`, `right`, `ins`, `brk`, `newall`,
+  `menu`, `cal`, `cls`, `kana`, etc.), but the resolver, `_parse_joystick_key()`, only checked
+  `keymap.KEY_MAP` (single-character labels only) and a nonexistent `keymap.KEY_<name>` module
+  constant -- so every one of these names silently failed to resolve and fell back to the default
+  key, with no error or warning. Added a `NAMED_KEYS` dict to `keymap.py` for multi-character
+  labels (auto-collected from `USB_MAP`/`ADV_MAP`, with an explicit alias for `brk` -> `BREAK`
+  where the documented short name doesn't match the raw label), and wired `_parse_joystick_key()`
+  to check it. This also newly covers names that weren't even documented before (`space`, `caps`,
+  `eng`, `stop`, `func`, `contr.`, `in`, `out`, `calc`, `memo`, `memo in`, `lckey`, `f1`-`f4`,
+  etc.), so every special key in `references/keyboard_layout.md` is now reachable by name.
+
+### Added
+
+- **Added joystick 2-button-combo key assignment (`[joystick_combo]`)**
+  (`mp/main_input_joystick.py`, `mp/pb1000.ini`): lets you define a key that only fires when two
+  or more buttons are held together, e.g. `fire1+fire2 = exe` or `up+fire1 = brk`. A combo
+  covering more buttons takes priority over a smaller one, and while a combo is active its
+  member buttons' individual key mappings don't fire on their own. Implemented by switching
+  polling from "press/release each button immediately on its own" to "recompute the full desired
+  key set from physical button state plus the combo definitions on every poll tick, then
+  press/release only the delta" (`_apply_state()`); behaviour is unchanged when no combos are
+  configured.
+
+---
+
 ## 2026-09-16
 
 ### Fixed

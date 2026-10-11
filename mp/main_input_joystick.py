@@ -25,10 +25,38 @@ def _parse_joystick_key(value):
     import keymap as _km
     if v in _km.KEY_MAP:
         return _km.KEY_MAP[v]
+    if v in _km.NAMED_KEYS:
+        return _km.NAMED_KEYS[v]
     coord = getattr(_km, "KEY_" + v.upper(), None)
     if coord is not None:
         return coord
     return None
+
+
+def _parse_combo_config(cfg):
+    """Parse pb1000.ini's [joystick_combo] section into a list of
+    (frozenset(button_names), key_coords) tuples, largest combo first:
+
+        [joystick_combo]
+        fire1+fire2 = exe
+        up+fire1    = brk
+
+    Each key is 2 or more button names (matching JoystickInputManager's
+    pin_map keys: up/down/left/right/fire1/fire2) joined by "+"; each
+    value is anything _parse_joystick_key() accepts. Sorting largest-first
+    means a bigger combo is checked (and wins) before a smaller one that's
+    a subset of it -- see JoystickInputManager._apply_state()."""
+    combos = []
+    for buttons_str, key_str in cfg.get("joystick_combo", {}).items():
+        buttons = frozenset(b.strip() for b in buttons_str.split("+") if b.strip())
+        if len(buttons) < 2:
+            continue
+        key = _parse_joystick_key(key_str)
+        if key is None:
+            continue
+        combos.append((buttons, key))
+    combos.sort(key=lambda c: -len(c[0]))
+    return combos
 
 
 class JoystickInputManager:
@@ -46,8 +74,8 @@ class JoystickInputManager:
         "down":  (4,  9),   # KEY_DOWN
         "left":  (5, 10),   # KEY_LEFT
         "right": (3,  9),   # KEY_RIGHT
-        "fire1": (10, 1),   # KEY_EXE
-        "fire2": (10, 4),   # KEY_SHIFT
+        "fire1": (10, 4),   # KEY_EXE
+        "fire2": (11, 2),   # KEY_SHIFT
     }
 
     def __init__(
@@ -55,6 +83,7 @@ class JoystickInputManager:
         *,
         pin_map=None,
         key_map=None,
+        combos=None,
         debounce_ms=20,
         poll_interval_ms=10,
         enable_fire2=True,
@@ -63,6 +92,11 @@ class JoystickInputManager:
 
         pin_map = pin_map if pin_map is not None else self.DEFAULT_PIN_MAP
         self._key_map = key_map if key_map is not None else dict(self.DEFAULT_KEY_MAP)
+        # (frozenset(button_names), key_coords), largest combo first -- see
+        # _parse_combo_config()/_apply_state(). Empty by default: with no
+        # combos configured, behaviour is identical to the pre-combo code
+        # (one button -> its own key_map entry, nothing more).
+        self._combos = list(combos) if combos else []
         self._debounce_ms = debounce_ms
         self._poll_interval_ms = poll_interval_ms
 
@@ -75,6 +109,7 @@ class JoystickInputManager:
         self._confirmed_state = {}
         self._debounce_deadline = {}
         self._next_poll_at = 0
+        self._active_keys = set()  # PB-1000 keys currently held down by us
 
         for btn in buttons:
             try:
@@ -91,6 +126,7 @@ class JoystickInputManager:
             return
         self._next_poll_at = time.ticks_add(now, self._poll_interval_ms)
 
+        changed = False
         for btn, pin in self._pins.items():
             raw = pin.value()
             if raw != self._raw_state[btn]:
@@ -105,12 +141,36 @@ class JoystickInputManager:
                 continue
 
             self._confirmed_state[btn] = new_on
+            changed = True
+
+        if changed:
+            self._apply_state(system)
+
+    def _apply_state(self, system):
+        """Recompute the desired PB-1000 key set from the current physical
+        button state plus self._combos (largest combo wins when several
+        overlap, e.g. an up+fire1+fire2 combo pre-empts a smaller up+fire1
+        one), then press/release only the keys that actually changed.
+        This is what lets N buttons held together map to one PB-1000 key
+        distinct from any individual button's own mapping."""
+        pressed = {b for b, on in self._confirmed_state.items() if on}
+        consumed = set()
+        desired = {}  # key -> status-bar label
+        for buttons, key in self._combos:
+            if buttons <= pressed and not (buttons & consumed):
+                desired[key] = "+".join(b.upper() for b in sorted(buttons))
+                consumed |= buttons
+        for btn in pressed - consumed:
             key = self._key_map.get(btn)
-            if key is None:
-                continue
-            if new_on:
-                system.press_key(key)
-                if hasattr(system, "set_status"):
-                    system.set_status(btn.upper())
-            else:
-                system.release_key(key)
+            if key is not None:
+                desired.setdefault(key, btn.upper())
+
+        desired_keys = set(desired.keys())
+        for key in self._active_keys - desired_keys:
+            system.release_key(key)
+        newly_pressed = desired_keys - self._active_keys
+        for key in newly_pressed:
+            system.press_key(key)
+        if newly_pressed and hasattr(system, "set_status"):
+            system.set_status(desired[next(iter(newly_pressed))])
+        self._active_keys = desired_keys
