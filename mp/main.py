@@ -111,8 +111,9 @@ def main():
             sys.print_exception(_e)
 
     # Step 3: Early USB keyboard init — must precede profile UI so keys are accepted
+    _enable_usb_kbd = get_bool(global_cfg, "keyboard", "enable_usb_kbd")
     init_usb_keyboard_early(
-        enable_usb_kbd=get_bool(global_cfg, "keyboard", "enable_usb_kbd"),
+        enable_usb_kbd=_enable_usb_kbd,
         poll_interval_ms=get_int(global_cfg, "keyboard", "poll_interval_ms"),
     )
 
@@ -137,6 +138,65 @@ def main():
         hd61700.set_has_exp_ram(True)
     except MemoryError as _e:
         print(f"RAM1 bank pre-allocation failed: {_e}")
+
+    # Step 3.6: Let USB keyboard enumeration (kicked off by Step 3, above)
+    # get a head start before the profile picker starts reading keys.
+    #
+    # A plain time.sleep_ms() here (an earlier version of this step) turned
+    # out to be dead time, not a head start: usb_host_core_start_bg_timer()
+    # (src/usb_host_core.c) is a deliberate no-op in the project's default
+    # PIO-USB build -- "PIO-USB is serviced from the main loop" -- so
+    # nothing drives tuh_task() in the background the way it does in the
+    # native-USB build. tuh_task() only ever runs when something calls
+    # usb_host.task() or hd61700.get_last_key() (which services it as a
+    # side effect -- see modhd61700.c's mod_get_last_key()) in the
+    # foreground. A bare sleep_ms() calls neither, so USB enumeration
+    # (bus reset, descriptor fetches, HID report setup, ...) made *zero*
+    # progress during it -- all of it was actually happening only once
+    # select_profile_ui() (Step 4) started its own key-polling loop
+    # afterward, each tick nudging tuh_task() forward by one step. That's
+    # what the real-hardware symptom (needing several keypresses, i.e.
+    # several polling ticks, after the picker appeared before the first
+    # one registered) actually was -- not slow enumeration, but
+    # enumeration that had not been allowed to run at all yet.
+    #
+    # Fix (2026-10-14, v1): pump usb_host.task() for a fixed ~500ms instead
+    # of sleeping through it. Real-hardware retest showed no felt
+    # improvement -- expected in hindsight: select_profile_ui() (Step 4)
+    # was *already* pumping tuh_task() once it started (every ~50ms key-
+    # poll tick), so moving a fixed slice of that same pumping to *before*
+    # the picker appears just shifts when the wait happens, not how long
+    # total enumeration takes -- a fixed-length warm-up can't adapt to how
+    # long enumeration on a given keyboard/hub actually takes.
+    #
+    # Fix (v2): poll usb_host.debug()'s ep_complete counter (index 6 --
+    # see modusb_host.c) instead of a fixed duration. It only increments
+    # once an actual endpoint transfer completes, which requires
+    # enumeration (control transfers on EP0) to have already finished --
+    # the HID interrupt-IN endpoint doesn't exist, let alone complete a
+    # transfer, before SET_CONFIGURATION succeeds. So "ep_complete > 0"
+    # is a direct signal that the keyboard is actually ready, rather than
+    # a guess at how long that takes. _USB_WARMUP_MAX_MS is just a safety
+    # ceiling for when no keyboard is attached (or enumeration genuinely
+    # fails) so boot can't hang here indefinitely.
+    if _enable_usb_kbd:
+        _USB_WARMUP_MAX_MS = 3000
+        _usb_warmup_until = time.ticks_add(time.ticks_ms(), _USB_WARMUP_MAX_MS)
+        while time.ticks_diff(_usb_warmup_until, time.ticks_ms()) > 0:
+            usb_host.task()
+            try:
+                if usb_host.debug()[6] > 0:  # ep_complete count
+                    break
+            except Exception:
+                break
+            time.sleep_ms(2)
+    # Deliberately NOT reordered to run before Step 1's display/SD init
+    # instead (which would let enumeration overlap with more of the boot
+    # sequence) -- usb_host_core_init() also raises the system clock to
+    # 252MHz as a side effect for PIO-USB's bit timing (src/
+    # usb_host_core.c), and display/SD init currently happens before that
+    # change; moving USB init earlier would mean their SPI setup runs
+    # under a different clock than it does today, unverified on hardware.
 
     # Step 4: Profile selection UI
     profiles = scan_profiles()
@@ -198,7 +258,13 @@ def main():
     # observed during that phase. No-op if the timer was never started
     # (e.g. enable_usb_kbd=false).
     try:
-        import usb_host
+        # usb_host is already imported at module level (top of this file) --
+        # a local "import usb_host" here used to shadow it, making Python
+        # treat the name as local to the whole main() function and breaking
+        # every earlier use in this function with "local variable
+        # referenced before assignment" (e.g. Step 3.6's usb_host.task()
+        # warm-up loop above, which runs before this point) -- found
+        # 2026-10-14 right after adding that warm-up loop.
         usb_host.stop_bg_timer()
     except Exception:
         pass
@@ -586,6 +652,82 @@ def main():
     gui_active_until = 0
     _touch = getattr(system, 'touch', None)
 
+    # Win+F8's "RAM Autosave: ON/OFF" message and Win+PageUp's cache-write
+    # stats overview (see the sc == 0x41 / sc == 0x4B branches below) both
+    # go through system.set_status() -- the existing transient-message
+    # mechanism (also used for "SYSTEM RESET", PrtScn capture results,
+    # ...), rendered in its own dedicated bar below the game screen
+    # (pb1000.py's _render_status_bar()) and auto-cleared on expiry by the
+    # normal per-frame update_display() call already in this loop. An
+    # earlier version of this hotkey pair hand-painted its own box in the
+    # top-left margin instead, and repeatedly collided with whatever else
+    # was already using that corner (boot_status.py's profile-name label,
+    # which paints once at boot and is never redrawn again, so anything
+    # that later clears "its own" box there erases that label outright --
+    # 2026-10-14 bug report). Reusing set_status() needs no bookkeeping
+    # here at all for when/how to clear it.
+    _AUTOSAVE_TOAST_MS = 2000
+    _AUTOSAVE_STATS_TOAST_MS = 4000
+
+    # RAM Autosave: flash cache of ram0 (+ram1) kept up to date from file
+    # create/update/delete activity inside the emulated PB-1000, so unsaved
+    # progress survives an unexpected reboot -- see mp/ram_autosave.py and
+    # doc/dev_guide.md's "RAM Autosave" section. Constructed last, right
+    # before the main loop (not earlier, right after load_state() -- see
+    # that area's own comments on how tight the heap is through boot;
+    # by here most of that transient compile pressure has already been
+    # freed via the gc.collect() calls along the way).
+    ram_autosave = None
+    if get_bool(cfg, "emulator", "ram_autosave"):
+        try:
+            gc.collect()
+            from ram_autosave import RamAutosave
+            ram_autosave = RamAutosave(system)
+            system._ram_autosave = ram_autosave  # reachable from emulator_menu_ram.py
+            if ram_autosave.has_pending_cache():
+                from boot_session import confirm_restore_autosave
+                if confirm_restore_autosave(display):
+                    ram_autosave.restore_from_cache()
+                else:
+                    ram_autosave.discard()
+                    print("[ram_autosave] cache declined, discarded.")
+                # confirm_restore_autosave() paints its "Unsaved progress
+                # found" prompt directly onto the raw display (fill_rect
+                # over the full physical width/height, then text at a
+                # fixed margin -- boot_session.py), on top of the
+                # already-drawn emulator screen/bezel (Step 9) and
+                # FuncKeyBar (Step 10) above. force_full_redraw() alone
+                # does not reliably clear it: it only repaints the bezel +
+                # the LCD's own rendered game-screen content (from
+                # self.lcd's pixel vram) + the status bar -- areas that
+                # don't necessarily cover every pixel the prompt touched
+                # (e.g. its left margin can sit outside the bezel's actual
+                # painted region). Clear the raw physical screen first, the
+                # same way the profile picker's own screen is cleared after
+                # it returns (see the `_early_lcd is None` fill_rect right
+                # after select_profile_ui() above), so nothing of the
+                # prompt can still be showing underneath.
+                if not getattr(system, "_hdmi_enabled", False):
+                    display.fill_rect(0, 0, display.width, display.height, 0x0000)
+                system.force_full_redraw()
+                if fkbar is not None:
+                    fkbar.draw()
+                # The raw clear above also wipes boot_status.py's profile-
+                # name/clock row (top-left corner) -- force_full_redraw()/
+                # fkbar.draw() don't touch that area, and boot_status
+                # itself was already stop()ped earlier (right before
+                # system.force_full_redraw() at Step 9, above) so nothing
+                # else was going to repaint it. redraw_header() honors
+                # show_profile_name/show_clock from pb1000.ini, same as
+                # the original boot-time paint.
+                if boot_status is not None:
+                    boot_status.redraw_header()
+        except Exception as _e:
+            print(f"ram_autosave unavailable: {_e}")
+            sys.print_exception(_e)
+            ram_autosave = None
+        gc.collect()
+
     try:
         while True:
             service_pio_uart_bridge(system, cpu_core)
@@ -616,7 +758,36 @@ def main():
             if mem_overlay is not None:
                 mem_overlay.poll(system, now)
 
+            if ram_autosave is not None:
+                ram_autosave.poll(now)
+
             sc = hd61700.get_last_key()
+
+            # handle_key_status_and_capture() shows a transient on-screen
+            # label for whatever key was just pressed (and handles PrtScn
+            # capture) via system.set_status() -- the same shared mechanism
+            # the Win+F7/F8/PageUp branches below also use for their own
+            # messages. It MUST run before that chain, not after: both go
+            # through the same single-message set_status()/_render_status_
+            # bar() slot (no queueing -- a later call simply overwrites
+            # whatever's pending), so whichever call happens later in a
+            # given iteration wins. The two were previously ordered the
+            # other way (this call after the chain, near the old
+            # `_sc_mod = ...` site below update_frame_if_due()) and it
+            # silently swallowed every Win+F8/Win+PageUp message: on the
+            # very same tick the chain set e.g. "Autosave: ON", this call
+            # ran afterward and immediately replaced it with sc's plain key
+            # label (or an empty label for an unmapped key like PageUp,
+            # which cleared the bar outright) -- so the message was always
+            # overwritten before the next frame render ever drew it
+            # (2026-10-14 bug report: "Win+PGUPが反応しなくなりました" /
+            # Win+F8's toast not appearing). mod reflects gui_active_until
+            # from *before* this tick's chain runs, i.e. whether GUI was
+            # already held when this key event happened -- not whether the
+            # chain goes on to consume/reset it for its own combo handling.
+            _sc_mod = 8 if time.ticks_diff(gui_active_until, now) > 0 else 0
+            handle_key_status_and_capture(system, sc, _sc_mod)
+
             if sc == 0xE3 or sc == 0xE7:  # LGUI or RGUI
                 gui_active_until = time.ticks_add(now, 500)
             elif sc == 0x29:  # ESC / BREAK
@@ -639,15 +810,49 @@ def main():
                         # handler below), ending the whole emulator session
                         # just because the menu couldn't open.
                         from emulator_menu import show_emulator_menu
-                        result = show_emulator_menu(system, display, fkbar, joystick_input, cfg)
+                        result = show_emulator_menu(system, display, fkbar, joystick_input, cfg, boot_status)
                         joystick_input = result['joystick_input']
                     except MemoryError as _e:
                         print(f"EMULATOR MENU unavailable (low memory): {_e}")
                         gc.collect()
+            elif sc == 0x41:  # F8 → toggle RAM Autosave on/off
+                if time.ticks_diff(gui_active_until, now) > 0:
+                    gui_active_until = 0
+                    if ram_autosave is not None:
+                        ram_autosave.enabled = not ram_autosave.enabled
+                        _msg = "Autosave: ON" if ram_autosave.enabled else "Autosave: OFF"
+                        print(f"[ram_autosave] {_msg} (Win+F8)")
+                        system.set_status(_msg, _AUTOSAVE_TOAST_MS)
+                    else:
+                        print("[ram_autosave] disabled in pb1000.ini -- nothing to toggle")
+            elif sc == 0x4B:  # PageUp → show RAM Autosave cache-write stats
+                if time.ticks_diff(gui_active_until, now) > 0:
+                    gui_active_until = 0
+                    if ram_autosave is not None:
+                        system.set_status(ram_autosave.stats_summary_line(),
+                                           _AUTOSAVE_STATS_TOAST_MS)
+                    else:
+                        print("[ram_autosave] disabled in pb1000.ini -- no stats")
             elif sc == 0x53:  # NumLock → RESET
                 system.reset_emulator()
-                #system.force_full_redraw()
-                #print("[reset] don't call system.reset_emulator() and system.force_full_redraw()")
+                # reset_emulator() only resets CPU registers/PC -- a real
+                # hardware reset still needs the ON/power-switch input
+                # delivered afterward (power_on()'s cpu_core.set_input(SW,
+                # 1)) for the ROM's boot code to actually wake up and run,
+                # rather than going to sleep waiting for a KEY_INT that
+                # then never arrives (same "is_sleeping with KEY_INT
+                # disabled" trap the "Startup sleep detected" guard above
+                # exists to catch -- but that guard only runs once, in the
+                # first 1.5s after boot, not on a later manual reset here).
+                # Without this, any key afterward (e.g. MENU/F6) looks like
+                # a freeze: the CPU is sitting asleep and nothing is left
+                # to wake it. force_reset=True keeps PC at 0x0000 (this is
+                # RESET, not a fresh POWER ON) while still delivering that
+                # input. See pb1000.py's power_on()/reset_emulator().
+                system.power_on(force_reset=True)
+                system.force_full_redraw()
+                if fkbar is not None:
+                    fkbar.draw()
 
             if getattr(system, '_pio_uart_eof_pending', False):
                 system._pio_uart_eof_pending = False
@@ -672,9 +877,6 @@ def main():
                     fkbar.release(system)
             if joystick_input is not None:
                 joystick_input.poll(system)
-
-            _sc_mod = 8 if time.ticks_diff(gui_active_until, now) > 0 else 0
-            handle_key_status_and_capture(system, sc, _sc_mod)
 
             frame_time = update_frame_if_due(
                 system,

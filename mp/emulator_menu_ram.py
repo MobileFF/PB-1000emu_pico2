@@ -132,6 +132,15 @@ def _do_ram_save(system, display):
 
     try:
         system.save_state(path=path)
+        # An explicit save to the ACTIVE profile supersedes the autosave
+        # cache (see mp/ram_autosave.py) -- discard it so the next boot
+        # doesn't offer to "restore" progress this save already has.
+        # Saving to a different/new folder leaves the active profile's own
+        # unsaved changes (and its cache) untouched.
+        if path == current_dir:
+            autosave = getattr(system, "_ram_autosave", None)
+            if autosave is not None:
+                autosave.discard()
         return "RAM saved: " + path.rsplit("/", 1)[-1]
     except Exception as e:
         return f"!! RAM save error: {e}"

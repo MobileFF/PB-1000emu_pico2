@@ -7,6 +7,60 @@ date heading instead of a version number or "Unreleased" marker.
 
 ---
 
+## 2026-10-14
+
+### Added
+
+- **Added a Win+PageUp display of RAM Autosave's cumulative flush stats** (`mp/ram_autosave.py`
+  `stats_summary_line()`, `mp/main.py`): shows the flush count, bytes written, and average time
+  per flush since boot, in the same status bar (below the game screen) used by Win+F8's ON/OFF
+  message, for about 4 seconds.
+
+### Fixed
+
+- **Fixed RAM Autosave's cache restore clobbering live RAM with stale bytes from outside the
+  tracked range** (`mp/ram_autosave.py` `restore_from_cache()`): differential flushing only keeps
+  the HIMEM..DIREN content range current, so everything else in the cache file can be as old as
+  the cache's last full rewrite. The previous implementation overlaid the *entire* buffer with one
+  `readinto()`, which could clobber correct live RAM (OS work variables, etc.) with those stale
+  bytes -- the actual cause of key input working right after a restore while the emulated OS then
+  behaved erratically, with no later reset fixing it. Fixed by overlaying only the 12-byte
+  boundary-pointer block plus the HIMEM..DIREN range, using the HIMEM/DIREN values as recorded in
+  the cache itself. Also fixed a `MemoryError: ... allocating 32769 bytes` on restoring expansion
+  RAM (RAM1) via `f.read(32768)` -- on real hardware, `f.read(n)` apparently needs n+1 bytes of
+  internal allocation at this size; switching to `f.readinto()`, which writes directly into the
+  destination buffer, avoids this entirely.
+- **Fixed RAM Autosave flushing continuously during an all-BASIC program with no file access at
+  all** (`mp/ram_autosave.py` `_resync_ranges()`): when the file area extends into expansion RAM
+  (bank1), the watch range's low bound was unconditionally `0x8000`. For a profile where `HIMEM`
+  itself sits inside bank1, this misclassified BASIC's own numeric/string variable tables (below
+  `HIMEM`) as file content, triggering an unnecessary flush on every variable update. Fixed the
+  low bound to `max(HIMEM, 0x8000)`; the boot-time restore path excludes that same region
+  accordingly.
+- **Fixed Win+F8 (autosave ON/OFF) and Win+PageUp (stats) messages never appearing on screen**
+  (`mp/main.py`): both used `system.set_status()`, but the per-keypress key-label display
+  (`handle_key_status_and_capture()`), which uses the same mechanism, ran later in the same
+  main-loop iteration and immediately overwrote the message. Fixed by reordering so the
+  Win+F7/F8/PageUp branches' messages are set last.
+- **Fixed Win+F7 (emulator menu) and Win+F8 (autosave toggle) also pressing their mapped physical
+  key (CAL / MEMO IN) at the same time** (`src/modhd61700.c` `c_kb_process_usb_key()`): Win+F11
+  (reset) already suppressed the ordinary key press while Win is held, but F7/F8 had no such
+  guard, so the Win combo and the ordinary key press both fired. Fixed using the same approach as
+  F11 (firmware rebuild required).
+- **Fixed the profile-name label disappearing after dismissing RAM Autosave's restore prompt or
+  closing the emulator menu** (`mp/boot_status.py` new `redraw_header()`, `mp/main.py`,
+  `mp/emulator_menu.py`): the top-left profile-name label is painted once at boot and never
+  redrawn afterward; a later full-screen clear (dismissing the restore prompt, restoring the
+  screen after the menu closes) erased it with nothing repainting it. Added `redraw_header()`
+  (honors `pb1000.ini`'s settings) and call it right after each such clear.
+- **Improved SD card transfer speed** (`mp/display_init.py`, `mp/sdcard.py`): fixed data transfers
+  wrongly running at the 400kHz init-handshake baud rate, and introduced a dedicated
+  `SD_DATA_BAUD` (12MHz, reusing the sibling MSX_emu_pico2 project's real-hardware sweep result).
+  Also sped up `readinto()`/`write()` by busy-polling the first 100 data-token wait iterations and
+  merging the checksum read/write from two 1-byte transfers into one 2-byte transfer.
+
+---
+
 ## 2026-10-11
 
 ### Added

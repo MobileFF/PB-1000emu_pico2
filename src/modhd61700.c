@@ -235,6 +235,38 @@ static void sync_mem_write_hook_range(void) {
   cpu_state.mem_write_hook_active   = true;
 }
 
+/* Native dirty-range watch slot configuration -- shadowed here (outside
+   cpu_state) so it survives hd61700_init() zeroing cpu_state.native_dirty_
+   watch[] on reset (see mod_reset()'s restore block below). See
+   hd61700.h's native_dirty_watch comment and hd61700.c's
+   native_dirty_track() for the hot-path side of this. */
+static struct {
+  bool configured;
+  uint16_t addr_start;
+  uint16_t addr_end;
+  int8_t bank_filter;
+} native_dirty_watch_cfg[NATIVE_DIRTY_WATCH_MAX];
+
+/* Recompute cpu_state.native_dirty_watch_any_active/min_addr/max_addr from
+   native_dirty_watch_cfg[]. Call after any change to a slot's
+   configured/addr_start/addr_end (set/clear), and after hd61700_init()
+   zeroes the struct (see mod_reset()). */
+static void sync_native_dirty_watch_range(void) {
+  bool any = false;
+  uint16_t lo = 0xFFFF, hi = 0;
+  for (int i = 0; i < NATIVE_DIRTY_WATCH_MAX; i++) {
+    if (!native_dirty_watch_cfg[i].configured) continue;
+    any = true;
+    if (native_dirty_watch_cfg[i].addr_start < lo) lo = native_dirty_watch_cfg[i].addr_start;
+    if (native_dirty_watch_cfg[i].addr_end   > hi) hi = native_dirty_watch_cfg[i].addr_end;
+  }
+  cpu_state.native_dirty_watch_any_active = any;
+  if (any) {
+    cpu_state.native_dirty_watch_min_addr = lo;
+    cpu_state.native_dirty_watch_max_addr = hi;
+  }
+}
+
 /* UART RX/TX FIFO (Internal) */
 #define UART_RX_FIFO_SIZE 256
 static uint8_t uart_rx_fifo[UART_RX_FIFO_SIZE];
@@ -481,6 +513,25 @@ static void c_kb_process_usb_key(uint8_t scancode, bool pressed) {
   }
 
   /* 2B. F9 no longer intercepted here; falls through to base map → KEY_MEMO */
+
+  /* 2C. Same Win-combo-vs-mapped-key conflict as F11 above, for the two
+   * other scancodes Python's main.py main loop also gives a Win+<key>
+   * meaning to (via get_last_key() + its own gui_active_until window):
+   * F7 (0x40, Win+F7 = emulator menu; plain F7 falls through to KEY_CAL)
+   * and F8 (0x41, Win+F8 = RAM Autosave on/off toggle; plain F8 falls
+   * through to KEY_MEMO_IN). c_kb_last_pressed_scancode was already
+   * recorded above regardless of this early return, so Python's
+   * get_last_key()-based hotkey handling still sees the press either way
+   * -- only the ROM-visible matrix key press (c_kb_press() below, via the
+   * ADV/base map) is skipped while Win is held, so e.g. Win+F8 no longer
+   * also presses MEMO IN on the emulated keyboard underneath the toggle
+   * (2026-10-14 bug report). PageUp (0x4B, Win+PageUp = Autosave stats)
+   * needs no such guard: it has no entry in either map (keymap.py/
+   * keymap.json), so it was never reaching c_kb_press() in the first
+   * place. */
+  if ((scancode == 0x40 || scancode == 0x41) && pressed && host_gui_physical) {
+    return;
+  }
 
   /* 3. Handle key release */
   if (!pressed) {
@@ -1348,6 +1399,19 @@ static mp_obj_t mod_reset(size_t n_args, const mp_obj_t *args) {
   /* Restore mem_write_hook_active — same reason (hd61700_init() zeroed it) */
   sync_mem_write_hook_range();
 
+  /* Restore native_dirty_watch[] slots from native_dirty_watch_cfg[] —
+     same reason (hd61700_init() zeroed cpu_state.native_dirty_watch[] too).
+     Each slot's pending dirty range is intentionally dropped (dirty=false)
+     since a reset means whatever it was tracking no longer applies. */
+  for (int i = 0; i < NATIVE_DIRTY_WATCH_MAX; i++) {
+    if (!native_dirty_watch_cfg[i].configured) continue;
+    cpu_state.native_dirty_watch[i].configured  = true;
+    cpu_state.native_dirty_watch[i].addr_start  = native_dirty_watch_cfg[i].addr_start;
+    cpu_state.native_dirty_watch[i].addr_end    = native_dirty_watch_cfg[i].addr_end;
+    cpu_state.native_dirty_watch[i].bank_filter = native_dirty_watch_cfg[i].bank_filter;
+  }
+  sync_native_dirty_watch_range();
+
   /* Connect direct memory pointers for high-performance path */
   {
     uint8_t * const bank_bufs[3] = {bank_buf_get(1), bank_buf_get(2), bank_buf_get(3)};
@@ -2041,6 +2105,90 @@ static mp_obj_t mod_set_mem_write_hook_enabled(mp_obj_t addr_start_obj, mp_obj_t
 }
 static MP_DEFINE_CONST_FUN_OBJ_2(mod_set_mem_write_hook_enabled_obj, mod_set_mem_write_hook_enabled);
 
+/* hd61700.set_native_dirty_watch(slot, addr_start, addr_end, bank_filter=-1)
+ * Native (C-side) alternative to set_mem_write_hook(): configures slot
+ * (0..NATIVE_DIRTY_WATCH_MAX-1) to track writes in [addr_start, addr_end]
+ * (optionally restricted to one bank) without ever calling into Python on
+ * a write and without disabling the ram_ptr/bank_ptr fast path -- see
+ * hd61700.h's native_dirty_watch comment. Poll with
+ * poll_native_dirty_watch(slot). Re-registering the same slot resets its
+ * pending dirty range. */
+static mp_obj_t mod_set_native_dirty_watch(size_t n_args, const mp_obj_t *args) {
+  int slot = mp_obj_get_int(args[0]);
+  if (slot < 0 || slot >= NATIVE_DIRTY_WATCH_MAX) {
+    mp_raise_ValueError(MP_ERROR_TEXT("slot out of range"));
+  }
+  uint16_t start = (uint16_t)mp_obj_get_int(args[1]);
+  uint16_t end   = (uint16_t)mp_obj_get_int(args[2]);
+  int bank_filter = (n_args > 3) ? mp_obj_get_int(args[3]) : -1;
+
+  native_dirty_watch_cfg[slot].configured  = true;
+  native_dirty_watch_cfg[slot].addr_start  = start;
+  native_dirty_watch_cfg[slot].addr_end    = end;
+  native_dirty_watch_cfg[slot].bank_filter = (int8_t)bank_filter;
+
+  cpu_state.native_dirty_watch[slot].configured  = true;
+  cpu_state.native_dirty_watch[slot].addr_start  = start;
+  cpu_state.native_dirty_watch[slot].addr_end    = end;
+  cpu_state.native_dirty_watch[slot].bank_filter = (int8_t)bank_filter;
+  cpu_state.native_dirty_watch[slot].dirty       = false;
+
+  sync_native_dirty_watch_range();
+  return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(mod_set_native_dirty_watch_obj, 3, 4,
+                                            mod_set_native_dirty_watch);
+
+/* hd61700.clear_native_dirty_watch(slot) */
+static mp_obj_t mod_clear_native_dirty_watch(mp_obj_t slot_obj) {
+  int slot = mp_obj_get_int(slot_obj);
+  if (slot >= 0 && slot < NATIVE_DIRTY_WATCH_MAX) {
+    native_dirty_watch_cfg[slot].configured = false;
+    cpu_state.native_dirty_watch[slot].configured = false;
+    cpu_state.native_dirty_watch[slot].dirty = false;
+  }
+  sync_native_dirty_watch_range();
+  return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(mod_clear_native_dirty_watch_obj, mod_clear_native_dirty_watch);
+
+/* hd61700.poll_native_dirty_watch(slot) -> (min, max) | None
+ * Atomically reads and clears slot's pending dirty range (absolute
+ * addresses, inclusive). Returns None if the slot isn't configured or
+ * nothing has been written since the last poll. */
+static mp_obj_t mod_poll_native_dirty_watch(mp_obj_t slot_obj) {
+  int slot = mp_obj_get_int(slot_obj);
+  if (slot < 0 || slot >= NATIVE_DIRTY_WATCH_MAX ||
+      !cpu_state.native_dirty_watch[slot].configured ||
+      !cpu_state.native_dirty_watch[slot].dirty) {
+    return mp_const_none;
+  }
+  uint16_t lo = cpu_state.native_dirty_watch[slot].dirty_min;
+  uint16_t hi = cpu_state.native_dirty_watch[slot].dirty_max;
+  cpu_state.native_dirty_watch[slot].dirty = false;
+  mp_obj_t tuple[2] = {MP_OBJ_NEW_SMALL_INT(lo), MP_OBJ_NEW_SMALL_INT(hi)};
+  return mp_obj_new_tuple(2, tuple);
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(mod_poll_native_dirty_watch_obj, mod_poll_native_dirty_watch);
+
+/* hd61700.peek_native_dirty_watch(slot) -> bool
+ * Non-destructive check: true if slot has an unconsumed dirty range right
+ * now, without clearing it (unlike poll_native_dirty_watch(), which
+ * atomically reads-and-clears). Lets Python-side debounce logic decide
+ * whether to (keep) arm(ing) a pending-flush timer on a given main-loop
+ * tick without collapsing the dirty_min/dirty_max range it's waiting to
+ * eventually read with poll_native_dirty_watch() once the debounce window
+ * actually elapses. */
+static mp_obj_t mod_peek_native_dirty_watch(mp_obj_t slot_obj) {
+  int slot = mp_obj_get_int(slot_obj);
+  if (slot < 0 || slot >= NATIVE_DIRTY_WATCH_MAX ||
+      !cpu_state.native_dirty_watch[slot].configured) {
+    return mp_const_false;
+  }
+  return mp_obj_new_bool(cpu_state.native_dirty_watch[slot].dirty);
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(mod_peek_native_dirty_watch_obj, mod_peek_native_dirty_watch);
+
 /* hd61700.read_mem(addr, [segment]) */
 static mp_obj_t mod_read_mem(size_t n_args, const mp_obj_t *args) {
   uint32_t addr = (uint32_t)mp_obj_get_int(args[0]);
@@ -2438,6 +2586,14 @@ static const mp_rom_map_elem_t hd61700_module_globals_table[] = {
      MP_ROM_PTR(&mod_clear_mem_write_hook_obj)},
     {MP_ROM_QSTR(MP_QSTR_set_mem_write_hook_enabled),
      MP_ROM_PTR(&mod_set_mem_write_hook_enabled_obj)},
+    {MP_ROM_QSTR(MP_QSTR_set_native_dirty_watch),
+     MP_ROM_PTR(&mod_set_native_dirty_watch_obj)},
+    {MP_ROM_QSTR(MP_QSTR_clear_native_dirty_watch),
+     MP_ROM_PTR(&mod_clear_native_dirty_watch_obj)},
+    {MP_ROM_QSTR(MP_QSTR_poll_native_dirty_watch),
+     MP_ROM_PTR(&mod_poll_native_dirty_watch_obj)},
+    {MP_ROM_QSTR(MP_QSTR_peek_native_dirty_watch),
+     MP_ROM_PTR(&mod_peek_native_dirty_watch_obj)},
     {MP_ROM_QSTR(MP_QSTR_read_mem), MP_ROM_PTR(&mod_read_mem_obj)},
     {MP_ROM_QSTR(MP_QSTR_write_mem), MP_ROM_PTR(&mod_write_mem_obj)},
     /* Constants */

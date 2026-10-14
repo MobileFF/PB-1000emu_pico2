@@ -369,6 +369,69 @@ This whole mechanism is unconditionally disabled when `[display] lcd_height = 32
 the ROM's native implementation runs untouched — since the fix is unnecessary (and actually harmful)
 in 32-dot mode.
 
+### 6.3 Native Dirty-Range Watch
+
+`register_mem_write_hook()` (6.1) calls a Python `fn(addr, data, bank)` on every matching
+write, which is fine for watching a single register or a few bytes, but **causes a serious
+slowdown when the watched range spans a multi-KB region**, for two reasons.
+
+1. Registering even one `set_mem_write_hook()` makes `mem_writebyte()`/`_iz()`/`_stack()`
+   (`src/hd61700.c`) stop taking the `ram_ptr`/`bank_ptr` direct-pointer fast path for
+   **the union of all registered hooks' ranges** (`[min_addr, max_addr]`), falling through
+   to the `mem_write()` callback (`c_mem_direct_write()`, several extra range checks)
+   instead. Even addresses that don't match any individual hook's own range still pay this
+   cost if they fall inside the combined range.
+2. Within that combined range, a write that does match a hook's own range additionally
+   triggers `mp_call_function_n_kw()` (a full MicroPython interpreter call) on every single
+   byte. That cost dwarfs native instruction execution, and when the watched region is
+   written often (e.g. the PB-1000 file area sits right next to the running BASIC program's
+   own workspace and can span several KB, or all of RAM1), the whole emulation becomes
+   visibly slower. (`mp/ram_autosave.py`'s first implementation hit exactly this, and
+   switched to the mechanism below.)
+
+For the case where "I don't need to see each individual write, just whether anything in
+this range changed since I last checked, and the min/max of what changed," a lighter,
+C-only alternative avoids both costs:
+
+```c
+// hd61700.set_native_dirty_watch(slot, addr_start, addr_end, bank_filter=-1)
+// slot: watch slot number, 0..NATIVE_DIRTY_WATCH_MAX-1 (4).
+// bank_filter: -1 (default) matches any bank; 0-3 restricts to that bank
+//              (for the 0x8000-0xFFFF banked region).
+// Re-registering the same slot overwrites its config and resets any
+// pending dirty range.
+hd61700.set_native_dirty_watch(0, 0x6941, 0x7FFF)
+hd61700.set_native_dirty_watch(1, 0x8000, 0xFFFF, 1)  // bank==1 only
+
+// hd61700.clear_native_dirty_watch(slot)
+hd61700.clear_native_dirty_watch(1)
+
+// hd61700.poll_native_dirty_watch(slot) -> (min, max) | None
+// Reads and clears the pending dirty range (consumed once per poll).
+// Meant to be called at low frequency, e.g. once per main-loop iteration.
+rng = hd61700.poll_native_dirty_watch(0)
+if rng is not None:
+    lo, hi = rng
+```
+
+How this differs from `register_mem_write_hook()`:
+
+- Detection happens with **plain integer comparisons in C** (`native_dirty_track()` in
+  `src/hd61700.c`). No Python function is ever called.
+- It **never disables the `ram_ptr`/`bank_ptr` fast path.** It's entirely independent of
+  6.1's `mem_write_hook_active` and runs alongside it.
+- Writes can't be cancelled (there's no equivalent of `set_mem_write_hook()`'s callback
+  returning `True`) — this is observation-only.
+- Configuration survives a CPU reset (`hd61700.reset()`): it's restored from
+  `modhd61700.c`'s shadow table (`native_dirty_watch_cfg[]`), the same pattern used for
+  call_hook/mem_write_hook in 6.1. Any pending dirty range itself, however, is lost on
+  reset.
+
+Use this for "watch a wide range, but don't care about individual write contents" cases
+(`mp/ram_autosave.py` is the motivating example — see section 15). Keep using
+`register_mem_write_hook()` (6.1) for narrow, register-style watches that need to inspect
+each write's address/data/bank as it happens.
+
 ---
 
 ## 7. LCD Character Detection (formerly Serial Console; Python-side wiring removed)
@@ -553,3 +616,192 @@ Path("doc/example.md").write_text(text, encoding="utf-8")
 
 - PowerShell `Set-Content` may be affected by BOM handling or the active code page
 - To strip a BOM from an existing file: read with `utf-8-sig`, write back with `utf-8`
+
+## 15. RAM Autosave (`mp/ram_autosave.py`)
+
+### Purpose
+
+Without an explicit "RAM Save" (Emulator Menu), losing power normally loses everything
+since the last explicit save. The real PB-1000 keeps its RAM contents through battery
+backup even without an explicit save. To close this gap, file create/update/delete
+activity inside the emulated PB-1000 mirrors `ram0.bin` (+ `ram1.bin` when expansion RAM
+is in use) into a flash-resident cache (`/.autosave/<profile name>/`, always on internal
+flash's root vfs -- independent of the profile's own save location, `<profile_dir>`,
+normally `/sd/rams/<name>`. See "Where the cache lives" below.)
+
+This cache is entirely separate from the user's own explicit save files and never
+overwrites them.
+
+### Where the cache lives
+
+An earlier implementation used `<profile_dir>` directly (i.e. put the cache next to the
+profile's own save data). `profile_dir` is normally `/sd/rams/<name>`
+(`boot_session.PROFILE_ROOT`), i.e. on the SD card -- which caused two problems:
+
+1. This module's debounce timing (below) is based on internal-flash latency
+   (`mp/test/bench_ram_autosave_write.py`, ~130ms ram0-only / ~480ms with ram1), which
+   doesn't apply to SD card I/O.
+2. LCD output showed flicker similar to ordinary SD card access during a flush (the SD
+   card shares the SPI bus with the LCD, so SD traffic collides with the LCD's own SPI
+   updates). More fundamentally, the whole point -- surviving an unexpected power loss --
+   shouldn't depend on a removable SD card's presence or state.
+
+`RamAutosave._compute_cache_dir()` therefore never references the profile's own storage
+location at all, and always writes under internal flash's root vfs,
+`/.autosave/<profile name>/` (the profile name is `profile_dir`'s last path segment, to
+keep multiple profiles' caches from colliding; a fixed `_default` when no profile is
+selected).
+
+### Detection
+
+The PB-1000's file system manages the file area's boundaries through fixed-address work
+variables (`HIMEM`/`BASEN`/`MEMEN`/`DATDI`/`BASDI`/`DIREN`, `&H6941`-`&H694C`; see
+`references/sysvars.txt`). Two mechanisms of different weight detect activity there:
+
+1. **Boundary-pointer hook** (fixed, `&H6941`-`&H694C`, `register_mem_write_hook()`,
+   section 6.1): detects file create/delete/resize (the file area's boundaries move). On a
+   hit, watch 2's range is recomputed and the change gets flushed to the cache (see
+   "Differential flush" below for how). This range is only 12 bytes and rarely written, so
+   the Python-callback mechanism's cost here is negligible.
+2. **Native dirty-range watch on the file body** (dynamic, `HIMEM`..`DIREN`,
+   `hd61700.set_native_dirty_watch()`, section 6.3): catches same-size in-place overwrites
+   (e.g. a game's fixed-format save data, which watch 1 alone can't detect). The touched
+   address range's min/max is tracked entirely in C (no Python call), read back via
+   `poll_native_dirty_watch()` on the next main-loop iteration, and only that range is
+   patched into the cache file (seek+write) -- never a full rewrite.
+
+   This was originally also implemented with `register_mem_write_hook()` (6.1), but the
+   PB-1000 file area sits right next to the running BASIC program's own workspace and can
+   span several KB or all of RAM1 -- the per-write Python call cost, compounded by the
+   side effect of disabling the CPU core's direct-pointer fast path across the whole
+   combined watch range, made overall emulation visibly slower. Switching to the native
+   mechanism in 6.3 fixed this.
+
+When `DIREN` (the file area's end) exceeds `0x7FFF`, the file area has grown into
+expansion RAM (bank1, `0x8000`-`0xFFFF`); watch 2's range then extends there too (filtered
+to `bank==1` writes only -- `ram2`/`ram3` stay out of scope). Watch 2's low bound on
+bank1 is `max(HIMEM, 0x8000)`, not unconditionally `0x8000`: `HIMEM` itself can land at or
+above `0x8000` (expansion RAM) for a valid profile, and the `0x8000`..`HIMEM` region in
+that case isn't file content at all -- it's BASIC's own numeric/string variable tables
+(`FORSK`/`GOSSK`/`TONDT`/`DTTB`/`TOSDT`/`PTSDT`, `references/sysvars.txt`). Without
+raising the low bound to `HIMEM`, that region gets misclassified as file content, and
+ordinary variable updates during normal BASIC execution -- with no file access at all --
+keep that slot dirty continuously, triggering unnecessary flushes.
+
+Watch 1's callback runs from inside CPU instruction execution, so it only does cheap
+bookkeeping, never file I/O. Watch 2 never goes through a Python callback at all. The
+actual cache write happens in `RamAutosave.poll()` (called once per main-loop iteration).
+
+### Debouncing the flush
+
+`BASEN` (the end of the BASIC-files region) moves not just on file create/delete, but also
+**every time a single BASIC program line is entered or edited** (its tokenized byte length
+changes). So the boundary-pointer hook fires on essentially every ENTER keypress while
+writing a program. Flushing immediately and synchronously on every hit (`_flush_full()` --
+a real write to internal flash, measured at ~130ms for ram0 alone and ~480ms with ram1, see
+`mp/test/bench_ram_autosave_write.py`) would stall on every line committed while editing --
+this was in fact the actual cause of a visible slowdown that remained even after the fix in
+section 6.3/15 above.
+
+To avoid this, the hook-to-flush path is debounced (`RamAutosave.poll()`,
+`_FULL_FLUSH_DEBOUNCE_MS` / `_FULL_FLUSH_MAX_WAIT_MS`). A hit immediately re-ranges watch
+2 (no file I/O, cheap), but defers the actual `_flush_full()` until
+`_FULL_FLUSH_DEBOUNCE_MS` (800ms by default) has passed with no further hits. A burst of
+several lines typed in a row keeps pushing the deadline out and collapses into a single
+flush once things go quiet. To keep an unexpected power loss from losing too much during a
+long uninterrupted editing session, `_FULL_FLUSH_MAX_WAIT_MS` (5000ms by default) caps how
+long the flush can be deferred since the first pending hit.
+
+### Differential flush
+
+Even with debouncing, rewriting the whole of `ram0` (up to 8KB) / `ram1` (up to 32KB) every
+time a hit finally triggers a flush wouldn't change the cost of that one flush (measured at
+~130ms for ram0 alone, ~480ms with ram1). The boundary-pointer-triggered flush
+(`_flush_boundary_triggered()`) turns out not to need a full rewrite either, for the
+following reason, and is implemented accordingly.
+
+Any byte that a file-area operation can possibly change falls into one of three categories:
+
+1. The boundary pointers themselves (`&H6941`-`&H694C`, 12 bytes, in the fixed area below
+   `HIMEM`)
+2. Content at or above `HIMEM` (including directory-entry shifts)
+3. Workspace below `HIMEM` (e.g. the `IOBUF` used by SAVE/LOAD) -- scratch space that
+   doesn't affect file-state correctness
+
+Category 2 is already being captured continuously by watch 2 (the native dirty-range
+watch), independently of whatever triggered it, so there's no need to re-scan it when the
+boundary-pointer hook fires. Category 1 lives outside watch 2's range (below `HIMEM`), so it
+is always included as a fixed 12-byte write. Category 3 can be ignored. In other words, the
+union of "the fixed 12 boundary-pointer bytes" and "whatever watch 2 captured" is enough to
+correctly reflect any file create/delete/resize, with nothing missed.
+
+There are two exceptions where this doesn't hold, and a one-time full rewrite is used as a
+fallback instead (`_need_full_ram0`/`_need_full_ram1`):
+
+- `HIMEM` itself moves (e.g. a `CLEAR` statement): a byte written right before watch 2's
+  slot 0 range switches over could be missed.
+- `DIREN` crosses `0x7FFF` for the first time, newly arming the bank1 watch (watch 2's slot
+  1): similarly, a byte written into bank1 right before that watch is armed could be missed.
+
+Both are rare transition events, so paying the full-rewrite cost just that one time has
+negligible overall impact.
+
+### Known limitations
+
+- If the active profile's own explicit save has no `ram1.bin` yet (so RAM1's buffer was
+  never allocated at `PB1000System.__init__()` time), and the autosave cache has a
+  `ram1.bin` anyway, that portion is skipped on boot-time restore (with a warning logged)
+  rather than guessed at. Doing one explicit RAM Save first avoids this.
+- `ram2.bin` / `ram3.bin` / `color_vram.bin` are out of scope entirely.
+
+### Runtime on/off toggle (Win+F8)
+
+Even with debouncing and differential flushing in place, some software still makes the
+flush frequency itself noticeable (e.g. a game that keeps rewriting file content at short
+intervals), so `main.py` has a runtime toggle on **Win+F8**. It just flips
+`RamAutosave.enabled` (default `True`), independent of the `[emulator] ram_autosave`
+config switch (which only controls whether this object gets constructed at all).
+`poll()` checks `enabled` first and returns immediately when it's false, so watch 1 (the
+boundary-pointer hook) and watch 2 (the native dirty-range watches) keep running either
+way -- both already cost nothing measurable on their own (no per-write Python call, and
+watch 1 is a fixed 12 bytes), so there's no need to tear them down and re-arm them on
+every toggle. The only thing actually skipped is the flush I/O itself -- the real cost,
+~130-480ms per occurrence. Anything changed while off isn't protected (turning this off
+is an explicit trade of the power-loss safety net for less flash I/O, same as unchecking
+the config option, just without a reboot). Turning it back on lets whatever dirty range
+accumulated while off get flushed once, in one batch, the next time the debounce window
+elapses (a one-time catch-up).
+
+Toggling shows "Autosave: ON"/"Autosave: OFF" via `system.set_status()` (the dedicated bar
+below the game screen, `pb1000.py`'s `_render_status_bar()`) for about 2 seconds. This bar
+is the same shared region used for "SYSTEM RESET", PrtScn capture results, etc., and is
+separate from the profile-name label `boot_status.py` draws in the top-left corner, so the
+two never collide.
+
+### Cache-write stats display (Win+PageUp)
+
+**Win+PageUp** shows the cumulative flush count, bytes written, and average time per
+flush since boot, in the same status bar (`RamAutosave.stats_summary_line()`), via the
+same `system.set_status()` mechanism as Win+F8. The counters
+(`stat_flush_count`/`stat_bytes_written`/`stat_total_flush_ms`, etc., updated by
+`_stat_record()` after each successful flush, with no log output) are kept only for this
+boot session (reset on reboot, never persisted) -- useful as a rough gauge of how much
+flush activity a given piece of software causes.
+
+### Boot-time restore (`restore_from_cache()`)
+
+The cache file as a whole isn't always fully current (see "Differential flush" above --
+`_flush_full()`, a full rewrite, only runs once at cache creation and again right after
+`HIMEM`/`DIREN`'s own watch range changes; every other flush is a `_flush_partial()`
+patching only the tracked range). So `restore_from_cache()` doesn't simply overlay the
+whole loaded ram0/ram1 with the cache file -- it overlays only **the 12-byte boundary-
+pointer block plus the content range from HIMEM (as recorded in the cache's own pointer
+bytes -- not the live system's current HIMEM) to DIREN**. Everything else (OS work
+variables, etc.) is left exactly as `load_state()` loaded it.
+
+This is also the fix for a bug found on 2026-10-14: an earlier version used
+`f.readinto()` to overlay the *entire* buffer at once, which could clobber live, already-
+correct RAM with stale bytes from outside the tracked range (frozen since the cache's last
+full rewrite). Symptom: key input worked right after a restore, but the emulated OS then
+behaved erratically, and no later reset fixed it (the damage was in RAM content, which a
+reset never touches).

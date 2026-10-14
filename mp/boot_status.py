@@ -125,6 +125,22 @@ class BootStatusOverlay:
                 os.dupterm(None, 0)
             except Exception:
                 pass
+
+    def redraw_header(self):
+        """Redraw just the profile-name/clock row (show_profile/show_clock,
+        per pb1000.ini), honoring whichever of the two is actually enabled
+        -- without re-starting the log mirror (unlike start()). start()
+        paints this once at boot and nothing redraws it again afterward
+        (by design: this header should stay put through the whole
+        session) -- but some later full-screen repaint (e.g. RAM
+        Autosave's restore-prompt clear in main.py) can legitimately wipe
+        the whole physical screen including this corner, needing an
+        explicit redraw of just this row. Safe to call any time,
+        including after stop()."""
+        if self._show_profile:
+            _draw_text(self._display, 4, 4, self._profile_name, _HDR)
+        if self._show_clock:
+            self._draw_clock()
             self._mirror = None
 
     def _draw_clock(self):

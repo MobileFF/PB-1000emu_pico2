@@ -23,6 +23,11 @@ _DEFAULTS = {
         "loop_idle_ms": "0",
         "step_chunk": "2048",
         "enable_repl_uart": "true",
+        # RAM Autosave: flash cache of ram0/ram1 kept up to date from file
+        # create/update/delete activity inside the emulated PB-1000, so
+        # unsaved progress survives an unexpected reboot. See
+        # doc/dev_guide.md's "RAM Autosave" section / mp/ram_autosave.py.
+        "ram_autosave": "true",
     },
     "disk": {
         "enabled": "false",

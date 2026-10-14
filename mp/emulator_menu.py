@@ -490,7 +490,7 @@ def _dispatch_top(item_id, system, display, fkbar, cfg, state):
 
 # ── Main entry point ─────────────────────────────────────────────────────────
 
-def show_emulator_menu(system, display, fkbar, joystick_input, cfg):
+def show_emulator_menu(system, display, fkbar, joystick_input, cfg, boot_status=None):
     """
     Show the emulator runtime menu.  Returns a dict:
       {'joystick_input': <new value or unchanged>}
@@ -505,6 +505,17 @@ def show_emulator_menu(system, display, fkbar, joystick_input, cfg):
     HDMI is the active output, the menu draws into an offscreen mirror
     (HDMIMirrorDisplay) instead of the physical LCD, and the physical LCD
     is left untouched — matching the game screen's own behavior.
+
+    boot_status (main.py's BootStatusOverlay, or None if disabled/HDMI-
+    only at boot) is optional only for callers that genuinely have none --
+    main.py's own F7 call site always has one when the physical LCD is in
+    play. Used solely to redraw the profile-name/clock header after the
+    raw full-screen clear below (see that clear's comment): BootStatusOverlay
+    paints that corner once at boot and never again on its own, so any
+    full-screen clear after boot -- this one, or RAM Autosave's restore-
+    prompt clear in main.py -- needs to explicitly repaint it afterward, per
+    pb1000.ini's show_profile_name/show_clock settings (2026-10-14 bug
+    report: profile name stayed blank after returning from this menu).
     """
     state = {
         'joystick_input': joystick_input,
@@ -558,6 +569,11 @@ def show_emulator_menu(system, display, fkbar, joystick_input, cfg):
         if fkbar is not None:
             try:
                 fkbar.draw()
+            except Exception:
+                pass
+        if boot_status is not None:
+            try:
+                boot_status.redraw_header()
             except Exception:
                 pass
 

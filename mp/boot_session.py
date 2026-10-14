@@ -235,6 +235,41 @@ def _draw_profile_ui(display, profiles, sel, timeout_ms, scroll=0):
         print(f"[Boot] Draw error: {e}")
 
 
+def confirm_restore_autosave(display, timeout_ms=10000):
+    """RAM Autosave's boot-time prompt (see mp/ram_autosave.py): asks
+    whether to restore unsaved progress found in the autosave cache.
+    EXE=yes, BRK=no; auto-selects yes (restore) on timeout, matching the
+    real PB-1000's battery-backed RAM behaviour (power on -> pick up
+    exactly where you left off) more closely than defaulting to no."""
+    import hd61700
+    W, H = display.width, display.height
+    y0 = H // 2 - 14
+    deadline = time.ticks_add(time.ticks_ms(), timeout_ms)
+    prev_sc = -1
+    prev_secs = -1
+    while True:
+        remaining = time.ticks_diff(deadline, time.ticks_ms())
+        if remaining <= 0:
+            print("[Boot] Autosave restore prompt timed out -- restoring.")
+            return True
+        secs = (remaining + 999) // 1000
+        if secs != prev_secs:
+            prev_secs = secs
+            display.fill_rect(0, 0, W, H, 0x0000)
+            _draw_text(display, 4, y0 - 10, "Unsaved progress found.", 0xFFE0)
+            _draw_text(display, 4, y0 + 2, "Restore it?", 0xFFE0)
+            _draw_text(display, 4, y0 + 16, "EXE:yes  BRK:no  Auto:%ds" % secs, 0x7BEF)
+            hdmi_flush(display)
+        sc = hd61700.get_last_key()
+        if sc != prev_sc:
+            prev_sc = sc
+            if sc == 0x28:   # EXE
+                return True
+            elif sc == 0x29:  # BRK
+                return False
+        time.sleep_ms(30)
+
+
 def _confirm_exit_to_repl(display):
     """F12's Yes/No prompt (EXE=yes, BRK=no). Blocking, like setup_menu.py's
     _confirm() -- kept as a separate minimal copy here rather than importing

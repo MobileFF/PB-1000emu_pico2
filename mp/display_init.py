@@ -28,13 +28,43 @@ SD_CS_PIN = 15
 T_CS_PIN = 16
 T_IRQ_PIN = 17
 
+# SD_INIT_BAUD: the SD spec's mandatory low-speed handshake rate --
+# sdcard.py's init_card() already hardcodes this itself for that handshake
+# regardless of what's passed to SDCard(); this constant only documents
+# that rate here, it isn't actually wired to anything below.
+SD_INIT_BAUD = 400_000
+#
+# SD_DATA_BAUD: SDCard()'s own baudrate= parameter, used for every
+# readblocks()/writeblocks() DATA transfer -- NOT just the handshake (see
+# sdcard.py). This used to be given SD_INIT_BAUD (400000) directly below,
+# meaning every SD block read/write ran the data phase at 400kHz too, not
+# just the handshake -- found 2026-10-14 while porting a matching fix from
+# the sibling MSX-emulator project (same RP2350 target, byte-identical SD
+# wiring: SPI1, SCK=10/MOSI=11/MISO=12/CS=15), which had independently
+# found and fixed the exact same bug in its own copy of sdcard.py.
+#
+# 12MHz is that project's own real-hardware result, not a fresh guess: a
+# step sweep (4/6/8/10/12/16MHz, mp/test/sweep_sd_baud.py there) found
+# byte-exact reads at every step with throughput plateauing right at
+# 12MHz (16MHz gave no further real gain -- per-block/command overhead,
+# not SPI clock, is the limiting factor above this point), confirmed
+# stable across multiple real-hardware cold power-cycle boots. Carried
+# over here on the strength of the identical SD wiring, but NOT yet
+# independently verified on THIS project's own hardware -- please re-test
+# (including a full cold boot, not just repeated reads after the card is
+# already initialized) before this is treated as verified for PB-1000.
+SD_DATA_BAUD = 12_000_000
+
 
 def init_sdcard(spi, lcd_baudrate=40_000_000):
     try:
         from sdcard import SDCard
         sd_cs = machine.Pin(SD_CS_PIN, machine.Pin.OUT, value=1)
-        # Use 400kHz for stable SD init, restore to the actual LCD SPI baudrate
-        sd = SDCard(spi, sd_cs, baudrate=400000, restore_baudrate=lcd_baudrate)
+        # Low-speed handshake only for init_card() (see SD_INIT_BAUD above);
+        # SD_DATA_BAUD for every actual block read/write; restore_baudrate
+        # (the LCD's own SPI baudrate) only for idle periods between SD
+        # operations, since this bus is shared with the LCD.
+        sd = SDCard(spi, sd_cs, baudrate=SD_DATA_BAUD, restore_baudrate=lcd_baudrate)
         vfs = os.VfsFat(sd)
         os.mount(vfs, "/sd")
         print("SD Card mounted at /sd")

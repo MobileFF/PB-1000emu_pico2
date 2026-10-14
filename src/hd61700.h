@@ -268,6 +268,37 @@ typedef struct {
   uint16_t mem_write_hook_min_addr;
   uint16_t mem_write_hook_max_addr;
 
+  /* Native (C-side) dirty-byte-range tracking -- a cheaper alternative to
+     mem_write_hook for a caller that only needs "was anything in this
+     range touched since the last poll, and what's the min/max offset"
+     rather than a per-write Python callback (see mp/ram_autosave.py for
+     the motivating case: mem_write_hook's per-write mp_call_function_n_kw()
+     cost was measured to visibly slow down CPU emulation when watching a
+     multi-KB range such as the PB-1000 file area).
+     Checked unconditionally in mem_writebyte()/_iz()/_stack(), including
+     for writes that still take the ram_ptr/bank_ptr fast path -- unlike
+     mem_write_hook, registering a watch here never disables that fast
+     path; it only adds a cheap bounds check + dirty-min/max update.
+     native_dirty_watch_any_active/min_addr/max_addr mirror the
+     mem_write_hook_*-style quick-reject (recomputed by
+     sync_native_dirty_watch_range() in modhd61700.c). Each slot's
+     bank_filter < 0 matches any bank. The actual slot configuration is
+     shadowed outside this struct (modhd61700.c's native_dirty_watch_cfg[])
+     so it survives hd61700_init() zeroing this struct on reset. */
+#define NATIVE_DIRTY_WATCH_MAX 4
+  bool native_dirty_watch_any_active;
+  uint16_t native_dirty_watch_min_addr;
+  uint16_t native_dirty_watch_max_addr;
+  struct {
+    bool configured;
+    uint16_t addr_start;
+    uint16_t addr_end;
+    int8_t bank_filter;
+    bool dirty;
+    uint16_t dirty_min;
+    uint16_t dirty_max;
+  } native_dirty_watch[NATIVE_DIRTY_WATCH_MAX];
+
   /* Direct memory access pointers for C-side performance optimization */
   const uint8_t *rom0_ptr;
   uint8_t *ram_ptr;

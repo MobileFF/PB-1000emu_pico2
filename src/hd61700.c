@@ -88,10 +88,41 @@ static uint8_t mem_readbyte(hd61700_state_t *cpu, uint8_t segment,
   return 0;
 }
 
+/* Cheap, unconditional dirty-range bookkeeping for hd61700.set_native_dirty_watch()
+   (modhd61700.c) -- see hd61700.h's native_dirty_watch comment for why this
+   exists alongside (and never disables the fast path like) mem_write_hook.
+   Called from mem_writebyte()/_iz()/_stack() before either the fast-path
+   pointer store or the mem_write_hook detour, so it sees every RAM/bank
+   write regardless of which path actually stores the byte. */
+static inline void native_dirty_track(hd61700_state_t *cpu, uint16_t offset,
+                                       uint8_t bank) {
+  if (!cpu->native_dirty_watch_any_active) return;
+  if (offset < cpu->native_dirty_watch_min_addr ||
+      offset > cpu->native_dirty_watch_max_addr) return;
+  for (int i = 0; i < NATIVE_DIRTY_WATCH_MAX; i++) {
+    if (!cpu->native_dirty_watch[i].configured) continue;
+    if (offset < cpu->native_dirty_watch[i].addr_start ||
+        offset > cpu->native_dirty_watch[i].addr_end) continue;
+    if (cpu->native_dirty_watch[i].bank_filter >= 0 &&
+        bank != (uint8_t)cpu->native_dirty_watch[i].bank_filter) continue;
+    if (!cpu->native_dirty_watch[i].dirty) {
+      cpu->native_dirty_watch[i].dirty = true;
+      cpu->native_dirty_watch[i].dirty_min = offset;
+      cpu->native_dirty_watch[i].dirty_max = offset;
+    } else {
+      if (offset < cpu->native_dirty_watch[i].dirty_min)
+        cpu->native_dirty_watch[i].dirty_min = offset;
+      if (offset > cpu->native_dirty_watch[i].dirty_max)
+        cpu->native_dirty_watch[i].dirty_max = offset;
+    }
+  }
+}
+
 static void mem_writebyte(hd61700_state_t *cpu, uint8_t segment,
                           uint32_t offset, uint8_t data) {
   uint8_t bank = (segment >> 4) & 0x03;
   offset &= 0xFFFF;
+  native_dirty_track(cpu, (uint16_t)offset, bank);
 
   if (offset >= 0x0C00 && offset <= 0x0CFF) {
     if (cpu->io_write) {
@@ -146,6 +177,7 @@ static void mem_writebyte_iz(hd61700_state_t *cpu, uint8_t segment,
                              uint32_t offset, uint8_t data) {
   uint8_t bank = (segment >> 6) & 0x03;
   offset &= 0xFFFF;
+  native_dirty_track(cpu, (uint16_t)offset, bank);
 
   if (offset >= 0x0C00 && offset <= 0x0CFF) {
     if (cpu->io_write) {
@@ -200,6 +232,7 @@ static void mem_writebyte_stack(hd61700_state_t *cpu, uint8_t segment,
                                 uint32_t offset, uint8_t data) {
   uint8_t bank = (segment >> 2) & 0x03;
   offset &= 0xFFFF;
+  native_dirty_track(cpu, (uint16_t)offset, bank);
 
   if (offset >= 0x0C00 && offset <= 0x0CFF) {
     if (cpu->io_write) {
