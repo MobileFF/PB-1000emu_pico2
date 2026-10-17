@@ -113,16 +113,41 @@ import hd61700 as cpu_core
 # How long to wait, with no further boundary-pointer writes, before
 # actually flushing (coalesces a burst of rapid edits -- e.g. typing and
 # committing several BASIC program lines in a row -- into one flush).
-_FULL_FLUSH_DEBOUNCE_MS = 800
+#
+# 2026-10-15: briefly tried shortening this (800->300), reverted after a
+# real-hardware report of empty file content after a restore, right after
+# a SAVE + power cycle. The suspected cause at the time was a lack of
+# atomicity between this module's two watches. 2026-10-16: root-caused
+# instead to _resync_ranges()'s bank1 branch unconditionally re-arming
+# watch 2 on every boundary-pointer write, discarding its own
+# just-accumulated dirty range regardless of whether anything actually
+# needed re-arming (see 調査用/ram_autosave_investigation.md) -- now
+# fixed. That bug didn't depend on this debounce value at all (shortening
+# it only changed how *often* the already-broken bank1 tracking got
+# exercised, not whether it was broken), so there's no longer a known
+# reason to keep this conservative. Shortened again now that the real
+# cause is fixed, to reduce how much unflushed editing a real power cut
+# can lose -- pending real-hardware re-confirmation that no new issue
+# surfaces at this shorter interval.
+_FULL_FLUSH_DEBOUNCE_MS = 300
 # ...but never wait longer than this since the *first* pending write in a
 # burst, so a long uninterrupted editing session still gets flushed
 # periodically instead of only once it finally pauses.
-_FULL_FLUSH_MAX_WAIT_MS = 5000
+_FULL_FLUSH_MAX_WAIT_MS = 1500
+
+# Duration of the "Autosave: Cache saved" on-screen toast shown after a
+# completed flush (_flush_pending()) -- same value as main.py's Win+F8
+# "Autosave: ON/OFF" toast (_AUTOSAVE_TOAST_MS), for a consistent feel.
+_FLUSH_TOAST_MS = 2000
 
 # references/sysvars.txt -- file-area boundary pointers (2 bytes each,
 # little-endian: low byte first -- see references/HD61700.TXT's EQU
 # example, "&H4241を代入...左側から下位、上位").
 _HIMEM_ADDR = 0x6941
+_BASEN_ADDR = 0x6943
+_MEMEN_ADDR = 0x6945
+_DATDI_ADDR = 0x6947
+_BASDI_ADDR = 0x6949
 _DIREN_ADDR = 0x694B
 _PTR_HOOK_START = 0x6941
 _PTR_HOOK_END = 0x694C  # high byte of DIREN (0x694B/0x694C)
@@ -134,11 +159,6 @@ _BANK1_HI = 0xFFFF
 # hd61700.set_native_dirty_watch() slot numbers used by this module.
 _SLOT_RAM0 = 0
 _SLOT_BANK1 = 1
-
-# TEMPORARY (2026-10-14 investigation -- see __init__'s _diag_boundary_total
-# comment): minimum real-time gap between _on_boundary_write() diagnostic
-# prints, regardless of how often the hook actually fires in between.
-_DIAG_BOUNDARY_THROTTLE_MS = 400
 
 # Always on internal flash root vfs (same convention as config.py's
 # "/pb1000.ini", distinct from "/sd/pb1000.ini") -- see _compute_cache_dir().
@@ -158,6 +178,12 @@ class RamAutosave:
         self._layout_dirty = False
         self._bank1_in_scope = False
         self._ram0_watch_start = None
+        # bank1's own last-armed (lo, hi) -- see _resync_ranges()'s bank1
+        # branch for why this must be tracked the same way _ram0_watch_start
+        # is (2026-10-16 fix): re-arming unconditionally on every layout
+        # event discarded already-accumulated dirty state for no reason.
+        self._bank1_watch_lo = None
+        self._bank1_watch_hi = None
         self._full_flush_due_at = None     # ticks_ms deadline, or None if idle
         self._full_flush_pending_since = None  # ticks_ms of first pending write
         # Forces one full (not partial) flush of the given slot the next
@@ -205,31 +231,14 @@ class RamAutosave:
         self.stat_total_flush_ms = 0
         self.stat_last_flush_ms = 0
 
-        # TEMPORARY diagnostic counters (2026-10-14 investigation, continued:
-        # Win+PageUp's FLUSH count keeps climbing during an all-BASIC game
-        # with no apparent file access, yet _flush_pending()'s own
-        # content-only DIAG print never fires -- meaning these flushes are
-        # going through the include_ptr=True path instead, i.e. watch 1
-        # (the boundary-pointer hook, _on_boundary_write() below) is firing
-        # repeatedly. Originally capped at a fixed 20 prints; switched to a
-        # time throttle instead (one print per _DIAG_BOUNDARY_THROTTLE_MS,
-        # regardless of how many times the hook actually fires in between)
-        # after a count cap turned out to hide the evidence entirely in a
-        # longer test: if the hook fires very frequently right from the
-        # start, all 20 prints land within the first second or two (boot/
-        # early gameplay) and nothing prints for the rest of a longer
-        # session -- exactly the "FLUSH keeps climbing but nothing is ever
-        # logged" symptom this was meant to diagnose, just caused by the
-        # diagnostic itself rather than by the real bug. A time throttle
-        # keeps at least occasional evidence visible for as long as
-        # gameplay continues. _diag_boundary_total counts every firing
-        # (not just the printed ones) so the printed line can show how many
-        # were skipped since the last one -- useful to gauge the real
-        # firing rate even though not every one is printed individually.
-        # See _on_boundary_write(). TO REMOVE once the cause is identified
-        # -- not meant to ship.
-        self._diag_boundary_total = 0
-        self._diag_boundary_last_print_ms = None
+        # [emulator] ram_autosave_log in pb1000.ini (default false) --
+        # per-flush print(), restored 2026-10-17 at the user's request
+        # after being left out on heap-reduction grounds (see
+        # _stat_record()'s docstring). Opt-in rather than always-on since
+        # an actively-written profile can flush several times a second.
+        _cfg = getattr(system, "_config", None) or {}
+        self._log_flushes = _cfg.get("emulator", {}).get(
+            "ram_autosave_log", "false").lower() in ("1", "true", "yes", "on")
 
         system.register_mem_write_hook(
             _PTR_HOOK_START, self._on_boundary_write, _PTR_HOOK_END,
@@ -266,19 +275,11 @@ class RamAutosave:
     # -- hook callback (runs mid-CPU-instruction -- stays cheap, no I/O) --
 
     def _on_boundary_write(self, addr, data, bank):
-        # TEMPORARY diagnostic (see __init__'s _diag_boundary_total comment)
-        # -- which exact byte in the 12-byte pointer range is being
-        # rewritten, and with what value; time-throttled rather than
-        # count-capped so evidence stays visible through a long play
-        # session instead of only right after boot. TO REMOVE once the
-        # cause is identified -- not meant to ship.
-        self._diag_boundary_total += 1
-        now = time.ticks_ms()
-        last = self._diag_boundary_last_print_ms
-        if last is None or time.ticks_diff(now, last) >= _DIAG_BOUNDARY_THROTTLE_MS:
-            self._diag_boundary_last_print_ms = now
-            print("[ram_autosave][DIAG] boundary write (total=%d): addr=0x%04X data=0x%02X bank=%d" % (
-                self._diag_boundary_total, addr, data, bank))
+        # `bank` here is the CPU's current segment register, not where this
+        # write actually lands -- the boundary-pointer range (0x6941-
+        # 0x694C) is fixed storage inside 0x6000-0x7FFF, which src/
+        # modhd61700.c's c_mem_direct_write() always resolves to ram_buf
+        # regardless of `bank` (consulted only for offset>=0x8000).
         self._layout_dirty = True
         return False  # passthrough: never block the ROM's own write
 
@@ -303,8 +304,6 @@ class RamAutosave:
         diren = _read_u16(_DIREN_ADDR)
         want_bank1 = diren > _RAM0_TOP
         if want_bank1:
-            if not self._bank1_in_scope:
-                self._need_full_ram1 = True  # see __init__'s comment
             # Bank1's own low bound must also start at HIMEM when HIMEM
             # itself is >= 0x8000 (inside bank1) -- NOT unconditionally at
             # _BANK1_LO (0x8000). Before this fix, whenever HIMEM landed
@@ -322,11 +321,39 @@ class RamAutosave:
             # is simply max(himem_raw, _BANK1_LO) == _BANK1_LO, i.e.
             # unchanged from before.
             bank1_lo = max(himem_raw, _BANK1_LO)
-            cpu_core.set_native_dirty_watch(
-                _SLOT_BANK1, bank1_lo, min(diren, _BANK1_HI), 1,
-            )
+            bank1_hi = min(diren, _BANK1_HI)
+            # Only re-arm when the watched range actually changed -- same
+            # pattern as _ram0_watch_start just above, and for the same
+            # reason this one was MISSING for (2026-10-16 fix):
+            # set_native_dirty_watch() unconditionally clears the slot's
+            # accumulated dirty state on every call, even when start/end
+            # are identical to what's already armed (src/modhd61700.c,
+            # mod_set_native_dirty_watch()'s `dirty = false`). _resync_
+            # ranges() runs on every single boundary-pointer write (watch
+            # 1 -- essentially every BASIC line committed, not just SAVE/
+            # KILL, see this module's own docstring), so re-arming
+            # unconditionally here discarded watch 2's own
+            # just-accumulated dirty range on almost every call -- most
+            # visibly right when a line's tokenized bytes are written into
+            # the file area (bank1, when HIMEM sits >= 0x8000) immediately
+            # before BASEN's pointer update, which is the ordinary case:
+            # the content write set the dirty flag, then the very next
+            # poll() tick's layout_event re-armed the same unchanged range
+            # and wiped it before _flush_pending() ever got to read it.
+            # The resulting cache held an up-to-date boundary-pointer
+            # block over stale (or, on a first-ever SAVE, entirely absent)
+            # file content -- almost certainly the mechanism behind the
+            # 2026-10-15 "SAVE後に内容が空になる" report (see 調査用/
+            # ram_autosave_investigation.md).
+            if (bank1_lo, bank1_hi) != (self._bank1_watch_lo, self._bank1_watch_hi):
+                cpu_core.set_native_dirty_watch(_SLOT_BANK1, bank1_lo, bank1_hi, 1)
+                self._bank1_watch_lo = bank1_lo
+                self._bank1_watch_hi = bank1_hi
+                self._need_full_ram1 = True  # see __init__'s comment
         elif self._bank1_in_scope:
             cpu_core.clear_native_dirty_watch(_SLOT_BANK1)
+            self._bank1_watch_lo = None
+            self._bank1_watch_hi = None
         self._bank1_in_scope = want_bank1
 
     # -- per-main-loop-iteration poll ------------------------------------
@@ -396,6 +423,72 @@ class RamAutosave:
     def _cache_path(self, slot):
         return f"{self.cache_dir}/ram{slot}.bin"
 
+    # -- performance tuning: trimming watch 2's dirty range before I/O ---
+
+    def _active_zones(self):
+        """The file area's two *in-use* sub-ranges right now, as absolute
+        PB-1000 addresses: the file bodies (HIMEM..MEMEN -- BASIC files
+        then data files, both grow upward) and the directories
+        (min(DATDI,BASDI)..DIREN -- both grow downward from DIREN, the
+        fixed top). Whatever sits strictly between MEMEN and that
+        directory low bound is free, never-written space.
+
+        Used only by _flush_dirty_range() to trim a watch 2 interval
+        before writing it -- detection itself (poll()/_content_dirty())
+        deliberately stays the simple single min/max interval described
+        in this module's docstring; this function doesn't change what
+        counts as dirty, only how much of the surrounding free area gets
+        written to flash alongside it. 2026-10-16 real-hardware finding:
+        a single debounce window can dirty both a file body edit (near
+        HIMEM/BASEN) and a directory-pointer update (near DIREN) at once,
+        and watch 2's bounding interval then spans the entire free gap
+        between them too -- in one observed case, ~24000 bytes for what
+        was actually a 2-line, ~20-byte program edit. Skipping that gap
+        here keeps the *detection* side simple while still avoiding most
+        of the wasted I/O (see 調査用/ram_autosave_investigation.md)."""
+        himem = _read_u16(_HIMEM_ADDR)
+        memen = _read_u16(_MEMEN_ADDR)
+        datdi = _read_u16(_DATDI_ADDR)
+        basdi = _read_u16(_BASDI_ADDR)
+        diren = _read_u16(_DIREN_ADDR)
+        dir_lo = min(datdi, basdi)
+        zones = []
+        if memen >= himem:
+            zones.append((himem, memen))
+        if diren >= dir_lo:
+            zones.append((dir_lo, diren))
+        return zones
+
+    def _flush_dirty_range(self, slot, abs_lo, abs_hi):
+        """Writes a watch 2 dirty interval (absolute PB-1000 addresses,
+        inclusive) into `slot`'s cache file, trimmed against
+        _active_zones() so the part of the interval that falls in the
+        free gap between the file body and the directory is skipped. Each
+        remaining piece becomes its own _flush_partial() call, so a
+        single wide-but-mostly-empty interval can turn into two small
+        writes instead of one big one -- see _active_zones()'s docstring
+        for the real-hardware case this was written for.
+
+        Falls back to writing the untrimmed interval unchanged if
+        _active_zones() produces nothing overlapping it at all (only
+        possible if the pointers themselves look inconsistent, e.g. mid-
+        update when this is read -- defensive only, should not happen in
+        practice since _flush_pending() calls this well outside the CPU's
+        own read-modify-write of those pointers)."""
+        base = self.system.RAM_START if slot == 0 else _BANK1_LO
+        top = _RAM0_TOP if slot == 0 else _BANK1_HI
+        lo = max(abs_lo, base)
+        hi = min(abs_hi, top)
+        pieces = []
+        for zlo, zhi in self._active_zones():
+            a, b = max(lo, zlo), min(hi, zhi)
+            if a <= b:
+                pieces.append((a, b))
+        if not pieces:
+            pieces = [(lo, hi)]
+        for a, b in pieces:
+            self._flush_partial(slot, a - base, b - base)
+
     def _flush_pending(self, include_ptr):
         """Called once the shared debounce window (poll()) elapses. Rather
         than rewriting the whole slot, write only what could possibly have
@@ -416,74 +509,57 @@ class RamAutosave:
         Falls back to a full rewrite of a slot when its own dirty-range
         watch was just (re)armed this round (_need_full_ram0/1 -- see
         __init__'s comment) or its cache file doesn't exist yet."""
-        # TEMPORARY diagnostic (2026-10-14 investigation, continued once
-        # more: neither of the two conditional DIAG prints below is
-        # printing at all, in a test where stat_flush_count (shown via
-        # Win+PageUp) was independently confirmed to still be climbing --
-        # which the code, read on its own, says should be impossible
-        # (_flush_full()/_flush_partial() are only ever reached from here,
-        # and this function always evaluates the content-only print's own
-        # condition on every call). This one is UNCONDITIONAL -- it prints
-        # on every single call to this function, no matter which branch
-        # runs afterward -- to settle whether this function is even being
-        # entered at all, or is somehow not what's actually behind the
-        # climbing counter (e.g. a display-only bug in stats_summary_line()
-        # /set_status(), rather than a real extra flush). TO REMOVE once
-        # the cause is identified -- not meant to ship.
-        print("[ram_autosave][DIAG] _flush_pending() entered: include_ptr=%s "
-              "flush_count_before=%d" % (include_ptr, self.stat_flush_count))
         d0 = cpu_core.poll_native_dirty_watch(_SLOT_RAM0)
-        # TEMPORARY diagnostic (2026-10-14 investigation into unexplained
-        # flush activity during an all-BASIC game with no file I/O
-        # statements in its source) -- prints the exact dirty byte range
-        # watch 2 captured, plus live HIMEM/DIREN, every time a flush is
-        # triggered by content alone (not a boundary-pointer write). TO
-        # REMOVE once the cause is identified -- not meant to ship.
-        if d0 is not None and not include_ptr:
-            print("[ram_autosave][DIAG] content-only flush: dirty=0x%04X-0x%04X "
-                  "HIMEM=0x%04X DIREN=0x%04X" % (
-                      d0[0], d0[1], _read_u16(_HIMEM_ADDR), _read_u16(_DIREN_ADDR)))
+        wrote = False
         if self._need_full_ram0 or not self.system._file_exists(self._cache_path(0)):
             self._flush_full(0)
             self._need_full_ram0 = False
+            wrote = True
         else:
             if include_ptr:
                 ptr_lo = _PTR_HOOK_START - self.system.RAM_START
                 ptr_hi = _PTR_HOOK_END - self.system.RAM_START
                 self._flush_partial(0, ptr_lo, ptr_hi)
+                wrote = True
             if d0 is not None:
-                self._flush_partial(0, d0[0] - self.system.RAM_START,
-                                     d0[1] - self.system.RAM_START)
+                self._flush_dirty_range(0, d0[0], d0[1])
+                wrote = True
 
         if self._bank1_in_scope:
             d1 = cpu_core.poll_native_dirty_watch(_SLOT_BANK1)
-            # TEMPORARY diagnostic (2026-10-14 investigation, continued once
-            # more: the ram0-only diag above (d0) never printed in a test
-            # where _flush_pending() was independently confirmed to be
-            # entered repeatedly, with include_ptr=False every time --
-            # meaning the content-only trigger had to be *this* slot
-            # (bank1/ram1) instead, which never had its own diagnostic at
-            # all. This profile has RAM1=Y and a file area that extends
-            # into bank1 (DIREN>0x7FFF, confirmed in an earlier restore-
-            # time log), so this was the missing half of the picture. TO
-            # REMOVE once the cause is identified -- not meant to ship.
-            if d1 is not None and not include_ptr:
-                print("[ram_autosave][DIAG] bank1 content-only flush: dirty=0x%04X-0x%04X "
-                      "DIREN=0x%04X" % (d1[0], d1[1], _read_u16(_DIREN_ADDR)))
             if self._need_full_ram1 or not self.system._file_exists(self._cache_path(1)):
                 self._flush_full(1)
                 self._need_full_ram1 = False
+                wrote = True
             elif d1 is not None:
-                self._flush_partial(1, d1[0] - _BANK1_LO, d1[1] - _BANK1_LO)
+                self._flush_dirty_range(1, d1[0], d1[1])
+                wrote = True
             # else: bank1 in scope but nothing in it changed this window --
             # nothing to do.
 
-    def _stat_record(self, nbytes, t0, full):
+        # On-screen confirmation that the cache now reflects this round's
+        # changes -- same shared toast mechanism as Win+F8's "Autosave:
+        # ON/OFF" (see main.py's _AUTOSAVE_TOAST_MS comment for why
+        # set_status() and not a hand-painted box). `wrote` can end up
+        # false here in principle (poll() only calls this function when
+        # something looked dirty, but that dirtiness could in theory have
+        # already been consumed elsewhere by the time this runs) -- guard
+        # against announcing a save that didn't actually happen.
+        if wrote:
+            self.system.set_status("Autosave: Cache saved", _FLUSH_TOAST_MS)
+
+    def _stat_record(self, slot, nbytes, t0, full):
         """Update the running flush statistics (see __init__). Called from
-        _flush_full()/_flush_partial() right after a successful write --
-        deliberately no print() here (every flush is already a
-        multi-hundred-ms stall; this must not add log spam on top of it).
-        See stats_summary_line() for how these are surfaced."""
+        _flush_full()/_flush_partial() right after a successful write.
+
+        2026-10-17: restored the per-flush print() at the user's request
+        (previously removed on heap-reduction grounds -- an f-string print
+        on every flush is itself a transient heap allocation, however
+        small, and this runs on every autosave write). Re-added as a plain
+        print(), not an f-string, to keep that allocation minimal; still
+        genuine log spam on an actively-written profile (a flush can fire
+        several times a second), so this is opt-in via [emulator]
+        ram_autosave_log in pb1000.ini (default off)."""
         elapsed = time.ticks_diff(time.ticks_ms(), t0)
         self.stat_flush_count += 1
         if full:
@@ -493,6 +569,10 @@ class RamAutosave:
         self.stat_bytes_written += nbytes
         self.stat_total_flush_ms += elapsed
         self.stat_last_flush_ms = elapsed
+        if self._log_flushes:
+            print("[ram_autosave] flush #", self.stat_flush_count,
+                  " slot=", slot, " ", nbytes, "B full=", full,
+                  " ", elapsed, "ms", sep="")
 
     def stats_summary_line(self):
         """Short one-line summary for main.py's Win+PageUp hotkey, shown via
@@ -521,7 +601,7 @@ class RamAutosave:
             data = buf._view if hasattr(buf, '_view') else buf
             with open(self._cache_path(slot), "wb") as f:
                 f.write(data)
-            self._stat_record(len(data), t0, full=True)
+            self._stat_record(slot, len(data), t0, full=True)
         except Exception as e:
             print(f"[ram_autosave] full flush slot {slot} failed: {e}")
 
@@ -535,13 +615,32 @@ class RamAutosave:
             self._flush_full(slot)
             return
         t0 = time.ticks_ms()
+        nbytes = off_max - off_min + 1
         try:
             data = buf._view if hasattr(buf, '_view') else buf
-            chunk = bytes(data[off_min:off_max + 1])
+            # Slice straight from the RAM buffer's own memoryview and write
+            # that -- never `bytes(data[...])` first. A memoryview slice is
+            # a zero-copy view (same backing memory, just different bounds),
+            # same as what _flush_full() already writes directly; wrapping
+            # it in bytes() instead makes a full fresh heap copy of the
+            # slice, which is exactly the size of this write and so scales
+            # with it -- fine for the common case (a handful to a few
+            # hundred bytes), but watch 2's range is a single min/max
+            # bounding interval, not a precise dirty set (see this module's
+            # docstring and 調査用/ram_autosave_investigation.md), so one
+            # content write near HIMEM and an unrelated one up near DIREN in
+            # the same debounce window can bound a range spanning nearly
+            # the whole bank1 file area. 2026-10-16 real-hardware finding:
+            # that produced a ~24000-byte chunk, which the bytes() copy
+            # above failed to allocate (`memory allocation failed,
+            # allocating 23991 bytes`) even though the much larger full-
+            # slot flush (32768 bytes, no bytes() copy) succeeds right
+            # above in _flush_full() -- same lesson as restore_from_cache()'s
+            # own f.read(n) vs f.readinto() finding.
             with open(path, "r+b") as f:
                 f.seek(off_min)
-                f.write(chunk)
-            self._stat_record(len(chunk), t0, full=False)
+                f.write(data[off_min:off_max + 1])
+            self._stat_record(slot, nbytes, t0, full=False)
         except Exception as e:
             print(f"[ram_autosave] partial flush slot {slot} failed: {e}")
 
@@ -601,11 +700,6 @@ class RamAutosave:
         extra byte) entirely, regardless of why f.read() needed it."""
         import gc
 
-        def _buf_view(buf):
-            if buf is None:
-                return None
-            return buf._view if hasattr(buf, '_view') else buf
-
         def _read_into(slot, file_off, view, mem_off, length):
             if length <= 0:
                 return False
@@ -621,7 +715,7 @@ class RamAutosave:
                 print(f"[ram_autosave] restore read failed ({path}): {e}")
                 return False
 
-        view0 = _buf_view(self._ram_buf(0))
+        view0 = self._buf_view(self._ram_buf(0))
         if view0 is None:
             print("[ram_autosave] restore failed: ram0 buffer unavailable.")
             return False
@@ -653,7 +747,7 @@ class RamAutosave:
 
         ok1 = False
         if diren > _RAM0_TOP:
-            view1 = _buf_view(self._ram_buf(1))
+            view1 = self._buf_view(self._ram_buf(1))
             if view1 is None:
                 # Known limitation: the cache has ram1 content, but bank1
                 # isn't allocated for this profile (its own explicit save
@@ -683,6 +777,50 @@ class RamAutosave:
         gc.collect()
         print(f"[ram_autosave] restored from cache (ram0={ok0}, ram1={ok1})")
         return ok0 or ok1
+
+    def _buf_view(self, buf):
+        if buf is None:
+            return None
+        return buf._view if hasattr(buf, '_view') else buf
+
+    def commit_to_profile(self):
+        """Write the now-restored ram0 (+ram1) content straight into the
+        profile's own save files (ram0.bin/ram1.bin), so the profile stops
+        being perpetually stale relative to the autosave cache.
+
+        2026-10-17, added at the user's request: restore_from_cache() only
+        ever overlaid the *in-memory* RAM (on top of what load_state()
+        already loaded) -- the profile's own files on disk were untouched,
+        so if the cache were ever lost (SD issue, discard() called some
+        other way, etc.) before an explicit RAM Save, the profile's save
+        would still only reflect whatever the *last* explicit save had,
+        not what every boot-time restore had been showing the user in the
+        meantime. Call this right after a successful restore_from_cache()
+        to make that restore "stick" into the profile by default, then
+        discard() the cache -- same invariant an explicit RAM Save already
+        keeps (has_pending_cache()'s docstring: cache existence means
+        "unsaved progress the profile's own save doesn't have yet").
+
+        Deliberately writes only ram0.bin/ram1.bin (not regs.json/
+        color_vram.bin via save_state()) -- this module's own scope is
+        the file-area within those two slots only, and nothing has run
+        yet at this point in boot, so a regs.json/color_vram.bin resave
+        here would just rewrite the exact bytes load_state() loaded
+        moments ago for no benefit."""
+        try:
+            view0 = self._buf_view(self._ram_buf(0))
+            if view0 is not None:
+                with open(self.system._get_storage_path("ram0.bin"), "wb") as f:
+                    f.write(view0)
+            if self._bank1_in_scope:
+                view1 = self._buf_view(self._ram_buf(1))
+                if view1 is not None:
+                    with open(self.system._get_storage_path("ram1.bin"), "wb") as f:
+                        f.write(view1)
+            return True
+        except Exception as e:
+            print(f"[ram_autosave] commit to profile failed: {e}")
+            return False
 
     def discard(self):
         """Delete the autosave cache. Called after an explicit RAM Save to

@@ -141,7 +141,7 @@ importする（`main_input_joystick.py` は `[joystick] enable=true` の時の�
 役割:
 
 - 画面下部に常時表示される LCKEY/MENU/CAL/CALC のタッチバー
-- `.fkbar.raw` スプライトをブリットして描画
+- `fill_rect()`/`draw_text()`によるコード描画（画像ファイル不使用）
 - タッチ座標のヒットテストを行い対応キーを発火
 
 主な公開クラス:

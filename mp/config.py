@@ -28,6 +28,9 @@ _DEFAULTS = {
         # unsaved progress survives an unexpected reboot. See
         # doc/dev_guide.md's "RAM Autosave" section / mp/ram_autosave.py.
         "ram_autosave": "true",
+        # Per-flush print() from ram_autosave.py -- off by default (an
+        # actively-written profile can flush several times a second).
+        "ram_autosave_log": "false",
     },
     "disk": {
         "enabled": "false",

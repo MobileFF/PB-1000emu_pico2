@@ -7,6 +7,111 @@ date heading instead of a version number or "Unreleased" marker.
 
 ---
 
+## 2026-10-17
+
+### Added
+
+- **Froze most of `mp/*.py` into the firmware** (new `src/manifest_freeze.py`,
+  build procedure updated): ~40 files, excluding `boot.py`/`main.py`/`ext/`, are now
+  byte-compiled and baked into flash at build time, skipping the `import`-time
+  compile cost at boot — this substantially cuts down on GC-heap-fragmentation-
+  driven `MemoryError`s during the boot sequence. `main.py` stays out of the freeze
+  list because `pyexec_file_if_exists()` checks frozen modules *before* the
+  filesystem for that one entry point (the opposite priority from a normal
+  `import`); its body moved to `main_entry.py` (an ordinary frozen module), leaving
+  `main.py` itself a 3-line launcher.
+- **ROM files (`rom0.bin`/`rom1.bin`) and `keymap.map` now fall back to the SD
+  card (`/sd/roms/`) when not found on flash** (`mp/main_boot.py`, `mp/keymap.py`):
+  flash is checked first, SD second.
+- **Restored RAM Autosave's per-flush log line** (`[emulator] ram_autosave_log`,
+  default `false`): previously dropped for heap-reduction reasons, now back as an
+  opt-in setting.
+- **RAM Autosave's boot-time cache restore now also commits to the profile's own
+  save files** (`mp/ram_autosave.py` `commit_to_profile()`): a restore used to only
+  overlay the in-memory RAM, leaving the profile's own `ram0.bin`/`ram1.bin`
+  untouched — so "restored, but not yet re-saved" state would still show up on the
+  next restore, and would be lost entirely if the cache were ever lost. A successful
+  restore now commits straight to the profile's own files and discards the cache.
+- **Added an "Export for Device" command to the keymap editor**
+  (`tools/keymap_editor.py`): writes the device-ready `keymap.map` from the editable
+  JSON (Ctrl+E).
+
+### Fixed
+
+- **Fixed the function-key bar (the LCKEY..CALC touch bar) displaying corrupted
+  when its image is read from the SD card** (`mp/funckey_bar.py`): the likely cause
+  was electrical coupling on the shared SPI bus from alternating SD-card reads and
+  LCD writes (see the (non-committed) investigation notes for the full story).
+  Replaced the image-file blit entirely with code-drawn rendering
+  (`fill_rect()`/`draw_text()`), removing the whole code path this corruption could
+  occur on. Colors are taken from measurements of a reference photo of the real
+  device. `mp/emulator_menu_capture.py`'s full-screen capture was updated to match
+  (computed colors, no file read).
+
+### Changed
+
+- **Heap reduction: dropped the `keymap.json` format in favor of a compact
+  `keymap.map` format** (`mp/keymap.py`, `tools/keymap_editor.py`): loading a custom
+  keymap via `json.load()` was found, on real hardware, to cost about 17 KB of GC
+  heap relative to its actual data (a few hundred ints/strings) — almost all of it
+  the generic JSON tree `json.load()` has to build along the way (one dict per
+  entry, repeated key strings). `tools/keymap_editor.py` still edits/saves the
+  human-friendly JSON form and exports this compact form via "Export for Device".
+  `get_label()` now reads `hd61700.get_key_label()` (C side) instead of the
+  Python-side USB_MAP/ADV_MAP dicts, and a new `release_maps()` frees those dicts
+  once the C side has been configured from them.
+- **Heap reduction: removed the Python-heap copy of ROM code kept for VFDD
+  (virtual FDD)** (`mp/pb1000.py`, `mp/pb1000_fdd.py`, `mp/main_boot.py`): the CPU
+  core (C side) already keeps its own independent copy in a fixed buffer, and the
+  Python-side copy (`keep_copy`) had no live consumer — removing it frees about
+  38 KB on VFDD-enabled profiles.
+
+---
+
+## 2026-10-16
+
+### Fixed
+
+- **Fixed a `MemoryError` at boot on 3-bank profiles (e.g. `bank23`) despite
+  plenty of free heap being reported** (`src/modhd61700.c`): dynamic allocation
+  (GC-heap `m_malloc()`) of the bank 1-3 buffers could fail to find a contiguous
+  32 KB block even with well over 32 KB free in total, due to external
+  fragmentation from live objects accumulated earlier in boot. Switched to a
+  fixed-size static array (96 KB, outside the GC heap), same as `rom0_buf`/
+  `rom1_buf`/`ram_buf`, so bank allocation can no longer fail by construction. The
+  trade-off: every profile now permanently loses 96 KB of GC heap, whether it uses
+  any banks or not (requires a firmware rebuild).
+- **Fixed RAM Autosave's native dirty-range watch (watch 2, tracking the file
+  area's content) unconditionally discarding its own just-accumulated dirty range
+  on every boundary-pointer write into expanded RAM (bank1)** (`mp/ram_autosave.py`
+  `_resync_ranges()`): the root cause of a report of a SAVE's content coming back
+  empty after a power cut right after saving. Re-arming now only happens when the
+  watched range actually changed, and the flush debounce window was also shortened
+  from 800ms back down to 300ms.
+- **Changed `default_profile` to persist automatically instead of staying fixed
+  across reboots** (`mp/boot_session.py`, new `save_default_profile()`): the
+  profile actually picked is now saved back to `pb1000.ini` every time a selection
+  is confirmed. Writes go through a temp file + `os.rename()` so an exception
+  mid-write can never leave `pb1000.ini` itself truncated/corrupted.
+
+### Changed
+
+- **Heap reduction: removed the `hasattr(cpu_core/lcd_c/usb_host/hd61700, ...)`
+  feature-detection guards project-wide** (`mp/pb1000.py`, `mp/pb1000_state_io.py`,
+  `mp/pb1000_fdd.py`, `mp/lcd_controller_c.py`, `mp/main_boot.py`,
+  `mp/emulator_menu.py`, `mp/emulator_menu_capture.py`, `mp/hdmi_menu_mirror.py`):
+  measurements showed the fallback branch's bytecode stayed compiled into the
+  `.mpy` either way, so these guards were making files *larger*, not smaller. A
+  `mp/*.py`/firmware version mismatch now fails loudly with `AttributeError`
+  instead of silently degrading to an older code path (requires a firmware
+  rebuild).
+- **Consolidated the RGB565⇔RGB332 conversion and USB-scancode→display-label
+  lookup, previously duplicated across several files, into the C extension module**
+  (`src/modlcd_controller.c`, `src/modhd61700.c`, `mp/emulator_menu.py`,
+  `mp/hdmi_menu_mirror.py`).
+
+---
+
 ## 2026-10-14
 
 ### Added

@@ -21,11 +21,15 @@ downscaling needed either, for the same reason).
 """
 
 
-def _rgb565_to_rgb332(c):
-    r3 = (c >> 13) & 7
-    g3 = (c >> 8) & 7
-    b2 = (c >> 3) & 3
-    return (r3 << 5) | (g3 << 2) | b2
+import lcd_c as _lc_mod
+
+# See modlcd_controller.c's comment -- this used to be its own copy of the
+# exact same logic as emulator_menu.py's _rgb565_to_rgb332(). Named _lc_mod
+# (not _lc) at module level specifically so it can't collide with
+# HDMIMirrorDisplay.__init__()'s own `lcd_c` parameter below, which is an
+# LCDControllerC *instance* (mp/lcd_controller_c.py), not this raw C module
+# -- the two are unrelated despite the shared name.
+_rgb565_to_rgb332 = _lc_mod.rgb565_to_rgb332
 
 
 class HDMIMirrorDisplay:

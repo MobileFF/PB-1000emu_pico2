@@ -62,7 +62,7 @@ mp/
   mem_overlay.py          # 常時ヒープ空き容量表示（実行中のみ・[overlay] show_mem_free）
   config.py               # pb1000.ini 読み込み
   pio_uart.py             # PIO ソフト UART（RS-232C）
-  keymap.py / keymap.json # キーボードマッピングテーブル
+  keymap.py / keymap.map  # キーボードマッピングテーブル（keymap.mapはtools/keymap_editor.pyのJSONから生成）
   ili9341.py              # ILI9341 TFT ドライバ (320x240)
   st7796.py               # ST7796 TFT ドライバ (480x320)
   xpt2046.py              # XPT2046 タッチパネルコントローラドライバ
@@ -802,6 +802,15 @@ dirty区間を次のデバウンス完了時にまとめて1回フラッシュ�
 `_render_status_bar()`）に "Autosave: ON"/"Autosave: OFF" を約2秒間表示する。この
 バーは "SYSTEM RESET" やPrtScnキャプチャ結果等でも使われる既存の共通領域で、
 `boot_status.py`が描画するプロファイル名表示（画面左上）とは別の場所にあるため
+
+### フラッシュ時のログ出力（`[emulator] ram_autosave_log`）
+
+`pb1000.ini`の`[emulator] ram_autosave_log`（デフォルト`false`）をtrueにすると、
+フラッシュ発生ごとに`[ram_autosave] flush #N slot=S NbytesB full=F Nms`形式の1行を
+シリアルへ出力する。デフォルトで無効なのは、アクティブに書き込みが続くプロファイルでは
+1秒間に複数回フラッシュが発生し得るため（ログ自体の出力コストに加え、f-string形式だと
+整形のたびに小さなヒープ確保が発生する — そのため実装は`print(..., sep="")`による
+素のフォーマットで、f-stringは使っていない）。
 競合しない。
 
 ### キャッシュ統計表示（Win+PageUp）

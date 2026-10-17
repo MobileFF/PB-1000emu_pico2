@@ -64,7 +64,7 @@ mp/
   mem_overlay.py          # Always-on free-heap readout (runtime only -- [overlay] show_mem_free)
   config.py               # pb1000.ini loading
   pio_uart.py             # PIO software UART (RS-232C)
-  keymap.py / keymap.json # Keyboard mapping tables
+  keymap.py / keymap.map  # Keyboard mapping tables (keymap.map is generated from tools/keymap_editor.py's JSON)
   ili9341.py              # ILI9341 TFT driver (320x240)
   st7796.py               # ST7796 TFT driver (480x320)
   xpt2046.py              # XPT2046 touch panel controller driver

@@ -61,19 +61,25 @@ UA レジスタ bits 5-4   bank 番号   対象バッファ     読み書き   �
 
 - **Bank 0**（ROM1）は常に存在（`has_bank[0] = true`）。バッファ（`rom1_buf`）は固定サイズの
   静的配列。
-- **Bank 1–3**（拡張 RAM）: バッファ領域（`bank1_buf`〜`bank3_buf`）は、起動時に選択された
-  プロファイルが対応する `ramN.bin` を持つバンクだけ、その場で MicroPython の GC ヒープから
-  `m_malloc()` により確保される（`modhd61700.c` の `ensure_bank_buf()`）。`ramN.bin` を持たない
-  バンクはポインタが `NULL` のままで、ヒープを消費しない。`has_bank[1..3]`（CPU から見える
-  「バンクが存在するか」フラグ）は現在アクティブなプロファイルの `ramN.bin` の有無を反映し、
-  `set_bank_present()`/`set_has_exp_ram()` の呼び出し順序は「まず `ensure_bank_buf()` で確保 →
-  成功したら `has_bank[N]` を立てる」の順で固定されている（確保に失敗した場合に
-  `has_bank[N]=true` かつバッファ未確保という不整合な状態が残らないようにするため）。
-  CPU の毎バイトメモリアクセス経路（`c_mem_direct_read`/`c_mem_direct_write`）は
-  `has_bank[bank]` に加えてバッファポインタ自体の非 NULL もチェックしてからアクセスする。
-  `ramN.bin` が無いバンクは `has_bank[N]=false` により読み取りが常に `0xFF`（未マップ領域と
-  同じ値）を返すため、バッファ内容を明示的に埋める必要はない。プロファイルはブート時の一回きり
-  の選択で、セッション途中でのバンク構成変更（旧 RAM Load 機能）は存在しない。
+- **Bank 1–3**（拡張 RAM）: バッファ領域（`bank_buf_storage[3][0x8000]`）は、`rom0_buf`/
+  `rom1_buf`/`ram_buf`と同じ、**ビルド時に確保される固定サイズの静的配列**（GC ヒープ外）。
+  2026-10-16 以前は、起動時に選択されたプロファイルが対応する `ramN.bin` を持つバンクだけ
+  MicroPython の GC ヒープから `m_malloc()` で動的確保する方式だったが、3バンク全てを
+  使うプロファイルで「合計の空き容量は足りているのに32KB連続した空きブロックが見つからない」
+  外部フラグメンテーションにより`m_malloc()`が失敗する不具合が実機で確認されたため、
+  静的配列に変更した（詳細は`調査用/bank_alloc_fragmentation.md`参照）。これにより
+  バンク確保は原理的に失敗しなくなった代わりに、**バンクを一切使わないプロファイルも含め
+  全プロファイルが起動時から常に96KB分のGCヒープを失う**（ビルド実測: RAM使用量
+  154,540B→252,844Bへ+98,304B＝ちょうど96KB増加）。
+  `has_bank[1..3]`（CPU から見える「バンクが存在するか」フラグ）は現在アクティブな
+  プロファイルの `ramN.bin` の有無を反映するフラグとしての役割のみ変わらず持つ
+  （バッファの存在有無ではない）。CPU の毎バイトメモリアクセス経路
+  （`c_mem_direct_read`/`c_mem_direct_write`）は引き続き`has_bank[bank]`とバッファ
+  ポインタの非 NULL チェックの両方を行うが、静的配列化によりバッファが NULL になることは
+  もう無い（防御的チェックとして維持）。`ramN.bin` が無いバンクは `has_bank[N]=false` に
+  より読み取りが常に `0xFF`（未マップ領域と同じ値）を返すため、バッファ内容を明示的に
+  埋める必要はない。プロファイルはブート時の一回きりの選択で、セッション途中でのバンク
+  構成変更（旧 RAM Load 機能）は存在しない。
 - バンク選択式: `bank = (REG_UA >> 4) & 0x03` （C 側 `hd61700.c`、Python 側ともに統一）。
 
 ---
@@ -171,13 +177,13 @@ IF PEEK(&H0C37) AND 1 THEN PRINT "DMA ERROR"
 | `ext_work_buf` | 256 B | 0x5F00–0x5FFF | 拡張 API ワークエリア（Python `_ext_work` と共有） |
 | `ram_buf` | 8 KB | 0x6000–0x7FFF | 標準 RAM |
 | `rom1_buf` | 32 KB | 0x8000–0xFFFF (Bank 0) | System ROM (ROM1) |
-| `bank1_buf` | 32 KB（バンク使用時のみ動的確保） | 0x8000–0xFFFF (Bank 1) | 拡張 RAM1 |
-| `bank2_buf` | 32 KB（バンク使用時のみ動的確保） | 0x8000–0xFFFF (Bank 2) | 拡張 RAM2 |
-| `bank3_buf` | 32 KB（バンク使用時のみ動的確保） | 0x8000–0xFFFF (Bank 3) | 拡張 RAM3 |
+| `bank_buf_storage[0]` | 32 KB（常時静的確保） | 0x8000–0xFFFF (Bank 1) | 拡張 RAM1 |
+| `bank_buf_storage[1]` | 32 KB（常時静的確保） | 0x8000–0xFFFF (Bank 2) | 拡張 RAM2 |
+| `bank_buf_storage[2]` | 32 KB（常時静的確保） | 0x8000–0xFFFF (Bank 3) | 拡張 RAM3 |
 
-`has_bank[4]` フラグで各バンクの有効/無効を管理する。
-`bank_ptr[4]` / `bank_is_ram[4]` は `hd61700_state_t` の CPU ステートに格納される
-（バンク 1–3 が未確保の場合、対応する `bank_ptr[N]` は `NULL`）。
+`has_bank[4]` フラグで各バンクの有効/無効（＝現在のプロファイルが対応する`ramN.bin`を
+持つか）を管理する。バッファ自体（`bank_buf_storage`）はプロファイルの構成に関わらず
+常に確保済み（2026-10-16以降、静的配列のため）。
 
 ---
 

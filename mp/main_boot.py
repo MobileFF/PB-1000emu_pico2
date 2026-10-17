@@ -37,8 +37,7 @@ def init_usb_keyboard_early(*, enable_usb_kbd, poll_interval_ms=8):
         return
     try:
         import usb_host
-        if hasattr(usb_host, 'start_bg_timer'):
-            usb_host.start_bg_timer(poll_interval_ms)
+        usb_host.start_bg_timer(poll_interval_ms)
         print(f"USB keyboard routing enabled (poll={poll_interval_ms}ms).")
     except Exception as e:
         print(f"USB keyboard routing failed: {e}")
@@ -132,52 +131,62 @@ def create_system(display_ret, profile_dir=None, config=None):
         from config import get_int as _gi
         fg_c = _gi(config, "display", "fg_color")
         bg_c = _gi(config, "display", "bg_color")
-        def _rgb332_to_rgb565(c):
-            r3=(c>>5)&7; g3=(c>>2)&7; b2=c&3
-            return (((r3<<2)|(r3>>1))<<11)|(((g3<<3)|g3)<<5)|((b2<<3)|(b2<<1)|(b2>>1))
-        system.lcd.set_colors(_rgb332_to_rgb565(fg_c), _rgb332_to_rgb565(bg_c))
+        # Was its own local closure with the exact same RGB332->RGB565
+        # logic as emulator_menu.py's/hdmi_menu_mirror.py's (now-removed)
+        # duplicates -- see modlcd_controller.c's comment.
+        import lcd_c as _lc
+        fg565, bg565 = _lc.rgb332_to_rgb565(fg_c), _lc.rgb332_to_rgb565(bg_c)
+        system.lcd.set_colors(fg565, bg565)
     return system
 
 
 def load_default_roms(system):
-    """Load rom0.bin/rom1.bin from /roms/. Returns a list of the paths that
-    failed to load (empty list means both loaded successfully)."""
+    """Load rom0.bin/rom1.bin from /roms/ (internal flash), falling back to
+    /sd/roms/ (SD card) if the flash copy is missing. 2026-10-17: SD
+    fallback added at the user's request, reversing the earlier flash-only
+    decision (see [[project_rom_loading_sd_limitation]]) -- the on-screen
+    "ROM LOAD FAILED" error text in main_entry.py was updated to match.
+    Returns a list of the paths that failed to load (empty list means both
+    loaded successfully)."""
     import gc
     failed = []
-    # If virtual FDD is going to be enabled for this profile, its callback
-    # path needs its own Python-side copy of each ROM (see
-    # PB1000System._ensure_rom_copies() in pb1000.py). Without keep_copy
-    # here, that first read is discarded and the VFDD activation below would
-    # otherwise re-read the whole ~32KB ROM file a second time -- landing
-    # right after PB1000System construction and the [ext] module loader have
-    # already eaten into the freshly-released ROM-buffer heap. That second
-    # read has been observed to fail there with MemoryError (non-fatal --
-    # VFDD just doesn't come up for that boot -- but avoidable by keeping
-    # the copy from this first read instead).
-    #
     # discover_virtual_fdd_config() is called here, once, up front -- not
     # via boot_virtual_fdd() below, which would call it again (same config,
     # same "[VFDD] Config from pb1000.ini: ..." line printed twice, purely
     # cosmetic but avoidable) -- its result is reused directly via
     # activate_pending_virtual_fdd() instead.
+    #
+    # 2026-10-17: this used to also decide whether load_rom() kept a
+    # redundant Python-side copy for VFDD's callback path (keep_copy=...,
+    # removed along with pb1000_fdd.py's _ensure_rom_copies() -- see
+    # pb1000.py's load_rom() docstring and
+    # [[project_rom_loading_sd_limitation]]). No remaining consumer needed
+    # that copy, so there's nothing left for this function's result to
+    # feed into here besides the activation call below.
     _vfdd_cfg = None
     if hasattr(system, "discover_virtual_fdd_config"):
         try:
             _vfdd_cfg = system.discover_virtual_fdd_config()
         except Exception:
             _vfdd_cfg = None
-    _keep_rom_copy = bool(_vfdd_cfg and _vfdd_cfg.get("enabled"))
-    for path, slot in (('/roms/rom0.bin', 0), ('/roms/rom1.bin', 1)):
+    for fname, slot in (('rom0.bin', 0), ('rom1.bin', 1)):
+        flash_path = '/roms/' + fname
+        sd_path = '/sd/roms/' + fname
         try:
             gc.collect()
-            if not system.load_rom(path, slot=slot, keep_copy=_keep_rom_copy):
-                failed.append(path)
+            ok = system.load_rom(flash_path, slot=slot)
+            if not ok:
+                print(f"ROM not found on flash ({flash_path}), trying SD ({sd_path})")
+                gc.collect()
+                ok = system.load_rom(sd_path, slot=slot)
+            if not ok:
+                failed.append(flash_path)
         except MemoryError as e:
-            print(f"ROM load warning ({path}): {e}")
-            failed.append(path)
+            print(f"ROM load warning ({flash_path}): {e}")
+            failed.append(flash_path)
         except Exception as e:
-            print(f"ROM load error ({path}): {e}")
-            failed.append(path)
+            print(f"ROM load error ({flash_path}): {e}")
+            failed.append(flash_path)
     try:
         if _vfdd_cfg is not None and hasattr(system, "activate_pending_virtual_fdd"):
             if _vfdd_cfg.get("enabled"):
@@ -241,18 +250,28 @@ def configure_c_keyboard(system, *, enable_usb_kbd):
         # background timer earlier, in main.py right after profile
         # selection (see the comment there).
         import keymap
-        if hasattr(cpu_core, 'keyboard_config_adv'):
-            adv = keymap.get_adv_map_list()
-            cpu_core.keyboard_config_adv(adv)
-            del adv
-            gc.collect()
-            print("C advanced keyboard map synchronized.")
-        if hasattr(cpu_core, 'keyboard_config_base'):
-            base = keymap.get_base_map_list()
-            cpu_core.keyboard_config_base(base)
-            del base
-            gc.collect()
-            print("C base keyboard map synchronized.")
+        adv = keymap.get_adv_map_list()
+        cpu_core.keyboard_config_adv(adv)
+        del adv
+        gc.collect()
+        print("C advanced keyboard map synchronized.")
+        base = keymap.get_base_map_list()
+        cpu_core.keyboard_config_base(base)
+        del base
+        gc.collect()
+        print("C base keyboard map synchronized.")
+        keymap.release_maps()
+        gc.collect()
+        # TEMPORARY diagnostic (2026-10-16, bank3-static-reservation heap
+        # budget investigation -- see 調査用/heap_budget_bank3.md): this
+        # whole stretch (PIO/USB init through FuncKeyBar/ram_autosave) had
+        # no [MEM] checkpoints at all, so a real-hardware MemoryError
+        # inside it (e.g. FuncKeyBar/ram_autosave both failing on a tight
+        # 2-bank profile) couldn't be attributed to any specific step.
+        # TO REMOVE once the keymap-loading share of that stretch is
+        # understood well enough not to need this any more.
+        print("[MEM] after keymap sync: free=%d alloc=%d" %
+              (gc.mem_free(), gc.mem_alloc()))
         return cpu_core
     except Exception as e:
         import sys
@@ -268,8 +287,7 @@ def configure_usb_keyboard_routing(poll_interval_ms=8):
         # Keep the bg timer that was started in init_usb_keyboard_early() running.
         # On Pico 2W, CYW43+BTstack+LwIP consume alarm pool slots; stop+start
         # after NTP causes add_repeating_timer_ms() to fail and kills keyboard input.
-        if hasattr(usb_host, 'start_bg_timer'):
-            usb_host.start_bg_timer(poll_interval_ms)  # no-op if already active
-            print(f"USB background timer active ({poll_interval_ms}ms).")
+        usb_host.start_bg_timer(poll_interval_ms)  # no-op if already active
+        print(f"USB background timer active ({poll_interval_ms}ms).")
     except Exception as e:
         print(f"C keyboard routing setup failed: {e}")

@@ -33,6 +33,14 @@ class XPT2046:
         # lining up with what's on screen.
         self.rotate180 = rotate180
 
+        # Reused across every read_raw() call instead of allocating a fresh
+        # 6B send/recv pair each time -- read_raw() runs on every main-loop
+        # tick while the screen is being touched (main.py's `while True:`),
+        # so this was a small but continuous per-frame allocation/release
+        # churn for as long as a touch is held.
+        self._send_buf = bytearray([0x90, 0x00, 0x00, 0xD0, 0x00, 0x00])
+        self._recv_buf = bytearray(6)
+
     def is_pressed(self):
         """Check if the screen is currently being touched."""
         if self.irq is not None:
@@ -47,9 +55,8 @@ class XPT2046:
         # baudrate-only .init() does NOT reset CPOL/CPHA on this MicroPython port.
         self.spi.init(baudrate=self.baudrate, polarity=0, phase=0)
         self.cs.value(0)
-        send = bytearray([0x90, 0x00, 0x00, 0xD0, 0x00, 0x00])
-        recv = bytearray(6)
-        self.spi.write_readinto(send, recv)
+        recv = self._recv_buf
+        self.spi.write_readinto(self._send_buf, recv)
         self.cs.value(1)
         self.spi.init(baudrate=self.lcd_baudrate, polarity=0, phase=0)
         y_raw = (recv[1] << 5 | recv[2] >> 3)

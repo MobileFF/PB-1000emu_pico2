@@ -30,7 +30,7 @@ def _do_vram_save(system):
     H = num_pages * 8                # 32 or 64 pixel rows
 
     vram_active = system.lcd.vram[:num_pages * W]            # active mono VRAM bytes only
-    cvram = _lc.get_color_vram() if hasattr(_lc, 'get_color_vram') else None  # 12288 B ref
+    cvram = _lc.get_color_vram()  # 12288 B ref
     edtop = bytes(system.ram[0x0100:0x0200])                 # 256 B EDTOP VRAM (0x6100-0x61FF)
 
     # Determine writable base directory (/sd/screenshots preferred)
@@ -86,10 +86,15 @@ def _do_vram_save(system):
         # ── 3. Color VRAM — raw binary (12,288 bytes) ───────────────────────
         _try("color_vram_%s.bin" % ts, lambda f: f.write(cvram))
 
-        # ── 4. Color VRAM — PPM image (P6 binary, 192×64, RGB332→RGB888) ───
+        # ── 4. Color VRAM — PNG image (192×64, RGB332→RGB888) ──────────────
+        # Streamed row-by-row straight into PngWriter (png_writer.py) --
+        # no whole-image buffer, same heap footprint as the old PPM writer
+        # this replaced (see that module's docstring for why PNG here is
+        # uncompressed/"stored"-deflate rather than truly compressed).
         H_C = len(cvram) // W   # = 64
-        def _ppm(f):
-            f.write(("P6\n%d %d\n255\n" % (W, H_C)).encode())
+        def _png(f):
+            from png_writer import PngWriter
+            enc = PngWriter(f, W, H_C)
             row = bytearray(W * 3)
             for y in range(H_C):
                 for x in range(W):
@@ -100,8 +105,9 @@ def _do_vram_save(system):
                     row[x*3]   = (r << 5) | (r << 2) | (r >> 1)
                     row[x*3+1] = (g << 5) | (g << 2) | (g >> 1)
                     row[x*3+2] = (bl << 6) | (bl << 4) | (bl << 2) | bl
-                f.write(row)
-        _try("color_vram_%s.ppm" % ts, _ppm)
+                enc.write_row(row)
+            enc.close()
+        _try("color_vram_%s.png" % ts, _png)
 
     if not saved:
         return "!! VRAM save: no files written"
@@ -120,14 +126,24 @@ def _rgb565_to_888(c):
 
 def _do_full_capture(system, display, fkbar=None):
     """Captures the *entire* physical LCD (bezel + PB-1000 screen + FuncKeyBar)
-    as a single RGB888 PPM image, at the actual display resolution (e.g. 320x240
+    as a single RGB888 PNG image, at the actual display resolution (e.g. 320x240
     or 480x320). Unlike VRAM Save (§`_do_vram_save`), this is not read back from
     the SPI display hardware — everything is recomposed in software from the same
-    state the renderer uses (mono/color VRAM, bezel geometry, FuncKeyBar image),
+    state the renderer uses (mono/color VRAM, bezel geometry, FuncKeyBar colors),
     since there is no full-screen framebuffer kept in RAM.
 
-    Note: any transient status-bar text (e.g. the toast shown after a key press)
-    is not reproduced, since it isn't part of the emulator's persistent state.
+    The PNG is written row-by-row via png_writer.PngWriter, exactly like the
+    PPM writer this replaced -- no whole-image buffer. See that module's
+    docstring for why the IDAT data is uncompressed ("stored" deflate blocks)
+    rather than truly compressed.
+
+    Note: any transient status-bar text (e.g. the toast shown after a key
+    press) is not reproduced, since it isn't part of the emulator's
+    persistent state. The FuncKeyBar's key labels aren't reproduced either
+    (only its per-key background colors and border, computed directly from
+    funckey_bar.py's layout constants) -- funckey_bar.py draws its own
+    labels via framebuf text glyphs, and re-rendering those pixel-for-pixel
+    here isn't worth the extra code for a debug screenshot.
     """
     import lcd_c as _lc
     import os as _os
@@ -149,7 +165,11 @@ def _do_full_capture(system, display, fkbar=None):
     lh = (lcd_h * scale_num) // scale_den
     pad = 4
 
-    from funckey_bar import _IMG_W as FK_W, _IMG_H as FK_H, _IMG_PATHS as FK_PATHS
+    from funckey_bar import (_IMG_W as FK_W, _IMG_H as FK_H,
+                              _N_KEYS as FK_N_KEYS, _KEY_W as FK_KEY_W,
+                              _KEY_COLORS as FK_KEY_COLORS,
+                              _BORDER_COLOR as FK_BORDER_COLOR,
+                              _BORDER_THICKNESS as FK_BORDER_T)
 
     if fkbar is not None:
         fk_x, fk_y = fkbar._x_offset, fkbar._y_top
@@ -158,26 +178,13 @@ def _do_full_capture(system, display, fkbar=None):
         # if this is ever called before it's constructed).
         fk_x, fk_y = disp_x, disp_y + lh + 24
 
-    # Resolve the FuncKeyBar image path without reading it into RAM — its
-    # 26,880 bytes (320x42x2) are read one row at a time in the main loop
-    # below instead, since holding the whole file in memory alongside the
-    # PPM output buffers was enough to trigger MemoryError on this heap.
-    fk_path = None
-    for p in FK_PATHS:
-        try:
-            _os.stat(p)
-            fk_path = p
-            break
-        except OSError:
-            continue
-
     display_on = system.lcd.display_on
     # Mirrors _pixel_color() in lcd_controller.c: color_vram is only used once
     # vdp_init_fill_done is set (post-boot 0xFF clear phase would otherwise
     # render as solid white). vdp_enabled alone is not enough.
     vdp_on = getattr(system.lcd, 'vdp_enabled', False)
-    vdp_ready = bool(_lc.vdp_init_done()) if hasattr(_lc, 'vdp_init_done') else True
-    cvram = _lc.get_color_vram() if (vdp_on and vdp_ready and hasattr(_lc, 'get_color_vram')) else None
+    vdp_ready = bool(_lc.vdp_init_done())
+    cvram = _lc.get_color_vram() if (vdp_on and vdp_ready) else None
 
     fg888    = _rgb565_to_888(system.lcd._color_fg)
     bgon888  = _rgb565_to_888(system.lcd._color_bg_on)
@@ -208,33 +215,49 @@ def _do_full_capture(system, display, fkbar=None):
     except Exception:
         ts = "000000_000000"
 
-    path = base + "/full_%s.ppm" % ts
+    path = base + "/full_%s.png" % ts
 
-    fk_row_buf = bytearray(FK_W * 2) if fk_path is not None else None
-    fk_f = open(fk_path, 'rb') if fk_path is not None else None
+    # FuncKeyBar colors, precomputed to RGB888 once (same pattern as
+    # fg888/bgon888/etc above) -- no file read needed, just the same
+    # layout constants funckey_bar.py's render() uses.
+    fk_border888 = _rgb565_to_888(FK_BORDER_COLOR)
+    fk_key888 = [_rgb565_to_888(c) for c in FK_KEY_COLORS]
+
     try:
+        from png_writer import PngWriter
         with open(path, "wb") as f:
-            f.write(("P6\n%d %d\n255\n" % (W, H)).encode())
+            enc = PngWriter(f, W, H)
             row = bytearray(W * 3)
             black_row = bytes(W * 3)  # whole row = (0,0,0)
             for y in range(H):
-                if fk_f is not None and fk_y <= y < fk_y + FK_H:
-                    fk_f.seek((y - fk_y) * FK_W * 2)
-                    fk_f.readinto(fk_row_buf)
+                if fk_y <= y < fk_y + FK_H:
+                    row_in_bar = y - fk_y
+                    top_or_bottom_border = (row_in_bar < FK_BORDER_T or
+                                             row_in_bar >= FK_H - FK_BORDER_T)
                     for x in range(W):
                         if fk_x <= x < fk_x + FK_W:
-                            i = (x - fk_x) * 2
-                            c565 = (fk_row_buf[i] << 8) | fk_row_buf[i + 1]
-                            r, g, b = _rgb565_to_888(c565)
+                            col_in_bar = x - fk_x
+                            key_i = col_in_bar // FK_KEY_W
+                            if key_i >= FK_N_KEYS:
+                                key_i = FK_N_KEYS - 1
+                            within_key = col_in_bar - key_i * FK_KEY_W
+                            if (top_or_bottom_border or
+                                    col_in_bar < FK_BORDER_T or
+                                    col_in_bar >= FK_W - FK_BORDER_T):
+                                r, g, b = fk_border888
+                            elif within_key == 0 or within_key == FK_KEY_W - 1:
+                                r = g = b = 0  # 1px gap between keys
+                            else:
+                                r, g, b = fk_key888[key_i]
                         else:
                             r = g = b = 0
                         o = x * 3
                         row[o] = r; row[o + 1] = g; row[o + 2] = b
-                    f.write(row)
+                    enc.write_row(row)
                     continue
 
                 if not (bezel_y0 <= y < bezel_y1):
-                    f.write(black_row)
+                    enc.write_row(black_row)
                     continue
 
                 in_mid_y = mid_y0 <= y < mid_y1
@@ -263,12 +286,10 @@ def _do_full_capture(system, display, fkbar=None):
                             r, g, b = fg888 if system.lcd.get_pixel(sx, sy) else bgon888
                     o = x * 3
                     row[o] = r; row[o + 1] = g; row[o + 2] = b
-                f.write(row)
+                enc.write_row(row)
+            enc.close()
         _gc.collect()
         return "Full capture: " + path.rsplit("/", 1)[-1]
     except Exception as e:
         _gc.collect()
         return "!! Full capture error: %s" % e
-    finally:
-        if fk_f is not None:
-            fk_f.close()

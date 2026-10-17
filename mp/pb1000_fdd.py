@@ -118,8 +118,7 @@ class PB1000FddMixin:
                 # Boot ROM reads 0x0C03, stores it in OPTCD, then checks
                 # OPTCD==0x55 to confirm the MD-100 interface is present.
                 self._io_rd_regs[4] = 0x55  # MD-100 identifier for boot detection
-                if hasattr(cpu_core, "set_vfdd_data"):
-                    cpu_core.set_vfdd_data(0x55)
+                cpu_core.set_vfdd_data(0x55)
                 self._inject_optcd_signature("reset-release")
 
             # Allow transfer whenever power is on, ensuring P3 is always updated by STR
@@ -142,8 +141,7 @@ class PB1000FddMixin:
                 else:
                     val_out_next = self.virtual_fdd_controller.transfer(val_in)
                     self._io_rd_regs[4] = val_out_next
-                    if hasattr(cpu_core, "set_vfdd_data"):
-                        cpu_core.set_vfdd_data(val_out_next)
+                    cpu_core.set_vfdd_data(val_out_next)
 
             elif (current & PD_STR) != 0 and (previous & PD_STR) == 0:
                 # Rising edge of STR: End of transfer cycle.
@@ -327,10 +325,9 @@ class PB1000FddMixin:
 
         # New C-side Selective Hooking:
         # We stay in C-managed memory mode (Full Speed) and only hook 0x0C00 range.
-        if hasattr(cpu_core, "set_io_callbacks"):
-            # I/O callbacks are already registered during __init__.
-            # Re-registering here is unnecessary and can destabilize boot on-device.
-            print("[VFDD] C-side selective MMIO hooking already active")
+        # I/O callbacks are already registered during __init__.
+        # Re-registering here is unnecessary and can destabilize boot on-device.
+        print("[VFDD] C-side selective MMIO hooking already active")
 
         self.virtual_fdd_config = {
             "enabled": True,
@@ -338,21 +335,23 @@ class PB1000FddMixin:
             "path": path,
             "readonly": bool(readonly),
         }
-        # Ensure Python-side ROM copies exist for the callback path (Bug #1)
-        self._ensure_rom_copies()
+        # 2026-10-17: used to call self._ensure_rom_copies() here ("Ensure
+        # Python-side ROM copies exist for the callback path (Bug #1)") --
+        # removed along with that method and load_rom()'s keep_copy
+        # parameter. Audited every consumer of self.rom0/self.rom1 and
+        # found none: the VFDD callback path (_fdd_read_bridge_fn/
+        # _port_read/etc. in pb1000.py) only ever reads MMIO registers via
+        # _read_io_register(), never ROM content, and modhd61700.c's
+        # mod_load_rom() already keeps its own independent static copy
+        # (rom0_buf/rom1_buf) that this was always redundant with. See
+        # pb1000.py's load_rom() docstring and
+        # [[project_rom_loading_sd_limitation]].
 
         print(
             "Virtual FDD enabled: "
             f"path={path} readonly={1 if readonly else 0}"
         )
         return True
-
-    def _ensure_rom_copies(self):
-        """Reload ROM data into Python copies when C direct memory is disabled."""
-        if self.rom0 is None or len(self.rom0) == 0:
-            self.load_rom('/roms/rom0.bin', slot=0, keep_copy=True)
-        if self.rom1 is None or len(self.rom1) == 0:
-            self.load_rom('/roms/rom1.bin', slot=1, keep_copy=True)
 
     def disable_virtual_fdd(self):
         if self.virtual_fdd is not None:

@@ -76,6 +76,37 @@ MicroPython チェックアウトを共有すると、あるプロジェクト�
 cp -r /path/to/PB-1000_emu_AG2/src/* ~/projects/hd61700/src/
 ```
 
+### mp/*.py のフリーズ（起動時ヒープ断片化対策）
+
+`mp/`配下の大半の`.py`（`boot.py`/`main.py`と`ext/`配下は除く）は、ビルド時に
+バイトコード化してファームウェアのフラッシュへ焼き込む「フリーズ」の対象です。
+これにより起動時の`import`がコンパイルなしで済み、起動シーケンス中のGCヒープ
+断片化による`MemoryError`を大幅に抑えられます（経緯は`調査用/mp_freeze_tradeoffs.md`参照）。
+
+対象ファイルの一覧とフリーズの定義は、このリポジトリの`src/manifest_freeze.py`が正本です。
+ビルド前に、この定義とフリーズ対象ファイル自体をビルド用コピーへ同期してください（`src/`の
+同期と同様、`micropython.pb1000`チェックアウトはgit管理外のため、チェックアウトを作り直した
+場合は`boards/manifest.py`への`include()`の追記も再度必要です — 下記は冪等なので毎回実行して
+構いません）。
+
+```bash
+# 2. mp/*.py のフリーズ対象をビルド用コピーへ同期
+mkdir -p ~/projects/hd61700/mp
+cp /path/to/PB-1000_emu_AG2/mp/*.py ~/projects/hd61700/mp/
+cp /path/to/PB-1000_emu_AG2/src/manifest_freeze.py ports/rp2/boards/manifest_freeze.py
+
+# 3. ports/rp2/boards/manifest.py に include() が無ければ追記（チェックアウトを
+#    作り直した場合のみ必要。既にあれば何もしない）
+grep -q 'manifest_freeze.py' ports/rp2/boards/manifest.py || \
+  sed -i '/freeze("\$(PORT_DIR)\/modules")/a include("$(PORT_DIR)/boards/manifest_freeze.py")' \
+    ports/rp2/boards/manifest.py
+```
+
+`mp/*.py`を追加・削除・リネームした場合は、`src/manifest_freeze.py`のリストも
+手動で更新する必要があります（自動検出はしていません — ディレクトリを丸ごと
+フリーズする方式だと`ext/`配下まで誤って対象に入ってしまうため、明示的なファイル
+リスト方式を採用しています）。
+
 **例 (Linux/WSL2):**
 ```bash
 cd ports/rp2

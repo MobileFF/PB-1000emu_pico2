@@ -29,58 +29,46 @@ static size_t rom0_size = 0;
 static uint8_t rom1_buf[0x8000]; // 32KB System ROM
 static size_t rom1_size = 0;
 static uint8_t ram_buf[0x2000];     // 8KB RAM (0x6000-0x7FFF)
-/* Bank 1-3 RAM (32KB each, 0x8000-0xFFFF): allocated on demand from the
- * MicroPython GC heap, not reserved as static arrays -- so a profile using
- * fewer than 3 banks genuinely frees that much heap (gc.mem_free()-visible).
- * NULL until ensure_bank_buf() is called for that bank. See
- * [[project_bank_dynamic_alloc]] memory for the full history: a first
- * attempt at this (2026-08-23) caused a real-hardware boot hang, root-caused
- * (not reproduced, but confirmed via code reading) to c_mem_direct_read()/
- * c_mem_direct_write() gating bank access on has_bank[] alone, without
- * checking whether the buffer pointer itself was non-NULL -- fixed below by
- * (a) checking the pointer explicitly at every dereference site, not just
- * has_bank[], and (b) allocating the buffer *before* setting has_bank[]=true
- * in set_bank_present()/set_has_exp_ram(), so a failed allocation can never
- * leave has_bank[]=true paired with a NULL buffer. */
+/* Bank 1-3 RAM (32KB each, 0x8000-0xFFFF), one static array per bank --
+ * same storage class as rom0_buf/rom1_buf/ram_buf above, NOT MicroPython
+ * GC-heap memory. See [[project_bank_dynamic_alloc]] for the full history
+ * of why this used to be m_malloc()'d from the GC heap on demand instead
+ * (so a profile using fewer than 3 banks genuinely freed that much GC
+ * heap) and the real boot-hang bug that came with it (a GC root-pointer
+ * visibility issue, now moot -- nothing here is GC-heap memory any more,
+ * so there's nothing for gc_collect() to sweep out from under it).
+ *
+ * 2026-10-16: switched back to static arrays after real-hardware testing
+ * showed the dynamic version was simply unreliable in practice -- a
+ * 3-bank profile's third 32KB m_malloc() failed despite >180KB GC heap
+ * free (external fragmentation from live, non-garbage objects allocated
+ * earlier in boot -- display/SD/USB-host init, the profile picker UI --
+ * see 調査用/bank_alloc_fragmentation.md), and an attempted Python-side
+ * mitigation (reserving-then-releasing a large block earlier in boot)
+ * made a previously-working 2-bank profile fail too. A static reservation
+ * trades away the "pay only for banks you use" property (this now costs
+ * every profile 96KB of GC heap whether its banks are used or not -- see
+ * memmap_mp_rp2350.ld's __GcHeapStart/__GcHeapEnd: the GC heap is simply
+ * whatever's left of RAM after .bss/.data, so a bigger .bss here directly
+ * and unconditionally shrinks it) in exchange for bank allocation never
+ * failing at all, regardless of how fragmented the GC heap gets. */
 #define BANK_BUF_SIZE 0x8000
-/* Registered as a GC root pointer array, NOT a plain `static uint8_t *`.
- * A plain static global holding a pointer into the GC heap is invisible to
- * this port's gc_collect() (ports/rp2/main.c's gc_collect() only scans the
- * stack/registers via gc_helper_collect_regs_and_stack(), not .bss/.data),
- * so a block reachable only through such a pointer can be swept and handed
- * out to an unrelated Python object as soon as nothing else marks it --
- * corrupting both the "bank RAM" and whatever object now aliases it. This
- * was a real bug (see [[project_bank_dynamic_alloc]]): pre-allocating a
- * bank buffer early (before anything wraps it in a Python-visible object)
- * let it get swept and reused during later boot, manifesting as unstable
- * TypeError/NotImplementedError symptoms far from the actual cause.
- * MP_REGISTER_ROOT_POINTER() moves the storage into mp_state_ctx.vm (see
- * py/mpstate.h, py/obj.h), which gc_collect() DOES scan, so accessed via
- * MP_STATE_PORT()/bank_buf_get() below, never as a plain C global again. */
-MP_REGISTER_ROOT_POINTER(void *hd61700_bank_buf[3]);
+static uint8_t bank_buf_storage[3][BANK_BUF_SIZE];
 
-/* Read the given bank's buffer pointer (1..3) without allocating. Returns
- * NULL if that bank hasn't been allocated yet. */
+/* Read the given bank's buffer pointer (1..3). Never NULL (bank index
+ * validity aside) -- unlike the old GC-heap version, this storage always
+ * exists from boot, whether or not the bank is actually in use. */
 static inline uint8_t *bank_buf_get(int bank /* 1..3 */) {
   if (bank < 1 || bank > 3) return NULL;
-  return (uint8_t *)MP_STATE_PORT(hd61700_bank_buf[bank - 1]);
+  return bank_buf_storage[bank - 1];
 }
 
-/* Lazily allocate the given bank's buffer (1..3) from the GC heap if it
- * doesn't exist yet. Returns the (now guaranteed non-NULL) pointer.
- * m_malloc() raises MemoryError on failure rather than returning NULL --
- * propagates as a normal, catchable Python exception up through whichever
- * native function (set_bank_present/set_has_exp_ram/load_ram) called this,
- * before that caller has set has_bank[]=true, so has_bank[]/buffer state
- * can never end up inconsistent even on allocation failure. */
+/* Kept as a thin wrapper (same name/signature as before the 2026-10-16
+ * static-array switch) so set_has_exp_ram()/set_bank_present()/load_ram()
+ * below don't need to change at all -- allocation can no longer fail, so
+ * this now just returns the fixed storage. */
 static uint8_t *ensure_bank_buf(int bank /* 1..3 */) {
-  if (bank < 1 || bank > 3) return NULL;
-  uint8_t *buf = bank_buf_get(bank);
-  if (buf == NULL) {
-    buf = (uint8_t *)m_malloc(BANK_BUF_SIZE);
-    MP_STATE_PORT(hd61700_bank_buf[bank - 1]) = buf;
-  }
-  return buf;
+  return bank_buf_get(bank);
 }
 static uint8_t ext_work_buf[0x100]; // 256B Extension API work area (0x5F00-0x5FFF)
 
@@ -410,14 +398,25 @@ typedef struct {
   uint8_t scancode;
   uint8_t host_mod;
   uint8_t coords[4][2]; /* 0xFF terminated */
+  /* 2026-10-17: display label for hd61700.get_key_label() (mp/keymap.py's
+     get_label(), used by main_actions.py's status-bar key readout) --
+     see base_usb_key_t's matching comment below for why this moved here
+     instead of staying a Python-side dict. Longest real label observed is
+     "MEMO IN" (7 chars); 11 leaves headroom plus the NUL. Left all-zero
+     (empty string) for any entry a caller didn't supply one for --
+     get_key_label() falls through to the next table / "SC:xx" synthesis
+     in that case, same as the old Python get_label() did for a missing
+     USB_MAP/ADV_MAP entry. */
+  char label[12];
 } adv_usb_map_t;
 
 #define MAX_ADV_MAP_ENTRIES 64
 static adv_usb_map_t dynamic_adv_map[MAX_ADV_MAP_ENTRIES];
 static size_t dynamic_adv_map_count = 0;
 
-/* Standard keys fallback (scancode -> row, ki) */
-typedef struct { uint8_t scancode; uint8_t row; uint8_t ki; } base_usb_key_t;
+/* Standard keys fallback (scancode -> row, ki). label: see adv_usb_map_t's
+   comment above -- same reasoning, same 2026-10-17 change. */
+typedef struct { uint8_t scancode; uint8_t row; uint8_t ki; char label[12]; } base_usb_key_t;
 
 #define MAX_BASE_MAP_ENTRIES 128
 static base_usb_key_t dynamic_base_map[MAX_BASE_MAP_ENTRIES];
@@ -1057,12 +1056,13 @@ static uint8_t c_mem_direct_read(void *ctx, uint8_t segment, uint32_t offset) {
       /* Bank 0: System ROM */
       return (rom1_size > 0) ? rom1_buf[off % rom1_size] : 0xFF;
     }
-    /* Banks 1-3: RAM. Checks the buffer pointer itself, not just has_bank[]
-     * -- has_bank[bank] can become true via detect_all_banks()'s file probe
-     * (or any other path) before the buffer is actually allocated; without
-     * this check that would be a NULL-pointer dereference on this hot path
-     * (called on every emulated memory access). See the 2026-08-23 postmortem
-     * comment above the hd61700_bank_buf root-pointer declaration. */
+    /* Banks 1-3: RAM. bank_buf_get() can no longer return NULL for a valid
+     * bank index (static storage since 2026-10-16, see bank_buf_storage's
+     * comment above) -- the != NULL check below is now just defensive,
+     * kept from when this guarded a real NULL-pointer-dereference hazard
+     * (has_bank[bank] could become true via detect_all_banks()'s file
+     * probe before the GC-heap buffer was actually allocated; this is a
+     * hot path, called on every emulated memory access). */
     uint8_t * const bank_bufs[3] = {bank_buf_get(1), bank_buf_get(2), bank_buf_get(3)};
     if (bank >= 1 && bank <= 3 && has_bank[bank] && bank_bufs[bank - 1] != NULL)
       return bank_bufs[bank - 1][off];
@@ -1874,12 +1874,9 @@ static mp_obj_t mod_lcd_clear_read_queue(void) {
 static MP_DEFINE_CONST_FUN_OBJ_0(mod_lcd_clear_read_queue_obj, mod_lcd_clear_read_queue);
 
 /* hd61700.set_has_exp_ram(bool)  — sets Bank 1 presence flag (backward compat).
- * Allocates (if enabling) BEFORE setting has_bank[1]=true: ensure_bank_buf()
- * raises MemoryError on allocation failure, which unwinds out of this native
- * function before has_bank[1] is touched -- so a failed allocation can never
- * leave has_bank[1]=true paired with a NULL buffer (the exact inconsistency
- * that made the unchecked c_mem_direct_read/write hot path unsafe the first
- * time this feature was attempted; see the hd61700_bank_buf root-pointer declaration comment above). */
+ * ensure_bank_buf() can no longer fail (static storage, see
+ * bank_buf_storage's comment above) -- this still calls it before setting
+ * has_bank[1], matching the original ordering from when it could. */
 static mp_obj_t mod_set_has_exp_ram(mp_obj_t enable_obj) {
   bool enable = mp_obj_is_true(enable_obj);
   uint8_t *buf = enable ? ensure_bank_buf(1) : NULL;
@@ -2252,7 +2249,21 @@ static mp_obj_t mod_uart_clear_rx_signal(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(mod_uart_clear_rx_signal_obj, mod_uart_clear_rx_signal);
 
-/* hd61700.keyboard_config_adv([(scancode, mod, [(row,ki), ...]), ...]) */
+/* Copies a Python str obj's text into a fixed-size char buffer, truncated
+ * and always NUL-terminated. Shared by both config functions below for
+ * their optional trailing label argument. */
+static void _copy_label(char *dst, size_t dst_size, mp_obj_t label_obj) {
+  size_t src_len;
+  const char *src = mp_obj_str_get_data(label_obj, &src_len);
+  if (src_len > dst_size - 1) src_len = dst_size - 1;
+  memcpy(dst, src, src_len);
+  dst[src_len] = '\0';
+}
+
+/* hd61700.keyboard_config_adv([(scancode, mod, [(row,ki), ...][, label]), ...])
+ * `label` (5th tuple element) is optional, added 2026-10-17 -- see
+ * adv_usb_map_t's comment. Omitting it (a plain 3-element tuple, as
+ * before this date) leaves that entry's label empty. */
 static mp_obj_t mod_keyboard_config_adv(mp_obj_t list_obj) {
   size_t len;
   mp_obj_t *items;
@@ -2268,11 +2279,13 @@ static mp_obj_t mod_keyboard_config_adv(mp_obj_t list_obj) {
     adv_usb_map_t *entry = &dynamic_adv_map[dynamic_adv_map_count++];
     entry->scancode = (uint8_t)mp_obj_get_int(inner_items[0]);
     entry->host_mod = (uint8_t)mp_obj_get_int(inner_items[1]);
-    
+    entry->label[0] = '\0';
+    if (inner_len >= 4) _copy_label(entry->label, sizeof(entry->label), inner_items[3]);
+
     size_t coord_len;
     mp_obj_t *coord_items;
     mp_obj_get_array(inner_items[2], &coord_len, &coord_items);
-    
+
     int j = 0;
     for (; j < (int)coord_len && j < 4; j++) {
       size_t pair_len;
@@ -2288,7 +2301,10 @@ static mp_obj_t mod_keyboard_config_adv(mp_obj_t list_obj) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(mod_keyboard_config_adv_obj, mod_keyboard_config_adv);
 
-/* hd61700.keyboard_config_base([(scancode, row, ki), ...]) */
+/* hd61700.keyboard_config_base([(scancode, row, ki[, label]), ...])
+ * `label` (4th tuple element) is optional, added 2026-10-17 -- see
+ * base_usb_key_t's comment. Omitting it (a plain 3-element tuple, as
+ * before this date) leaves that entry's label empty. */
 static mp_obj_t mod_keyboard_config_base(mp_obj_t list_obj) {
   size_t len;
   mp_obj_t *items;
@@ -2305,10 +2321,73 @@ static mp_obj_t mod_keyboard_config_base(mp_obj_t list_obj) {
     entry->scancode = (uint8_t)mp_obj_get_int(inner_items[0]);
     entry->row = (uint8_t)mp_obj_get_int(inner_items[1]);
     entry->ki = (uint8_t)mp_obj_get_int(inner_items[2]);
+    entry->label[0] = '\0';
+    if (inner_len >= 4) _copy_label(entry->label, sizeof(entry->label), inner_items[3]);
   }
   return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(mod_keyboard_config_base_obj, mod_keyboard_config_base);
+
+/* hd61700.get_key_label(scancode, mod) -> str | None
+ * 2026-10-17: C-side equivalent of mp/keymap.py's old get_label(), which
+ * looked up a human-readable key name from the Python-side USB_MAP/
+ * ADV_MAP dicts -- those (105 entries' worth of ((row,ki), label) tuples)
+ * stayed resident on the GC heap for the whole session just for this, on
+ * top of being redundant with this exact data already living here for
+ * the real key-scan path (keyboard_config_adv/base() above). Same lookup
+ * order as the old get_label(): ADV_MAP-equivalent (dynamic_adv_map)
+ * first when mod is nonzero, then dynamic_base_map regardless of mod.
+ * Returns None (not a synthesized "SC:xx" string) when neither table has
+ * a label for this scancode -- mp/keymap.py's get_label() still does that
+ * part, to keep this function a pure, allocation-light lookup. */
+static mp_obj_t mod_get_key_label(mp_obj_t sc_obj, mp_obj_t mod_obj) {
+  uint8_t sc = (uint8_t)mp_obj_get_int(sc_obj);
+  uint8_t mod = (uint8_t)mp_obj_get_int(mod_obj);
+  if (mod) {
+    for (size_t i = 0; i < dynamic_adv_map_count; i++) {
+      if (dynamic_adv_map[i].scancode == sc && dynamic_adv_map[i].host_mod == mod) {
+        if (dynamic_adv_map[i].label[0] == '\0') break;
+        return mp_obj_new_str(dynamic_adv_map[i].label, strlen(dynamic_adv_map[i].label));
+      }
+    }
+  }
+  for (size_t i = 0; i < dynamic_base_map_count; i++) {
+    if (dynamic_base_map[i].scancode == sc) {
+      if (dynamic_base_map[i].label[0] == '\0') return mp_const_none;
+      return mp_obj_new_str(dynamic_base_map[i].label, strlen(dynamic_base_map[i].label));
+    }
+  }
+  return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_2(mod_get_key_label_obj, mod_get_key_label);
+
+/* hd61700.scancode_to_alpha(scancode) -> str | None
+ * USB HID scancode -> single printable char (a-z, 0-9, hyphen only), for
+ * folder-name text entry (mp/emulator_menu.py's _text_input()). 2026-10-16
+ * heap-reduction pass: replaces that module's own `_SC_ALPHA` dict (34
+ * entries, built -- and holding a live hash table -- on the GC heap for
+ * the whole session once emulator_menu.py is preloaded, even though the
+ * mapping itself never changes). A plain table indexed by scancode is a
+ * better fit in C than a Python dict anyway: it's flash-resident (no heap
+ * cost at all) and a single array lookup, rather than a hash computation. */
+static const char scancode_alpha_table[0x2E] = {
+  /* 0x00-0x03 */ 0, 0, 0, 0,
+  /* 0x04-0x1D: a-z */
+  'a','b','c','d','e','f','g','h','i','j','k','l','m','n','o','p','q','r',
+  's','t','u','v','w','x','y','z',
+  /* 0x1E-0x27: 1-9,0 */
+  '1','2','3','4','5','6','7','8','9','0',
+  /* 0x28-0x2C */ 0, 0, 0, 0, 0,
+  /* 0x2D: hyphen */ '-',
+};
+static mp_obj_t mod_scancode_to_alpha(mp_obj_t sc_obj) {
+  mp_int_t sc = mp_obj_get_int(sc_obj);
+  char c = (sc >= 0 && sc < (mp_int_t)sizeof(scancode_alpha_table))
+               ? scancode_alpha_table[sc] : 0;
+  if (c == 0) return mp_const_none;
+  return mp_obj_new_str(&c, 1);
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(mod_scancode_to_alpha_obj, mod_scancode_to_alpha);
 
 // module.get_last_key() -> int (-1 if none, read-and-clear)
 // Services the USB host first (usb_host_core_task(): no-op in native builds,
@@ -2613,6 +2692,10 @@ static const mp_rom_map_elem_t hd61700_module_globals_table[] = {
      MP_ROM_PTR(&mod_keyboard_config_adv_obj)},
     {MP_ROM_QSTR(MP_QSTR_keyboard_config_base),
      MP_ROM_PTR(&mod_keyboard_config_base_obj)},
+    {MP_ROM_QSTR(MP_QSTR_scancode_to_alpha),
+     MP_ROM_PTR(&mod_scancode_to_alpha_obj)},
+    {MP_ROM_QSTR(MP_QSTR_get_key_label),
+     MP_ROM_PTR(&mod_get_key_label_obj)},
     {MP_ROM_QSTR(MP_QSTR_get_last_key),
      MP_ROM_PTR(&mod_get_last_key_obj)},
     {MP_ROM_QSTR(MP_QSTR_get_held_cursor_key),

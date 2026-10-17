@@ -1,39 +1,69 @@
 """
 PB-1000 Keyboard Mapping Definitions
 
-Search order for JSON override:
-  /sd/roms/keymap.json  >  /sd/keymap.json  >  /roms/keymap.json  >  /keymap.json
-Falls back to built-in defaults when no JSON file is found.
+Search order for the override file:
+  /roms/keymap.map  >  /keymap.map  >  /sd/roms/keymap.map  >  /sd/keymap.map
+(internal flash checked before the SD card root -- 2026-10-17, reversed
+from the original SD-first order at the user's request, same direction as
+rom0.bin/rom1.bin's fallback -- see [[project_rom_loading_sd_limitation]])
+Falls back to built-in defaults when no override file is found.
+
+2026-10-17: this used to be a keymap.json override, loaded with the `json`
+module. Dropped in favor of this line-based format (see _load_text_keymap()
+below) after a real-hardware finding (調査用/heap_budget_bank3.md): loading
+a full custom keymap.json cost ~17KB of GC heap on a tight boot. Most of
+that was never the actual data (a couple hundred ints/strings) but the
+*generic JSON tree* json.load() has to build to hold it along the way --
+one Python dict per entry, plus repeated per-entry key strings ("row"/"ki"/
+"label" etc.), for every single one of this keyboard's ~105 mapped keys.
+Parsing this format line-by-line builds USB_MAP/ADV_MAP directly, with no
+intermediate tree at all. tools/keymap_editor.py still edits/saves the
+human-friendly JSON form on a PC (no heap constraint there) and exports
+this compact form for the device -- see that tool's "Export for device"
+command.
 """
 
-# ── JSON loader ───────────────────────────────────────────────────────────────
+# ── Compact text-format loader ───────────────────────────────────────────────
+#
+# Line format (see tools/keymap_editor.py's export for the generator):
+#   U|scancode_hex|row|ki|label            -- USB_MAP entry
+#   A|scancode_hex|mod|row,ki[;row,ki]|label  -- ADV_MAP entry (1 or 2
+#     simultaneous key coords, e.g. Shift+1 = "!")
+# `label` is always the LAST field and runs to the end of the line verbatim
+# -- parsing limits the split count (maxsplit=4) instead of assuming the
+# label is free of `|`/`,`/`;`, since this keyboard has keys for all three
+# and their labels are literally that one character.
+# Lines starting with # (and blank lines) are ignored.
 
-def _load_json_keymap():
-    try:
-        import json as _json
-    except ImportError:
-        return None, None
-    for path in ('/sd/roms/keymap.json', '/sd/keymap.json', '/roms/keymap.json', '/keymap.json'):
+def _load_text_keymap():
+    for path in ('/roms/keymap.map', '/keymap.map', '/sd/roms/keymap.map', '/sd/keymap.map'):
         try:
-            with open(path) as f:
-                data = _json.load(f)
             usb_map = {}
-            for sc_str, v in data.get('usb_map', {}).items():
-                sc = int(sc_str, 16)
-                usb_map[sc] = ((v['row'], v['ki']), v['label'])
             adv_map = {}
-            for key_str, v in data.get('adv_map', {}).items():
-                parts = key_str.split(',')
-                sc = int(parts[0], 16)
-                mod = int(parts[1])
-                coords = [tuple(c) for c in v['coords']]
-                adv_map[(sc, mod)] = (coords, v['label'])
-            print(f"Keymap: loaded {path}")
-            return usb_map, adv_map
+            with open(path) as f:
+                for raw in f:
+                    line = raw.rstrip('\r\n')
+                    if not line or line[0] == '#':
+                        continue
+                    tag = line[0]
+                    if tag == 'U':
+                        parts = line.split('|', 4)
+                        sc = int(parts[1], 16)
+                        usb_map[sc] = ((int(parts[2]), int(parts[3])), parts[4])
+                    elif tag == 'A':
+                        parts = line.split('|', 4)
+                        sc = int(parts[1], 16)
+                        mod = int(parts[2])
+                        coords = [tuple(int(x) for x in cp.split(','))
+                                  for cp in parts[3].split(';')]
+                        adv_map[(sc, mod)] = (coords, parts[4])
+            if usb_map or adv_map:
+                print(f"Keymap: loaded {path}")
+                return usb_map, adv_map
         except OSError:
             pass
         except Exception as e:
-            print(f"Keymap JSON error ({path}): {e}")
+            print(f"Keymap file error ({path}): {e}")
     return None, None
 
 
@@ -152,12 +182,12 @@ def _build_defaults():
     return usb_map, adv_map
 
 
-# ── Load (JSON first, then defaults) ─────────────────────────────────────────
+# ── Load (override file first, then defaults) ────────────────────────────────
 
-_json_usb, _json_adv = _load_json_keymap()
-if _json_usb is not None:
-    USB_MAP = _json_usb
-    ADV_MAP = _json_adv
+_ovr_usb, _ovr_adv = _load_text_keymap()
+if _ovr_usb is not None:
+    USB_MAP = _ovr_usb
+    ADV_MAP = _ovr_adv
 else:
     USB_MAP, ADV_MAP = _build_defaults()
 
@@ -200,22 +230,55 @@ def get_label(scancode, mod=0):
     """Resolve a USB scancode (and optional modifier bitmask) to a display label.
 
     mod bitmask: 1=Shift 2=Alt 4=Ctrl 8=Win/GUI
-    Checks ADV_MAP first when mod is non-zero, then falls back to USB_MAP.
-    """
-    label = None
-    if mod:
-        adv_entry = ADV_MAP.get((scancode, mod))
-        if adv_entry:
-            label = adv_entry[1]
+
+    2026-10-17: looks up hd61700.get_key_label() (src/modhd61700.c) instead
+    of the old USB_MAP/ADV_MAP dicts -- those stayed resident on the GC
+    heap all session just for this, duplicating data the C side already
+    keeps for the real key-scan path. See release_maps()."""
+    try:
+        import hd61700 as _hd
+        label = _hd.get_key_label(scancode, mod)
+    except Exception:
+        label = None
     if label is None:
-        entry = USB_MAP.get(scancode)
-        label = entry[1] if entry else "SC:{:02X}".format(scancode)
+        label = "SC:{:02X}".format(scancode)
     return _DISPLAY_LABEL_MAP.get(label, label)
 
 def get_adv_map_list():
-    """Returns ADV_MAP as [(scancode, mod, [(row, ki), ...]), ...] for the C module."""
-    return [(sc, mod, v[0]) for (sc, mod), v in ADV_MAP.items()]
+    """Returns ADV_MAP as [(scancode, mod, [(row, ki), ...], label), ...]
+    for the C module (hd61700.keyboard_config_adv() -- the label is a
+    2026-10-17 addition, see that function's comment)."""
+    return [(sc, mod, v[0], v[1]) for (sc, mod), v in ADV_MAP.items()]
 
 def get_base_map_list():
-    """Returns [(scancode, row, ki), ...] for the C module."""
-    return [(sc, v[0][0], v[0][1]) for sc, v in USB_MAP.items()]
+    """Returns [(scancode, row, ki, label), ...] for the C module
+    (hd61700.keyboard_config_base() -- label added 2026-10-17)."""
+    return [(sc, v[0][0], v[0][1], v[1]) for sc, v in USB_MAP.items()]
+
+def release_maps():
+    """Frees USB_MAP/ADV_MAP -- call once, right after
+    get_adv_map_list()/get_base_map_list() have both been consumed by
+    hd61700.keyboard_config_adv()/_base() (main_boot.py's
+    configure_c_keyboard()). Safe to drop from here on: get_label() reads
+    the C-side copy instead, and KEY_MAP/NAMED_KEYS (joystick key-name
+    parsing) were already derived from these at module-load time and
+    don't need them again. 2026-10-17: see this module's docstring --
+    these two dicts (coords+label for ~105 entries) were the single
+    largest piece of this module's GC-heap footprint, almost entirely
+    redundant with the C-side dynamic_adv_map/dynamic_base_map once this
+    point is reached.
+
+    2026-10-17 real-hardware-pending fix: clearing USB_MAP/ADV_MAP alone
+    did NOT actually free the dicts when an override file (keymap.map) was
+    loaded -- _ovr_usb/_ovr_adv (module globals set once at module-load
+    time, right above `if _ovr_usb is not None:`) still held their own
+    reference to the exact same dict objects, so this function was only
+    clearing two of the (at least) four names pointing at them. Must clear
+    those too, or the override case (the common one -- a default-only
+    install has _ovr_usb/_ovr_adv == None already) never actually released
+    anything."""
+    global USB_MAP, ADV_MAP, _ovr_usb, _ovr_adv
+    USB_MAP = None
+    ADV_MAP = None
+    _ovr_usb = None
+    _ovr_adv = None

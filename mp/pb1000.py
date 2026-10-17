@@ -160,8 +160,18 @@ class PB1000System(PB1000FddMixin, PB1000StateIOMixin):
                  profile_dir=None, config=None):
         self.debug_cfg = self._normalize_debug_config(debug)
         self.debug = self.debug_cfg["sys"]
-        # Detect C-port availability early so _beep_init() can skip machine.PWM
-        self._c_port_active = hasattr(cpu_core, 'set_port_direct')
+        # 2026-10-16: used to be `hasattr(cpu_core, 'set_port_direct')` --
+        # dropped along with every other hasattr(cpu_core/lcd_c, ...)
+        # feature-*detection* guard in this codebase (see 調査用/
+        # heap_reduction_hasattr_removal.md): this firmware export is a
+        # long-shipped, stable feature at this point, and a mismatch
+        # between mp/*.py and the flashed firmware is meant to fail loudly
+        # rather than silently run an older code path. This flag can still
+        # become False below if the actual set_port_direct() *call* raises
+        # at runtime (a real hardware/GPIO failure, not a version check) --
+        # that's unrelated to this change and still falls back to
+        # _beep_init()'s machine.PWM path as before.
+        self._c_port_active = True
         self.sd_mounted = False
         self.spi = None
         if isinstance(display, tuple) and len(display) >= 4:
@@ -220,43 +230,40 @@ class PB1000System(PB1000FddMixin, PB1000StateIOMixin):
         # selection work so it doesn't sit between free blocks and block
         # them from being seen as one run.
         gc.collect()
-        if hasattr(cpu_core, "set_has_exp_ram"):
-            cpu_core.set_has_exp_ram(self.has_bank[1])
-        if hasattr(cpu_core, "set_bank_present"):
-            cpu_core.set_bank_present(2, self.has_bank[2])
-            cpu_core.set_bank_present(3, self.has_bank[3])
+        cpu_core.set_has_exp_ram(self.has_bank[1])
+        cpu_core.set_bank_present(2, self.has_bank[2])
+        cpu_core.set_bank_present(3, self.has_bank[3])
 
-        if hasattr(cpu_core, "get_ram_view"):
-            raw_view = cpu_core.get_ram_view()
-            self.ram = RAMView(cpu_core, memoryview(raw_view), self.RAM_SIZE, self.RAM_START)
-            # Bank 1 (exp_ram): backward-compat view, only built when this
-            # profile actually has ram1.bin (has_bank[1]) -- the C buffer
-            # only exists in that case now (see comment above).
-            _b1 = None
-            if self.has_bank[1] and hasattr(cpu_core, "get_exp_ram_view"):
-                exp_raw_view = cpu_core.get_exp_ram_view()
-                if exp_raw_view is not None:
-                    _b1 = RAMView(cpu_core, memoryview(exp_raw_view), self.EXP_RAM_SIZE, self.SYS_ROM_START, segment=0x10)
-            if _b1 is None and not hasattr(cpu_core, "get_exp_ram_view"):
-                # Old firmware without this C export at all: fall back to a
-                # plain Python buffer regardless of has_bank[1], matching
-                # the pre-dynamic-allocation behavior for that case.
-                _b1 = bytearray(self.EXP_RAM_SIZE)
-            # Banks 2 and 3 — same, only built when present.
-            _bank_views = []
-            for slot in range(2, 4):
-                view = None
-                if self.has_bank[slot] and hasattr(cpu_core, "get_bank_view"):
-                    rv = cpu_core.get_bank_view(slot)
-                    if rv is not None:
-                        view = RAMView(cpu_core, memoryview(rv), self.EXP_RAM_SIZE, self.SYS_ROM_START, segment=slot << 4)
-                if view is None and not hasattr(cpu_core, "get_bank_view"):
-                    view = bytearray(self.EXP_RAM_SIZE)
-                _bank_views.append(view)
-        else:
-            self.ram = bytearray(self.RAM_SIZE)
-            _b1 = bytearray(self.EXP_RAM_SIZE)
-            _bank_views = [bytearray(self.EXP_RAM_SIZE), bytearray(self.EXP_RAM_SIZE)]
+        # 2026-10-16: this whole block used to branch on hasattr(cpu_core,
+        # "get_ram_view"/"get_exp_ram_view"/"get_bank_view") with a plain-
+        # bytearray Python fallback for firmware lacking any of them (see
+        # 調査用/heap_reduction_hasattr_removal.md for why that guard was
+        # removed project-wide). These are long-stable C exports now, and
+        # requiring them unconditionally also removes the one real
+        # motivation this bytearray path existed for: it was the ONLY
+        # remaining way this file could end up allocating ram1/bank2/3 as
+        # plain Python bytearrays instead of via ensure_bank_buf()'s GC-heap
+        # m_malloc() -- i.e. it was already redundant with, not an
+        # alternative to, the dynamic-allocation path above.
+        raw_view = cpu_core.get_ram_view()
+        self.ram = RAMView(cpu_core, memoryview(raw_view), self.RAM_SIZE, self.RAM_START)
+        # Bank 1 (exp_ram): backward-compat view, only built when this
+        # profile actually has ram1.bin (has_bank[1]) -- the C buffer
+        # only exists in that case (see comment above).
+        _b1 = None
+        if self.has_bank[1]:
+            exp_raw_view = cpu_core.get_exp_ram_view()
+            if exp_raw_view is not None:
+                _b1 = RAMView(cpu_core, memoryview(exp_raw_view), self.EXP_RAM_SIZE, self.SYS_ROM_START, segment=0x10)
+        # Banks 2 and 3 — same, only built when present.
+        _bank_views = []
+        for slot in range(2, 4):
+            view = None
+            if self.has_bank[slot]:
+                rv = cpu_core.get_bank_view(slot)
+                if rv is not None:
+                    view = RAMView(cpu_core, memoryview(rv), self.EXP_RAM_SIZE, self.SYS_ROM_START, segment=slot << 4)
+            _bank_views.append(view)
 
         # _bank_ram[0]=unused, [1]=RAM1, [2]=RAM2, [3]=RAM3. A slot is None
         # when that bank isn't present for this profile -- every consumer
@@ -265,8 +272,6 @@ class PB1000System(PB1000FddMixin, PB1000StateIOMixin):
         self.exp_ram = _b1
         self._bank_ram = [None, _b1, _bank_views[0], _bank_views[1]]
             
-        self.rom0 = bytearray(0)
-        self.rom1 = bytearray(0)
         self.rom_bank = 0
         self._key_trace_last = {}
 
@@ -328,10 +333,8 @@ class PB1000System(PB1000FddMixin, PB1000StateIOMixin):
 
         # Initialize CPU
         cpu_core.reset(self.debug_cfg["sys"])
-        if hasattr(cpu_core, "set_key_debug"):
-            cpu_core.set_key_debug(self.debug_cfg["sys"] and self.debug_cfg["kb"])
-        if hasattr(cpu_core, "set_lcd_debug"):
-            cpu_core.set_lcd_debug(self.debug_cfg["sys"] and self.debug_cfg["lcd"])
+        cpu_core.set_key_debug(self.debug_cfg["sys"] and self.debug_cfg["kb"])
+        cpu_core.set_lcd_debug(self.debug_cfg["sys"] and self.debug_cfg["lcd"])
               
         # GC Protection: Hold explicit references to all bound methods passed to C
         self._cb_refs = {
@@ -345,8 +348,7 @@ class PB1000System(PB1000FddMixin, PB1000StateIOMixin):
         
         cpu_core.set_mem_callbacks(self._cb_refs["mem_read"], self._cb_refs["mem_write"])
         cpu_core.set_port_callbacks(self._cb_refs["port_read"], self._cb_refs["port_write"])
-        if hasattr(cpu_core, "set_io_callbacks"):
-            cpu_core.set_io_callbacks(self._cb_refs["io_read"], self._cb_refs["io_write"])
+        cpu_core.set_io_callbacks(self._cb_refs["io_read"], self._cb_refs["io_write"])
 
         # Use C-side port_read/port_write (RP2350 GPIO/PWM direct)
         if self._c_port_active:
@@ -365,22 +367,27 @@ class PB1000System(PB1000FddMixin, PB1000StateIOMixin):
         if restore_registers:
             self.load_state()
             
-    def load_rom(self, path, slot=0, keep_copy=False):
+    def load_rom(self, path, slot=0):
         """Load a ROM image into `slot` (0 or 1). Returns True on success,
-        False if the file couldn't be read (missing/corrupt SD card etc)."""
+        False if the file couldn't be read (missing/corrupt SD card etc).
+
+        2026-10-17: dropped the `keep_copy` parameter and the self.rom0/
+        self.rom1 Python-side copies it used to populate. Audited every
+        consumer in mp/*.py (the C bridge functions all go through
+        cpu_core.read_mem()/_read_io_register(), never these attributes)
+        and modhd61700.c's mod_load_rom() -- it memcpy()s straight into its
+        own static rom0_buf/rom1_buf (not GC-heap, see that file) and never
+        touches the Python `data` object again afterward. No remaining
+        consumer was found; keeping a second, redundant copy on the GC heap
+        (up to ~38KB combined, held for the entire session once VFDD is
+        enabled) was dead weight from an earlier design. See
+        [[project_rom_loading_sd_limitation]] and pb1000_fdd.py's removed
+        _ensure_rom_copies()."""
         try:
             gc.collect()
             with open(path, 'rb') as f:
                 data = f.read()
-                must_keep_copy = bool(keep_copy or self.has_virtual_fdd())
-                if slot == 0:
-                    self.rom0 = data if must_keep_copy else None
-                    if hasattr(cpu_core, "load_rom"):
-                        cpu_core.load_rom(0, data)
-                else:
-                    self.rom1 = data if must_keep_copy else None
-                    if hasattr(cpu_core, "load_rom"):
-                        cpu_core.load_rom(1, data)
+                cpu_core.load_rom(slot, data)
             return True
         except OSError as e:
             print(f"ROM load error ({path}): {e}")
@@ -394,9 +401,7 @@ class PB1000System(PB1000FddMixin, PB1000StateIOMixin):
         return self._mem_read_impl(segment, offset)
 
     def _mem_read_impl(self, segment, offset):
-        if hasattr(cpu_core, "read_mem"):
-            return cpu_core.read_mem(offset, segment)
-        return 0xFF
+        return cpu_core.read_mem(offset, segment)
 
     def _mem_write(self, segment, offset, data):
         pass
@@ -475,7 +480,7 @@ class PB1000System(PB1000FddMixin, PB1000StateIOMixin):
                     print(f"[UART_RX] ROM read first byte: {data:#04x}")
                 # Deassert INT1 when Python buffer is now empty so the CPU
                 # does not re-enter the ISR before the next byte arrives.
-                if not self.pio_uart.any() and hasattr(cpu_core, 'uart_clear_rx_signal'):
+                if not self.pio_uart.any():
                     cpu_core.uart_clear_rx_signal()
                 # ROM consumed EOF — flag auto-BREAK; main loop's KeyboardInputManager
                 # queues BRK and waits for is_key_input_enabled so it only fires
@@ -582,10 +587,7 @@ class PB1000System(PB1000FddMixin, PB1000StateIOMixin):
     EXT_ERR_GENERAL = 0xFF
 
     def _ext_init(self):
-        if hasattr(cpu_core, "get_ext_work_view"):
-            self._ext_work = cpu_core.get_ext_work_view()
-        else:
-            self._ext_work = bytearray(self.EXT_WORK_SIZE)
+        self._ext_work = cpu_core.get_ext_work_view()
         print(f"EXT: work area {self.EXT_WORK_BASE:#06x}-"
               f"{self.EXT_WORK_BASE + self.EXT_WORK_SIZE - 1:#06x}")
         self._ext_load_modules()
@@ -700,7 +702,7 @@ class PB1000System(PB1000FddMixin, PB1000StateIOMixin):
         which has UART-visible side effects) and never touches CPU
         registers/PC, so it's safe to call right after a full-state
         load_state() without disturbing the resumed program's state."""
-        if lcd_c is None or not hasattr(cpu_core, "get_ram_view"):
+        if lcd_c is None:
             return
         try:
             ram_mv = memoryview(cpu_core.get_ram_view())
@@ -895,18 +897,17 @@ class PB1000System(PB1000FddMixin, PB1000StateIOMixin):
             self.lcd.dirty = True
 
     def press_key(self, key):
-        if hasattr(cpu_core, 'press_row_ki'):
-            coord = None
-            if isinstance(key, tuple) and len(key) >= 2:
-                coord = key
-            elif isinstance(key, str):
-                import keymap
-                k = key.lower()
-                if k in keymap.KEY_MAP:
-                    coord = keymap.KEY_MAP[k]
-            
-            if coord:
-                cpu_core.press_row_ki(coord[0], coord[1])
+        coord = None
+        if isinstance(key, tuple) and len(key) >= 2:
+            coord = key
+        elif isinstance(key, str):
+            import keymap
+            k = key.lower()
+            if k in keymap.KEY_MAP:
+                coord = keymap.KEY_MAP[k]
+
+        if coord:
+            cpu_core.press_row_ki(coord[0], coord[1])
 
         # Automatically show label on status bar
         if hasattr(self, 'set_status'):
@@ -922,39 +923,37 @@ class PB1000System(PB1000FddMixin, PB1000StateIOMixin):
             self.set_status(label)
 
     def release_key(self, key):
-        if hasattr(cpu_core, 'release_row_ki'):
-            coord = None
-            if isinstance(key, tuple) and len(key) >= 2:
-                coord = key
-            elif isinstance(key, str):
-                import keymap
-                k = key.lower()
-                if k in keymap.KEY_MAP:
-                    coord = keymap.KEY_MAP[k]
-            
-            if coord:
-                cpu_core.release_row_ki(coord[0], coord[1])
+        coord = None
+        if isinstance(key, tuple) and len(key) >= 2:
+            coord = key
+        elif isinstance(key, str):
+            import keymap
+            k = key.lower()
+            if k in keymap.KEY_MAP:
+                coord = keymap.KEY_MAP[k]
+
+        if coord:
+            cpu_core.release_row_ki(coord[0], coord[1])
 
     def power_on(self, *, force_reset=False, force_power_on=False):
         cpu_core.set_input(cpu_core.SW, 1)
-        if hasattr(cpu_core, "set_pc"):
-            current_pc = cpu_core.get_pc()
-            current_ua = cpu_core.get_reg8(3)
-            if force_reset and force_power_on:
-                raise ValueError("force_reset and force_power_on cannot both be true")
+        current_pc = cpu_core.get_pc()
+        current_ua = cpu_core.get_reg8(3)
+        if force_reset and force_power_on:
+            raise ValueError("force_reset and force_power_on cannot both be true")
 
-            if force_reset:
-                cpu_core.set_pc(0x0000)
-                print(f"System forced to reset entry (PC=0x0000 UA={current_ua:#04x})")
-            elif force_power_on:
-                cpu_core.set_pc(0x0001)
-                print(f"System forced to power-on entry (PC=0x0001 UA={current_ua:#04x})")
-            elif current_pc == 0x0001:
-                 print(f"System power on at power-on entry (PC=0x0001 UA={current_ua:#04x})")
-            elif current_pc == 0x0000:
-                 print(f"System power on at reset entry (PC=0x0000 UA={current_ua:#04x})")
-            else:
-                print(f"System resumed at PC={current_pc:#06x} UA={current_ua:#04x}")
+        if force_reset:
+            cpu_core.set_pc(0x0000)
+            print(f"System forced to reset entry (PC=0x0000 UA={current_ua:#04x})")
+        elif force_power_on:
+            cpu_core.set_pc(0x0001)
+            print(f"System forced to power-on entry (PC=0x0001 UA={current_ua:#04x})")
+        elif current_pc == 0x0001:
+             print(f"System power on at power-on entry (PC=0x0001 UA={current_ua:#04x})")
+        elif current_pc == 0x0000:
+             print(f"System power on at reset entry (PC=0x0000 UA={current_ua:#04x})")
+        else:
+            print(f"System resumed at PC={current_pc:#06x} UA={current_ua:#04x}")
 
         self.lcd.lcd_ctrl(0xDF) # OP=1, CE=3 (Both chips)
         self.lcd.lcd_write(0x14)
@@ -1058,17 +1057,14 @@ class PB1000System(PB1000FddMixin, PB1000StateIOMixin):
     def set_debug(self, enabled):
         self.debug_cfg = self._normalize_debug_config(enabled)
         self.debug = self.debug_cfg["sys"]
-        if hasattr(cpu_core, "set_debug"):
-            cpu_core.set_debug(self.debug_cfg["sys"])
+        cpu_core.set_debug(self.debug_cfg["sys"])
 
     @property
     def is_sleeping(self):
         return cpu_core.is_sleeping()
 
     def is_key_input_enabled(self):
-        if hasattr(cpu_core, "get_reg8"):
-            return bool(cpu_core.get_reg8(5) & 0x40)
-        return True
+        return bool(cpu_core.get_reg8(5) & 0x40)
 
     def print_registers(self, printer=print):
         regs = [cpu_core.get_reg(i) for i in range(32)]
@@ -1076,17 +1072,15 @@ class PB1000System(PB1000FddMixin, PB1000StateIOMixin):
         for idx in range(0, 32, 4):
             chunk = " ".join(f"${idx + j:02d}={regs[idx + j]:02X}" for j in range(4))
             printer(f"  {chunk}")
-        if hasattr(cpu_core, "get_reg8"):
-            ia = cpu_core.get_reg8(4)
-            ib = cpu_core.get_reg8(2)
-            ua = cpu_core.get_reg8(3)
-            ie = cpu_core.get_reg8(5)
-            printer(f"IA: IA={ia:02X} IB={ib:02X} UA={ua:02X} IE={ie:02X}")
-        if hasattr(cpu_core, "get_sreg"):
-            sx = cpu_core.get_sreg(0)
-            sy = cpu_core.get_sreg(1)
-            sz = cpu_core.get_sreg(2)
-            printer(f"SIR: SX={sx:02X} SY={sy:02X} SZ={sz:02X}")
+        ia = cpu_core.get_reg8(4)
+        ib = cpu_core.get_reg8(2)
+        ua = cpu_core.get_reg8(3)
+        ie = cpu_core.get_reg8(5)
+        printer(f"IA: IA={ia:02X} IB={ib:02X} UA={ua:02X} IE={ie:02X}")
+        sx = cpu_core.get_sreg(0)
+        sy = cpu_core.get_sreg(1)
+        sz = cpu_core.get_sreg(2)
+        printer(f"SIR: SX={sx:02X} SY={sy:02X} SZ={sz:02X}")
         pair_names = ["IX", "IY", "IZ", "US", "SS", "KY"]
         pair_values = [cpu_core.get_reg16(i) for i in range(6)]
         pairs = " ".join(f"{pair_names[i]}={pair_values[i]:04X}" for i in range(len(pair_names)))

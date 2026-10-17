@@ -14,6 +14,7 @@ Dangerous operations:
 
 import time
 import gc
+import lcd_c as _lc
 
 from hdmi_menu_mirror import create as _create_hdmi_mirror, hdmi_flush
 from draw_text import draw_text as _draw_text
@@ -158,35 +159,22 @@ def _draw_menu(display, title, hint, items, cursor, scroll, msg=""):
         _draw_text(display, 4, H - _FTR_H + 3, msg_trunc, _WARN)
 
 
-# USB HID scancode → printable char (a-z, 0-9, hyphen only — for folder names)
-_SC_ALPHA = {
-    0x04:'a', 0x05:'b', 0x06:'c', 0x07:'d', 0x08:'e', 0x09:'f',
-    0x0A:'g', 0x0B:'h', 0x0C:'i', 0x0D:'j', 0x0E:'k', 0x0F:'l',
-    0x10:'m', 0x11:'n', 0x12:'o', 0x13:'p', 0x14:'q', 0x15:'r',
-    0x16:'s', 0x17:'t', 0x18:'u', 0x19:'v', 0x1A:'w', 0x1B:'x',
-    0x1C:'y', 0x1D:'z',
-    0x1E:'1', 0x1F:'2', 0x20:'3', 0x21:'4', 0x22:'5',
-    0x23:'6', 0x24:'7', 0x25:'8', 0x26:'9', 0x27:'0',
-    0x2D:'-',
-}
+# USB HID scancode → printable char (a-z, 0-9, hyphen only — for folder
+# names): hd61700.scancode_to_alpha() (src/modhd61700.c), a flash-resident
+# table lookup -- used to be a 34-entry dict here, holding both a live hash
+# table and the bytecode to build it on the GC heap for the whole session
+# once emulator_menu.py is preloaded, even though text input is only used
+# for occasional folder naming.
 
-def _rgb565_to_rgb332(c):
-    """Convert RGB565 to nearest RGB332 (color VRAM format)."""
-    r3 = (c >> 13) & 7
-    g3 = (c >> 8)  & 7
-    b2 = (c >> 3)  & 3
-    return (r3 << 5) | (g3 << 2) | b2
-
-
-def _rgb332_to_rgb565(c):
-    """Convert RGB332 (color VRAM format) to RGB565."""
-    r3 = (c >> 5) & 7
-    g3 = (c >> 2) & 7
-    b2 = c & 3
-    r5 = (r3 << 2) | (r3 >> 1)
-    g6 = (g3 << 3) | g3
-    b5 = (b2 << 3) | (b2 << 1) | (b2 >> 1)
-    return (r5 << 11) | (g6 << 5) | b5
+# The actual conversion lives in lcd_c (src/modlcd_controller.c) -- these
+# two names exist only so every other module keeps importing
+# `_rgb565_to_rgb332`/`_rgb332_to_rgb565` from here unchanged
+# (emulator_menu_display_actions.py does). 2026-10-16: no hasattr()
+# fallback (see 調査用/heap_reduction_hasattr_removal.md) -- requires
+# rebuilt firmware, same as every other lcd_c/cpu_core export in this
+# codebase now.
+_rgb565_to_rgb332 = _lc.rgb565_to_rgb332
+_rgb332_to_rgb565 = _lc.rgb332_to_rgb565
 
 
 # ── Text input sub-menu ────────────────────────────────────────────────────────
@@ -211,8 +199,9 @@ def _text_input(display, title, max_len=16):
         sc = hd61700.get_last_key()
         if sc != prev_sc:
             prev_sc = sc
-            if sc in _SC_ALPHA and len(text) < max_len:
-                text.append(_SC_ALPHA[sc])
+            ch = hd61700.scancode_to_alpha(sc)
+            if ch is not None and len(text) < max_len:
+                text.append(ch)
                 _redraw()
             elif sc == 0x2A and text:   # Backspace
                 text.pop()

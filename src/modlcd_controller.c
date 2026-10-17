@@ -322,6 +322,38 @@ static mp_obj_t mod_lcd_get_color_vram(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(mod_lcd_get_color_vram_obj, mod_lcd_get_color_vram);
 
+/* lcd_c.rgb565_to_rgb332(c) -> int, lcd_c.rgb332_to_rgb565(c) -> int.
+ * 2026-10-16 heap-reduction pass: this exact pair of pure, stateless
+ * conversions used to have THREE independent, identical-logic Python
+ * copies (mp/emulator_menu.py's _rgb565_to_rgb332()/_rgb332_to_rgb565(),
+ * mp/hdmi_menu_mirror.py's own _rgb565_to_rgb332(), and an inline closure
+ * in mp/main_boot.py) -- each paying its own bytecode cost on the same
+ * shared GC heap for no reason, since none of them touch any Python-side
+ * state. Consolidated here so there is exactly one implementation;
+ * callers fall back to a local copy via hasattr(lcd_c, ...) on older
+ * firmware that predates this export, same convention as every other
+ * optional lcd_c/hd61700 feature in this codebase. */
+static mp_obj_t mod_lcd_rgb565_to_rgb332(mp_obj_t c_obj) {
+  uint32_t c = (uint32_t)mp_obj_get_int(c_obj);
+  uint32_t r3 = (c >> 13) & 7;
+  uint32_t g3 = (c >> 8)  & 7;
+  uint32_t b2 = (c >> 3)  & 3;
+  return MP_OBJ_NEW_SMALL_INT((r3 << 5) | (g3 << 2) | b2);
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(mod_lcd_rgb565_to_rgb332_obj, mod_lcd_rgb565_to_rgb332);
+
+static mp_obj_t mod_lcd_rgb332_to_rgb565(mp_obj_t c_obj) {
+  uint32_t c = (uint32_t)mp_obj_get_int(c_obj);
+  uint32_t r3 = (c >> 5) & 7;
+  uint32_t g3 = (c >> 2) & 7;
+  uint32_t b2 = c & 3;
+  uint32_t r5 = (r3 << 2) | (r3 >> 1);
+  uint32_t g6 = (g3 << 3) | g3;
+  uint32_t b5 = (b2 << 3) | (b2 << 1) | (b2 >> 1);
+  return MP_OBJ_NEW_SMALL_INT((r5 << 11) | (g6 << 5) | b5);
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(mod_lcd_rgb332_to_rgb565_obj, mod_lcd_rgb332_to_rgb565);
+
 /* lcd_c.vdp_write(reg, data) — reg is 0-4 (offset - 0x0C20) */
 static mp_obj_t mod_lcd_vdp_write(mp_obj_t reg_obj, mp_obj_t data_obj) {
   uint32_t reg  = (uint32_t)mp_obj_get_int(reg_obj);
@@ -419,6 +451,8 @@ static const mp_rom_map_elem_t lcd_c_module_globals_table[] = {
     {MP_ROM_QSTR(MP_QSTR_setup_display),
      MP_ROM_PTR(&mod_lcd_setup_display_obj)},
     {MP_ROM_QSTR(MP_QSTR_get_color_vram), MP_ROM_PTR(&mod_lcd_get_color_vram_obj)},
+    {MP_ROM_QSTR(MP_QSTR_rgb565_to_rgb332), MP_ROM_PTR(&mod_lcd_rgb565_to_rgb332_obj)},
+    {MP_ROM_QSTR(MP_QSTR_rgb332_to_rgb565), MP_ROM_PTR(&mod_lcd_rgb332_to_rgb565_obj)},
     {MP_ROM_QSTR(MP_QSTR_set_vdp_enable), MP_ROM_PTR(&mod_lcd_set_vdp_enable_obj)},
     {MP_ROM_QSTR(MP_QSTR_get_vdp_enable), MP_ROM_PTR(&mod_lcd_get_vdp_enable_obj)},
     {MP_ROM_QSTR(MP_QSTR_vdp_sync_enable), MP_ROM_PTR(&mod_lcd_vdp_sync_enable_obj)},

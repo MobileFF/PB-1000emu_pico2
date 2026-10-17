@@ -139,7 +139,7 @@ Responsibilities:
 Responsibilities:
 
 - Permanent on-screen touch bar for LCKEY / MENU / CAL / CALC keys
-- Renders by blitting the `.fkbar.raw` sprite
+- Renders entirely from code via `fill_rect()`/`draw_text()` (no image file)
 - Hit-tests touch coordinates and fires the corresponding key
 
 Exported class:

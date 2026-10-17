@@ -55,6 +55,9 @@ Configuration priority (low → high): flash `/pb1000.ini` → `/sd/pb1000.ini` 
    - **F1**: opens the BIOS-style setup menu (see below).
    - **F12**: after a confirmation prompt, exits to the MicroPython REPL without booting (see
      below).
+   - Once a profile is confirmed, its name is saved as `default_profile` in `pb1000.ini`
+     automatically (since 2026-10-16). The next boot's timeout auto-select and default cursor
+     position always follow whichever profile was actually used last.
 3. The selected profile's saved state is loaded automatically, and the PB-1000 LCD bezel appears.
 4. If no state files are found, a cold boot (fresh start) is performed.
 
@@ -123,7 +126,7 @@ The emulator maps USB HID scancodes to the PB-1000 13×12 key matrix.
 - Letters and digits: direct mapping
 - Symbols: mapped to PB-1000 equivalents (e.g. PC `Shift+2` → PB-1000 `"`)
 - **LCKEY / MENU / CAL**: mapped to F5 / F6 / F7 respectively
-- Full mapping tables are in `mp/keymap.py` and `mp/keymap.json`
+- Full mapping tables are in `mp/keymap.py`; see `doc/keymap_guide_en.md` for how to customize
 
 ### Cursor Key Auto-Repeat
 

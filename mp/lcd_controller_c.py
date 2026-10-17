@@ -76,8 +76,7 @@ class LCDControllerC:
         lcd_c.init()
         self.HEIGHT = lcd_c.get_num_pages() * 8  # instance attr: reflects runtime mode
         lcd_c.set_debug(self.debug)
-        if hasattr(lcd_c, "set_bg_colors"):
-            lcd_c.set_bg_colors(self._color_bg_on, self._color_bg_off)
+        lcd_c.set_bg_colors(self._color_bg_on, self._color_bg_off)
 
         # Load charset into C-side buffer
         self._load_charset_data()
@@ -203,11 +202,9 @@ class LCDControllerC:
         if int(scale) == scale:
             self._pixel_size = int(scale)
 
-        if hasattr(lcd_c, "set_scale"):
-            lcd_c.set_scale(self._scale_num, self._scale_den)
-        else:
-            lcd_c.clear_dirty()
-        
+        lcd_c.set_scale(self._scale_num, self._scale_den)
+
+
         # Notify listener (e.g. system) to redraw bezel
         if hasattr(self, "on_scale_change") and self.on_scale_change:
             self.on_scale_change(scale)
@@ -216,59 +213,46 @@ class LCDControllerC:
         """Set LCD background colors (RGB565): ON-state and OFF-state."""
         self._color_bg_on = int(on_bg) & 0xFFFF
         self._color_bg_off = int(off_bg) & 0xFFFF
-        if hasattr(lcd_c, "set_bg_colors"):
-            lcd_c.set_bg_colors(self._color_bg_on, self._color_bg_off)
+        lcd_c.set_bg_colors(self._color_bg_on, self._color_bg_off)
 
     def set_colors(self, fg, bg):
         """Set ON-pixel color (fg) and OFF-pixel background (bg) (RGB565).
         Does not force a full-screen repaint."""
         self._color_fg = int(fg) & 0xFFFF
         self._color_bg_on = int(bg) & 0xFFFF
-        if hasattr(lcd_c, "set_colors"):
-            lcd_c.set_colors(self._color_fg, self._color_bg_on)
+        lcd_c.set_colors(self._color_fg, self._color_bg_on)
 
     def set_num_pages(self, pages):
         """Set active page count: 4 = 32-dot mode (default), 8 = 64-dot extended."""
-        if hasattr(lcd_c, "set_num_pages"):
-            lcd_c.set_num_pages(int(pages))
-            self.HEIGHT = int(pages) * 8
+        lcd_c.set_num_pages(int(pages))
+        self.HEIGHT = int(pages) * 8
 
     def set_vdp_enable(self, enabled):
         """Enable (True) or disable (False) per-pixel color VRAM rendering."""
-        if hasattr(lcd_c, "set_vdp_enable"):
-            lcd_c.set_vdp_enable(bool(enabled))
+        lcd_c.set_vdp_enable(bool(enabled))
 
     def vdp_sync_enable(self):
         """Sync vram→color_vram pages 0-3 using configured reset colours
         (color_on/color_off), then enable VDP rendering."""
-        if hasattr(lcd_c, "vdp_sync_enable"):
-            lcd_c.vdp_sync_enable()
+        lcd_c.vdp_sync_enable()
 
     def vdp_init_done(self):
         """True after the first non-0xFF byte arrives at VDP reg2 following a
         VDP disable (reset).  Legacy signal; prefer vdp_write_count() polling."""
-        if hasattr(lcd_c, "vdp_init_done"):
-            return bool(lcd_c.vdp_init_done())
-        return False
+        return bool(lcd_c.vdp_init_done())
 
     def vdp_any_write(self):
         """True if any VDP reg2 write has occurred since VDP was disabled (reset)."""
-        if hasattr(lcd_c, "vdp_any_write"):
-            return bool(lcd_c.vdp_any_write())
-        return False
+        return bool(lcd_c.vdp_any_write())
 
     def vdp_write_count(self):
         """Monotone counter of VDP reg2 writes since VDP disabled.
         Python polls this; 300 ms of no change → ROM finished VDP init."""
-        if hasattr(lcd_c, "vdp_write_count"):
-            return int(lcd_c.vdp_write_count())
-        return 0
+        return int(lcd_c.vdp_write_count())
 
     @property
     def vdp_enabled(self):
-        if hasattr(lcd_c, "get_vdp_enable"):
-            return bool(lcd_c.get_vdp_enable())
-        return True
+        return bool(lcd_c.get_vdp_enable())
 
     def set_char_output_callback(self, cb):
         """Register callback(code) for characters written to the LCD in DRAW_CHAR mode.

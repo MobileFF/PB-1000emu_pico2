@@ -59,19 +59,26 @@ UA bits 5-4   Bank   Buffer       Access    File
 
 - **Bank 0** (ROM1) is always present (`has_bank[0] = true`). Its buffer (`rom1_buf`) is a
   fixed-size static array.
-- **Banks 1–3** (expanded RAM): the buffer space (`bank1_buf`..`bank3_buf`) is allocated on
-  demand from the MicroPython GC heap via `m_malloc()` (`ensure_bank_buf()` in `modhd61700.c`),
-  only for banks the boot-time profile actually has a `ramN.bin` for. A bank without `ramN.bin`
-  keeps its pointer `NULL` and consumes no heap. `has_bank[1..3]` (the CPU-visible presence flag)
-  reflects the active profile's `ramN.bin` presence, mirrored to the C core via
-  `set_bank_present()`/`set_has_exp_ram()` — these always allocate (`ensure_bank_buf()`) before
-  setting `has_bank[N] = true`, so a failed allocation can never leave the two inconsistent. The
-  CPU's per-byte memory-access path (`c_mem_direct_read`/`c_mem_direct_write`) checks both
-  `has_bank[bank]` and the buffer pointer itself before dereferencing. A bank without `ramN.bin`
-  always reads back 0xFF (same value an unmapped region reads as) because `has_bank[N]` is false,
-  so there's no need to explicitly fill its (nonexistent) buffer. Profile selection happens once
-  at boot; there is no mid-session bank reconfiguration (the old RAM Load feature no longer
-  exists).
+- **Banks 1–3** (expanded RAM): the buffer space (`bank_buf_storage[3][0x8000]`) is, like
+  `rom0_buf`/`rom1_buf`/`ram_buf`, a **fixed-size static array allocated at build time** (outside
+  the GC heap). Before 2026-10-16 this was instead allocated on demand from the MicroPython GC
+  heap via `m_malloc()`, only for banks the boot-time profile actually had a `ramN.bin` for. That
+  was changed to a static array after a real-hardware finding: a profile using all 3 banks could
+  fail to allocate the third 32 KB block via `m_malloc()` even with well over 32 KB of heap free
+  in total, because external fragmentation (from live objects allocated earlier in boot — display/
+  SD/USB-host init, the profile picker UI) left no single contiguous 32 KB block (see 調査用/
+  bank_alloc_fragmentation.md for the investigation). The static array makes bank allocation
+  unable to fail by construction, at the cost that **every profile now permanently loses 96 KB of
+  GC heap, whether it uses any banks or not** (measured: RAM usage 154,540B → 252,844B, i.e.
+  +98,304B = exactly 96 KB). `has_bank[1..3]` (the CPU-visible presence flag) still just reflects
+  whether the active profile has a `ramN.bin` for that bank — it no longer has anything to do with
+  whether the buffer itself exists (it always does now). The CPU's per-byte memory-access path
+  (`c_mem_direct_read`/`c_mem_direct_write`) still checks both `has_bank[bank]` and the buffer
+  pointer's non-NULL-ness, but the pointer can no longer actually be NULL after the static-array
+  switch (kept as a defensive check). A bank without `ramN.bin` still always reads back 0xFF (same
+  value an unmapped region reads as) because `has_bank[N]` is false, so there's no need to
+  explicitly fill its buffer. Profile selection happens once at boot; there is no mid-session bank
+  reconfiguration (the old RAM Load feature no longer exists).
 - Bank selection formula: `bank = (REG_UA >> 4) & 0x03` (consistent in both C and Python).
 
 ---
@@ -167,13 +174,17 @@ IF PEEK(&H0C37) AND 1 THEN PRINT "DMA ERROR"
 | `ext_work_buf` | 256 B | 0x5F00–0x5FFF | Extension API work area (shared with Python `_ext_work`) |
 | `ram_buf` | 8 KB | 0x6000–0x7FFF | Standard RAM |
 | `rom1_buf` | 32 KB | 0x8000–0xFFFF (Bank 0) | System ROM (ROM1) |
-| `bank1_buf` | 32 KB (allocated on demand) | 0x8000–0xFFFF (Bank 1) | Expanded RAM1 |
-| `bank2_buf` | 32 KB (allocated on demand) | 0x8000–0xFFFF (Bank 2) | Expanded RAM2 |
-| `bank3_buf` | 32 KB (allocated on demand) | 0x8000–0xFFFF (Bank 3) | Expanded RAM3 |
+| `bank_buf_storage[0]` | 32 KB (always statically allocated) | 0x8000–0xFFFF (Bank 1) | Expanded RAM1 |
+| `bank_buf_storage[1]` | 32 KB (always statically allocated) | 0x8000–0xFFFF (Bank 2) | Expanded RAM2 |
+| `bank_buf_storage[2]` | 32 KB (always statically allocated) | 0x8000–0xFFFF (Bank 3) | Expanded RAM3 |
 
-`has_bank[4]` flags manage which banks are active.
+`has_bank[4]` flags manage which banks are active (i.e. whether the current profile has a
+matching `ramN.bin`); the buffers themselves (`bank_buf_storage`) are always allocated regardless
+of profile (static array, since 2026-10-16).
 `bank_ptr[4]` / `bank_is_ram[4]` are stored in the `hd61700_state_t` CPU state struct
-(`bank_ptr[N]` is `NULL` for any of banks 1–3 that haven't been allocated).
+(`bank_ptr[N]` is `NULL` for any of banks 1–3 the active profile doesn't have a `ramN.bin`
+for — gated on `has_bank[N]`, not on whether the underlying static storage exists, which it
+always does since 2026-10-16).
 
 ---
 

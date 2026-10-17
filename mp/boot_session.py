@@ -7,6 +7,7 @@ import time
 
 from hdmi_menu_mirror import hdmi_flush
 from draw_text import draw_text as _draw_text
+from config import load_ini
 
 PROFILE_ROOT = "/sd/rams"
 
@@ -33,6 +34,101 @@ def scan_profiles():
 def get_profile_dir(name):
     """Return absolute path for a profile name."""
     return PROFILE_ROOT + "/" + name
+
+
+def save_default_profile(name):
+    """Persists `name` as [profile] default_profile, so the *next* boot's
+    profile picker starts on whatever profile was actually used last time
+    instead of a fixed config value. Call once, right after
+    select_profile_ui() returns a non-None selection (main.py) -- covers
+    every way it can return (explicit Enter, F1 setup-menu round-trip,
+    or the auto-select timeout) since they all funnel through that one
+    call site.
+
+    Writes to whichever of /pb1000.ini (flash root) / /sd/pb1000.ini
+    already has a [profile] default_profile line, matching
+    config.py's load_config() priority order (.../sd/pb1000.ini
+    overrides flash-root) -- writing to the lower-priority file would
+    silently have no effect if the higher one already sets this key.
+    Falls back to the flash-root file (always present/writable,
+    regardless of SD card state) when neither does yet.
+
+    Deliberately NOT setup_menu.py's _apply_ini_changes() -- that module
+    is kept a lazy, popped-after-use import specifically because it's
+    large enough that compiling it costs noticeably (see this file's F1
+    handler below), and pulling it in unconditionally on every single
+    boot just to rewrite one line would defeat that. This is scoped to
+    exactly one section/key in exactly one file, and skips the write
+    entirely once the stored value already matches (no point wearing
+    flash to re-write the same line after every boot where the same
+    profile gets picked again)."""
+    target = "/sd/pb1000.ini" if "default_profile" in load_ini("/sd/pb1000.ini").get("profile", {}) else "/pb1000.ini"
+
+    # readlines()/writelines() aren't available on MicroPython's file
+    # objects (confirmed on real hardware: AttributeError) -- iterate/
+    # write line-by-line instead, same as setup_menu.py's own
+    # _apply_ini_changes() already does for the same reason.
+    lines = []
+    try:
+        with open(target, "r") as f:
+            for line in f:
+                lines.append(line)
+    except OSError:
+        pass
+
+    sec_start = -1
+    sec_end = len(lines)
+    key_line = -1
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if s.lower() == "[profile]":
+            sec_start = i
+        elif sec_start >= 0 and i > sec_start:
+            if s.startswith("[") and s.endswith("]"):
+                sec_end = i
+                break
+            if "=" in s and s.split("=", 1)[0].strip().lower() == "default_profile":
+                key_line = i
+
+    new_line = "default_profile = %s\n" % name
+    if key_line >= 0:
+        if lines[key_line] == new_line:
+            return  # already up to date -- avoid a no-op flash write
+        lines[key_line] = new_line
+    elif sec_start >= 0:
+        lines.insert(sec_end, new_line)
+    else:
+        if lines and lines[-1].strip():
+            lines.append("\n")
+        lines.append("[profile]\n")
+        lines.append(new_line)
+
+    # Write to a temp file and rename over the original, rather than
+    # open(target, "w") directly -- opening a file in "w" mode truncates
+    # it to empty immediately, before a single byte of the new content is
+    # written. 2026-10-16 real-hardware incident: an early version of this
+    # function hit an unrelated AttributeError (f.writelines() isn't on
+    # MicroPython's file objects) right after that truncation, which left
+    # /pb1000.ini permanently empty -- every other section ([display],
+    # [keyboard], etc.) was lost before the exception even propagated, not
+    # recoverable by later fixing that bug (the damage was already done by
+    # the time the fix shipped). os.rename() only replaces `target` once
+    # the complete new content is already safely on disk under `tmp_path`,
+    # so *any* failure while building/writing it (this specific bug or a
+    # future, different one) leaves the original file completely
+    # untouched instead of truncated.
+    tmp_path = target + ".tmp"
+    try:
+        with open(tmp_path, "w") as f:
+            for line in lines:
+                f.write(line)
+        os.rename(tmp_path, target)
+    except OSError as e:
+        print(f"[Boot] failed to save default_profile to {target}: {e}")
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
 
 
 def select_profile_ui(display, profiles, default, timeout_ms=30000, sd_mounted=False):

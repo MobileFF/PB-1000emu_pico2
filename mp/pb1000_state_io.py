@@ -109,10 +109,9 @@ class PB1000StateIOMixin:
                 # program does, e.g. the periodic keyboard-scan interrupt) has
                 # PC/UA pointing into ROM handler code that only makes sense
                 # with these restored too, or resume can crash via a stale/
-                # inconsistent fetch-bank state. Guarded with hasattr() so old
-                # firmware without these C exports still round-trips the rest.
-                "irq_status": int(cpu_core.get_irq_status()) if hasattr(cpu_core, "get_irq_status") else 0,
-                "cpu_flow_state": int(cpu_core.get_state()) if hasattr(cpu_core, "get_state") else 0,
+                # inconsistent fetch-bank state.
+                "irq_status": int(cpu_core.get_irq_status()),
+                "cpu_flow_state": int(cpu_core.get_state()),
             }
             with open(reg_path, "w") as f:
                 json.dump(regs, f)
@@ -155,22 +154,19 @@ class PB1000StateIOMixin:
         self._call_hook_refs[address] = fn  # Python-side GC anchor
         self._call_hook_owner[address] = owner or getattr(fn, "__name__", "?")
         self._call_hook_enabled[address] = True  # new entries are enabled by default
-        if hasattr(cpu_core, "set_call_hook"):
-            cpu_core.set_call_hook(address, fn)
+        cpu_core.set_call_hook(address, fn)
 
     def enable_call_hook(self, address):
         """Enable a previously registered hook. No-op if not registered."""
         if hasattr(self, "_call_hook_enabled") and address in self._call_hook_enabled:
             self._call_hook_enabled[address] = True
-        if hasattr(cpu_core, "set_call_hook_enabled"):
-            cpu_core.set_call_hook_enabled(address, True)
+        cpu_core.set_call_hook_enabled(address, True)
 
     def disable_call_hook(self, address):
         """Disable a registered hook without unregistering it."""
         if hasattr(self, "_call_hook_enabled") and address in self._call_hook_enabled:
             self._call_hook_enabled[address] = False
-        if hasattr(cpu_core, "set_call_hook_enabled"):
-            cpu_core.set_call_hook_enabled(address, False)
+        cpu_core.set_call_hook_enabled(address, False)
 
     def unregister_call_hook(self, address):
         """Unregister a previously registered CALL/JP/JR hook. No-op if not
@@ -179,8 +175,7 @@ class PB1000StateIOMixin:
         (keeps the registration, just suppresses firing) covers the
         "temporarily off" case and predates this, which is for "gone for
         good"."""
-        if hasattr(cpu_core, "clear_call_hook"):
-            cpu_core.clear_call_hook(address)
+        cpu_core.clear_call_hook(address)
         if hasattr(self, "_call_hook_refs"):
             self._call_hook_refs.pop(address, None)
             self._call_hook_owner.pop(address, None)
@@ -217,14 +212,12 @@ class PB1000StateIOMixin:
         self._mem_write_hook_range[addr_start] = addr_end
         self._mem_write_hook_owner[addr_start] = owner or getattr(fn, "__name__", "?")
         self._mem_write_hook_enabled[addr_start] = True  # new entries are enabled by default
-        if hasattr(cpu_core, "set_mem_write_hook"):
-            cpu_core.set_mem_write_hook(addr_start, addr_end, fn)
+        cpu_core.set_mem_write_hook(addr_start, addr_end, fn)
 
     def unregister_mem_write_hook(self, addr_start):
         """Unregister a previously registered memory-write hook. No-op if
         not registered. See unregister_call_hook()'s docstring."""
-        if hasattr(cpu_core, "clear_mem_write_hook"):
-            cpu_core.clear_mem_write_hook(addr_start)
+        cpu_core.clear_mem_write_hook(addr_start)
         if hasattr(self, "_mem_write_hook_refs"):
             self._mem_write_hook_refs.pop(addr_start, None)
             self._mem_write_hook_range.pop(addr_start, None)
@@ -292,7 +285,7 @@ class PB1000StateIOMixin:
             try:
                 gc.collect()
                 with open(file_path, "rb") as f:
-                    if slot == 0 and hasattr(cpu_core, "load_ram"):
+                    if slot == 0:
                         # メインRAM(8KB): C-API 経由で一括ロード
                         gc.collect()
                         try:
@@ -347,8 +340,7 @@ class PB1000StateIOMixin:
             rp = (self._get_storage_path(f"ram{slot}.bin") if path is None else f"{path}/ram{slot}.bin")
             present = self._file_exists(rp)
             self.has_bank[slot] = present
-            if hasattr(cpu_core, "set_bank_present"):
-                cpu_core.set_bank_present(slot, present)
+            cpu_core.set_bank_present(slot, present)
             if present:
                 _load_to_ram(rp, self._bank_ram[slot], slot)
             gc.collect()
@@ -365,8 +357,7 @@ class PB1000StateIOMixin:
                 with open(cv_path, "rb") as f:
                     n = f.readinto(cvram)
                 self.lcd.set_vdp_enable(True)
-                if hasattr(lcd_c, "set_vdp_init_done"):
-                    lcd_c.set_vdp_init_done(True)
+                lcd_c.set_vdp_init_done(True)
                 print(f"Color VRAM restored: {cv_path} ({n} bytes)")
             elif lcd_c is not None:
                 self.lcd.set_vdp_enable(False)
@@ -422,8 +413,8 @@ class PB1000StateIOMixin:
                         # leaving fetch_bank_ua()'s "force bank 0 while a handler is
                         # active" protection incorrectly disengaged for any interrupt
                         # nesting/RTNI bookkeeping that follows. get_irq_status()/
-                        # get_state() (added same day) close this gap; hasattr() guards
-                        # keep old saves (and old firmware without these C exports)
+                        # get_state() (added same day) close this gap; regs.get(...,
+                        # 0) keeps old saves (made before these keys existed)
                         # loading fine, just without this restored.
                         cpu_core.set_reg8(2, int(regs.get("ib", 0)))   # IB
                         cpu_core.set_reg8(5, int(regs.get("ie", 0)))   # IE
@@ -436,10 +427,8 @@ class PB1000StateIOMixin:
                             cpu_core.set_sreg(i, int(v))
                         for i, v in enumerate(regs.get("reg16", [])):
                             cpu_core.set_reg16(i, int(v))
-                        if hasattr(cpu_core, "set_irq_status"):
-                            cpu_core.set_irq_status(int(regs.get("irq_status", 0)))
-                        if hasattr(cpu_core, "set_state"):
-                            cpu_core.set_state(int(regs.get("cpu_flow_state", 0)))
+                        cpu_core.set_irq_status(int(regs.get("irq_status", 0)))
+                        cpu_core.set_state(int(regs.get("cpu_flow_state", 0)))
                         cpu_core.set_pc(int(regs.get("pc", 0)))
                         print("CPU state restored from RAM load (PC=0x%04X UA=0x%02X irq_status=0x%02X)" %
                               (int(regs.get("pc", 0)), int(regs.get("ua", 0)),
