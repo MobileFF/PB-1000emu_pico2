@@ -7,6 +7,110 @@ date heading instead of a version number or "Unreleased" marker.
 
 ---
 
+## 2026-10-19
+
+### Fixed
+
+- **Sped up Storage > Full Capture in the emulator menu** (`mp/
+  emulator_menu_capture.py`): used to take around a minute on real hardware. The
+  actual PB-1000 screen content only ever accounts for a small fraction of the
+  total output pixels (around 10% at the default settings); the rest (the
+  bezel's rings, the function key bar's background/borders) is either a flat
+  color or a simple pattern that only depends on column position, so those are
+  now drawn with bulk range assignments instead of a per-pixel Python loop. The
+  PNG's content is unchanged.
+- **Fixed Full Capture's function key bar showing no labels** (`mp/
+  emulator_menu_capture.py`): only the key fills and border ever showed up,
+  predating the speedup above. Fixed by actually running the function key
+  bar's own drawing logic (`funckey_bar.py`'s `FuncKeyBar.draw()`) against a
+  throwaway off-screen `framebuf.FrameBuffer` instead of the real display, so
+  the capture now shows the same key fills, labels, and border as the real
+  function key bar.
+
+### Documentation
+
+- `doc/usage_guide_en.md`'s "Full-Screen Capture (Full Capture)" section still
+  said "PPM image" -- fixed to `PNG`, and documented the two fixes above.
+
+---
+
+## 2026-10-18
+
+### Added
+
+- **RAM Autosave's boot-time cache-restore behavior is now configurable**
+  (`[emulator] ram_autosave_restore`, default `prompt`): choose `prompt` (ask on
+  screen, the previous behavior), `yes` (always restore automatically), or `no`
+  (never restore) (`mp/config.py`, `mp/main_entry.py`).
+- **Added the three `ram_autosave` keys to the F1 BIOS-style setup menu**
+  (`mp/setup_menu.py`'s `SCHEMA`: `ram_autosave`, `ram_autosave_log`,
+  `ram_autosave_restore`). Going forward, every new config item is added to this
+  menu as well (see `doc/dev_guide.md`'s "Configuration Merge" section).
+- **Added a diagnostic test script for NTP time sync** (`mp/test/
+  test_ntp_timesync.py`): checks WiFi connect, NTP server response, timezone
+  application, and Pico RTC set as separate stages. Also added
+  `ntp_sync.read_pb1000_clock()`, for checking PB-1000's own clock while running.
+- **The keymap editor (`tools/keymap_editor.py`) now opens, edits, and saves
+  `keymap.map` (the device's own format) directly**: previously it only worked
+  with a separate `keymap.json` editing format, requiring an explicit "Export
+  for Device" step to produce `keymap.map` -- with this change, `keymap.json`
+  is no longer needed at all for normal use. Anyone with only an existing
+  `keymap.json` can bring it in via the new "Import legacy keymap.json…"
+  command. The file auto-opened on startup now also prefers `mp/keymap.map`.
+
+### Fixed
+
+- **Fixed several real-hardware bugs in the variable-area snapshot
+  (`VarAreaAutosave`, watch 3)** (`mp/ram_autosave.py`):
+  - Corrected the CAL-mode trigger condition: real-hardware tracing showed CAL
+    mode reads as the `MODE` byte (`&H6F51`) being all-bits-clear, not bit 4
+    (CALC) as `references/sysvars.txt` documents.
+  - Fixed near-continuous flushing while idle at the CAL prompt, via a
+    checksum-based dirty check against the last content actually written.
+  - Fixed the variable-area cache (watch 3) restore being skipped entirely
+    whenever the file-area cache (watch 1/2) didn't exist -- the two now
+    restore independently.
+  - Fixed the restore only covering the variable area's raw content bytes,
+    never the 18-byte block of pointers (`&H692F`-`&H6940`) that describes
+    where the numeric/string variable tables and FOR/GOSUB stacks currently
+    extend within that content -- content was restored correctly, but with
+    those pointers left stale, the ROM still reported newly created variables
+    as undefined (0). (The cache file format changed accordingly; a magic
+    byte now rejects and discards an old-format cache instead of misreading
+    it.)
+- **Removed the boot-time clock** (`[overlay] show_clock`); the clock is now
+  shown only at runtime (`mp/boot_status.py`, `mp/clock_overlay.py`,
+  `mp/main_entry.py`): showing a time (from the Pico's RTC) before NTP sync has
+  even finished wasn't meaningful. This also incidentally fixes a stray gray-
+  pixel rendering artifact caused by the boot clock's and runtime clock's text
+  having different widths.
+- Removed the `vararea ready ...`-style diagnostic trace line that printed with
+  `[emulator] ram_autosave_log` enabled (other `ram_autosave` log lines are
+  unaffected).
+- **Fixed a bug in the documented `USE_PIO_USB=OFF` (native USB) build
+  procedure** (`CLAUDE.md`, `doc/build_guide.md`, `doc/build_guide_en.md`):
+  passing `CMAKE_ARGS="..."` on the `make` command line alongside `BOARD=`/
+  `USER_C_MODULES=` overrides GNU Make's own `CMAKE_ARGS += ...` accumulation
+  entirely (that's exactly how `BOARD=`/`USER_C_MODULES=` reach cmake at all),
+  silently falling back to the plain Raspberry Pi Pico's default board
+  (RP2040) and dropping PB-1000's own C code from the build -- with no build
+  error to flag it. This exact procedure was what the docs themselves
+  recommended; found while actually building a native-USB firmware. Fixed to
+  always run cmake's configure step as its own explicit command first.
+
+### Documentation
+
+- Added `ram_autosave`/`ram_autosave_log`/`ram_autosave_restore` to `doc/config_guide_en.md`'s
+  (the config reference) `[emulator]` section -- they had never been documented there, including
+  the pre-existing `ram_autosave`/`ram_autosave_log`.
+- `tools/launcher.py` and `doc/keymap_guide_en.md` still described the keymap
+  editor as JSON-based after the `keymap.map`-direct-editing change above --
+  updated. Also fixed `keymap_guide_en.md`'s `keymap.map` search-order listing,
+  which had it backwards (claimed the SD card was checked first; flash has
+  actually taken priority since 2026-10-17).
+
+---
+
 ## 2026-10-17
 
 ### Added

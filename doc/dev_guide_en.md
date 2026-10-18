@@ -268,6 +268,17 @@ Files are loaded in order: flash `/pb1000.ini` → `/sd/pb1000.ini` → `<profil
 3. `/roms/`
 4. `/` (root)
 
+### Rule: adding a new config item (2026-10-18-)
+
+Whenever a new key is added to `config.py`'s `_DEFAULTS`, also add a matching
+entry to `mp/setup_menu.py`'s `SCHEMA` list, so it's editable from the F1 boot
+menu's setup screen. Each `SCHEMA` row is a 6-tuple
+`(section, key, kind, extra, curated, flash_only)` (`kind`: `"bool"`/`"enum"`/
+`"int"`/`"str"`; `extra`: the enum's choice list, or an int's `(min, max)`,
+else `None`; `curated`: shown by default when `False` it only appears with
+`ALL=ON`; `flash_only`: hide this item when editing anything other than the
+flash-root `/pb1000.ini`).
+
 ---
 
 ## 6. Subroutine Hook (Call Hook) Feature
@@ -778,6 +789,15 @@ is the same shared region used for "SYSTEM RESET", PrtScn capture results, etc.,
 separate from the profile-name label `boot_status.py` draws in the top-left corner, so the
 two never collide.
 
+### Per-flush log output (`[emulator] ram_autosave_log`)
+
+Setting `[emulator] ram_autosave_log` in `pb1000.ini` to `true` (default `false`) prints one
+`[ram_autosave] flush #N slot=S NbytesB full=F Nms` line per flush. Off by default because
+an actively-written profile can flush several times a second (beyond the print cost itself,
+an f-string would allocate a small amount of heap on every format, which is why this uses
+plain `print(..., sep="")` instead). The same setting also gates the variable-area snapshot
+log below.
+
 ### Cache-write stats display (Win+PageUp)
 
 **Win+PageUp** shows the cumulative flush count, bytes written, and average time per
@@ -805,3 +825,103 @@ correct RAM with stale bytes from outside the tracked range (frozen since the ca
 full rewrite). Symptom: key input worked right after a restore, but the emulated OS then
 behaved erratically, and no later reset fixed it (the damage was in RAM content, which a
 reset never touches).
+
+What happens at boot when a cache is found is controlled by `[emulator]
+ram_autosave_restore` (`main_entry.py`, 2026-10-18-): the default `prompt` shows the
+on-screen confirmation (`confirm_restore_autosave()`, `boot_session.py` -- EXE=yes,
+BRK=no, auto-yes after 10s with no input, matching the real PB-1000's battery-backed RAM
+behaviour of picking up where you left off); `yes`/`no` skip that prompt and act as if that
+answer had been given every time.
+
+### Variable-area snapshot (`VarAreaAutosave`, 2026-10-17-)
+
+Watch 1/2 above only ever cover the **file area** (`HIMEM`..`DIREN`,
+`references/sysvars.txt`) -- the BASIC/CALC **variable area** below it (`IOBF`..`HIMEM`:
+the I/O buffer, the character-operation stack, the FOR/GOSUB stacks, and the numeric/
+string variable tables) is deliberately out of scope (`restore_from_cache()` only restores
+the boundary pointers plus the file area's own content range precisely so it never
+overlays this range with stale bytes -- see "Boot-time restore" above).
+
+The variable area is rewritten continuously during ordinary BASIC/CALC execution (every
+assignment, every FOR/GOSUB push/pop), so applying the same "native watch + debounced
+flush" approach watch 1/2 use would mean near-continuous flushing any time the user is
+actively calculating or running a program. Instead, a completely independent third
+mechanism (the `VarAreaAutosave` class) takes **one snapshot of the whole variable area**,
+only at the moment CAL mode becomes ready for input again.
+
+- **Trigger detection**: the rising edge of (`MODE` byte, `&H6F51`, reads as **all bits
+  clear** -- CAL mode) AND (`is_key_input_enabled()`, `REG_IE` bit 6, becomes true) is used
+  as a proxy for "CAL mode just became ready for input". Entering CAL mode, returning after
+  a program ends, and returning to the prompt after a calculation all land in this same ROM
+  state (`MODE==0` + KEY_INT enabled), so one edge check is meant to cover all three.
+  `references/sysvars.txt` documents bit 4 of `MODE` as "CALC", but 2026-10-18 real-hardware
+  tracing (a Python write-hook on `&H6F51`) showed this was wrong: MENU writes `0x40` (bit
+  6, MENU -- matches the doc), selecting `[basic]` from MENU writes `0x01` (bit 0, BASIC --
+  matches the doc), but **pressing CAL writes `0x00`** (all bits clear) -- CAL mode is the
+  all-clear state, not bit 4. The trigger condition above has been corrected to `MODE==0`
+  accordingly, and the "entering CAL mode" moment has been confirmed on real hardware --
+  typing `A=123`, power-cycling, and restoring now correctly brings `A` back (see "Bug found
+  and fixed 2026-10-18 (part 2)" below). Whether the other two moments (returning after a
+  program ends, returning to the prompt after a calculation) fire on the same condition (and
+  not also, harmlessly, once per keystroke while typing at the CAL prompt -- see the
+  `VarAreaAutosave` class docstring) is **still unverified on real hardware as of
+  2026-10-18**.
+- **Storage**: `vararea.bin` (same cache directory as `ram0.bin`/`ram1.bin`). A 1-byte
+  magic number (`_VARAREA_CACHE_MAGIC`, so an old-format cache is never misread -- see
+  "Bug found and fixed 2026-10-18 (part 2)" below), a 4-byte header (the `IOBF`/`HIMEM`
+  values at detection time, little-endian uint16 each), an 18-byte "pointers to main
+  memory areas" block (`IOBF`/`SSTOP`/`SBOT`/`FORSK`/`GOSSK`/`TONDT`/`DTTB`/`TOSDT`/
+  `PDSTD`, `&H692F`-`&H6940`), then that range's raw content. Restore uses the header's own
+  recorded `IOBF`/`HIMEM`, not the live system's current values -- same "the cache records
+  its own boundaries" design as watch 1/2's `restore_from_cache()`. A content range
+  spanning the `0x8000` boundary (a profile whose `HIMEM` reaches into expanded RAM) is
+  written/restored across both ram0 and bank1 (the pointer block itself is always a fixed
+  address below `0x8000`, so always ram0).
+- **Debounce**: a fixed 500ms (`_VARAREA_DEBOUNCE_MS`) -- not coalescing a *stream* of
+  writes the way watch 1/2's debounce does, just guarding against a double flush if the
+  edge detection fires twice in quick succession.
+- **Dirty check**: 2026-10-18 real-hardware tracing found `is_key_input_enabled()`
+  toggling on every single main-loop poll tick even while completely idle at the CAL
+  prompt, so the rising edge above fires continuously forever just from sitting idle (the
+  500ms debounce only coalesces edges *closer together* than 500ms -- it does nothing once
+  the gap between edges is itself >= 500ms, which is exactly this idle cadence). Fixed by
+  making `_flush()` a no-op whenever the content to write is byte-identical to what was
+  actually written last time (comparing a cheap checksum, not a full byte-for-byte copy).
+  The edge detection and the checksum pass still run, but the flash write itself is skipped
+  while idle. `discard()` also clears this comparison record -- otherwise a flush
+  immediately after a discard, with byte-identical content to what was just deleted, would
+  be wrongly skipped as a no-op, leaving no cache file at all when one was in fact due.
+- **Restore**: called from `RamAutosave.restore_from_cache()` as
+  `self.vararea.restore_from_cache()`, succeeding or failing independently of the file-area
+  restore (e.g. a session with no file I/O at all, only calculations, can have a watch-3
+  cache with no watch-1/2 cache). `has_pending_cache()`/`discard()` likewise treat all
+  three watches together (any one pending counts; discard clears all three).
+  **Bug found and fixed 2026-10-18**: `restore_from_cache()` originally `return False`'d
+  immediately whenever `ram0.bin`'s boundary-pointer bytes were unreadable (its ordinary
+  state in a session with no file I/O at all), which skipped the watch-3 restore entirely
+  even when `vararea.bin` existed and was valid. Found on real hardware: typing `A=123`,
+  power-cycling, and restoring brought `A` back as 0, logging
+  `[ram_autosave] restore failed: boundary-pointer bytes unreadable.` instead of any
+  vararea status. Fixed so the watch-3 restore is always attempted regardless of whether
+  watch 1/2 has anything to restore.
+  **Bug found and fixed 2026-10-18 (part 2)**: even after the above fix, a real-hardware
+  report still showed a variable coming back as 0 after a restore the log reported as
+  successful (`vararea=True`, correct lo/hi, correct byte count). Root cause:
+  `VarAreaAutosave` only ever snapshotted/restored the `IOBF`..`HIMEM` **content** bytes,
+  never the 18-byte "pointers to main memory areas" block (`references/sysvars.txt`:
+  `IOBF` itself, `SSTOP`/`SBOT`, `FORSK`/`GOSSK`, `TONDT`/`DTTB`, `TOSDT`/`PDSTD`,
+  `&H692F`-`&H6940`) that records how far the numeric/string variable tables and the
+  FOR/GOSUB stacks currently extend *within* that content. Those pointers live below the
+  content range they describe, so restoring content without them left the ROM using
+  whatever stale values `load_state()` had loaded from the profile's last explicit save
+  (predating the variable's creation) -- the bytes were genuinely restored, but the ROM
+  still thought the table ended before them and reported the variable as undefined
+  (BASIC's default value for an undefined numeric variable: 0). Fixed by snapshotting and
+  restoring this pointer block together with the content (cache file format changed
+  accordingly; a magic-number check rejects and discards an old-format cache rather than
+  misreading it).
+- **Log**: with `[emulator] ram_autosave_log` enabled, prints `[ram_autosave] vararea
+  flush lo=0x.... hi=0x.... NB` (a different format from watch 1/2's `flush #N
+  slot=...`). To check on real hardware whether this fires at the intended moments,
+  enable this and watch for the line while entering/leaving CAL mode, running a
+  calculation, and ending a program -- and whether it fires too often or not at all.

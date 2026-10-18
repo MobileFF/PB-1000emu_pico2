@@ -307,12 +307,21 @@ To capture the **entire physical screen**, including the bezel and function key 
 ### Full-Screen Capture (Full Capture)
 
 **Full Capture** in the emulator menu saves the entire physical display (e.g. 320×240 or
-480×320) — bezel, PB-1000 screen, and function key bar included — as a single PPM image.
+480×320) — bezel, PB-1000 screen, and function key bar included — as a single PNG image.
 
-- Location: `/sd/screenshots/full_<timestamp>.ppm` (same directory as VRAM Save)
+- Location: `/sd/screenshots/full_<timestamp>.png` (same directory as VRAM Save)
 - This does not read the screen back over SPI; it recomposes the full image in software
   from the emulator's own VRAM, bezel layout, and function key bar image. As a result, any
   transient status message shown briefly after a keypress is not captured.
+- Sped up on 2026-10-18 without changing the output (`mp/emulator_menu_capture.py`): the
+  actual PB-1000 screen content only ever accounts for a small fraction of the total output
+  pixels (around 10% at the default settings); the rest (the bezel's rings, the function key
+  bar's background/borders) is either a flat color or a simple pattern that only depends on
+  column position, so those are now drawn with bulk range assignments instead of a
+  per-pixel Python loop.
+- The function key bar portion was consistently missing its key labels (only the fills
+  and border showed up), including through the speedup above. Fixed on 2026-10-19 --
+  the bar now shows the same labels as the real function key bar.
 
 ---
 
@@ -382,13 +391,14 @@ While the emulator is running, the current time can be shown continuously in the
 corner of the screen. Enable it with `[overlay] show_clock = true` in `pb1000.ini` (off by
 default). See [config_guide_en.md](config_guide_en.md) §15 for details.
 
-This shares its config key (`show_clock`) with §2's boot-time status overlay clock, but is a
-separate implementation: that one only shows before boot finishes, reading the Pico's built-in
-RTC. This one, shown while the emulator is running, reads **`TIME$`/`DATE$` directly from
-PB-1000's own system variable RAM**, so it always matches what `PRINT TIME$` would show from
-BASIC — including when NTP isn't used, or the program has changed `TIME$` directly. It redraws
-once per second, in the margin above the bezel (never overlapping the game screen or
-FuncKeyBar). Not shown when `[hdmi] enable = true`, per §11's exclusivity policy.
+This clock reads **`TIME$`/`DATE$` directly from PB-1000's own system variable RAM**, so it
+always matches what `PRINT TIME$` would show from BASIC — including when NTP isn't used, or the
+program has changed `TIME$` directly. It redraws once per second, in the margin above the bezel
+(never overlapping the game screen or FuncKeyBar). Not shown when `[hdmi] enable = true`, per
+§11's exclusivity policy. It is only ever shown once the emulator has fully finished starting up
+(including NTP sync, if `[ntp] enable=true`) — there used to also be a separate boot-time clock
+(reading the Pico's own RTC, since the CPU isn't stepping yet during boot), but it was removed on
+2026-10-18 since showing a clock before NTP sync had even run was close to meaningless.
 
 ---
 

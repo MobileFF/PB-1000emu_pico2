@@ -123,15 +123,33 @@ make BOARD=RPI_PICO2_W USER_C_MODULES="$USER_C_MODULES" WERROR=0 -j$(nproc)
 
 **従来方式（ネイティブ USB ホスト専用、USB-C ポートはキーボード専用）でビルドする場合**:
 
-```bash
-# 新規の build-<BOARD>/ を作る場合 (CMAKE_ARGS で渡せる)
-make BOARD=RPI_PICO2_W USER_C_MODULES="$USER_C_MODULES" CMAKE_ARGS="-DUSE_PIO_USB=OFF" WERROR=0 -j$(nproc)
+**`CMAKE_ARGS="..."` を `make` のコマンドラインで直接指定しないこと。** GNU Make の
+仕様上、コマンドラインでの変数代入は、Makefile内部の`CMAKE_ARGS += ...`（`BOARD=`/
+`USER_C_MODULES=`の値がcmakeへ渡る仕組みはすべてこれに依存している）を丸ごと
+上書きしてしまい、`MICROPY_BOARD`/`USER_C_MODULES`が一切cmakeに渡らなくなる
+（2026-10-18に実際に発生: ボード判定が無印Raspberry Pi Pico(RP2040)のデフォルトに
+フォールバックし、`USER_C_MODULES`も空扱いになって、PB-1000本体のCコードを
+一切含まない素のMicroPythonがビルドされてしまった — ビルド自体はエラー無く
+成功するため、生成された`.uf2`のサイズやメモリマップ表示（`FLASH:`/`RAM:`の
+リージョンサイズがRP2350と全く異なる値になる）を見るまで気付きにくい）。
 
-# 既存の build-<BOARD>/ がある場合は、CMAKE_ARGS は無視される（cmake の再設定は
-# build-<BOARD>/Makefile が無いときだけ走る）ので、先に cmake で明示的に再設定する
-cmake -S . -B build-RPI_PICO2_W -DUSE_PIO_USB=OFF
+新規・既存どちらの`build-<BOARD>/`でも、必ず以下のように**cmakeの明示的な設定を
+別コマンドとして先に実行し、そのあとの`make`では`CMAKE_ARGS`を一切使わない**こと:
+
+```bash
+cmake -S . -B build-RPI_PICO2_W \
+  -DMICROPY_BOARD=RPI_PICO2_W \
+  -DMICROPY_BOARD_DIR="$(pwd)/boards/RPI_PICO2_W" \
+  -DUSER_C_MODULES="$USER_C_MODULES" \
+  -DUSE_PIO_USB=OFF
 make BOARD=RPI_PICO2_W USER_C_MODULES="$USER_C_MODULES" WERROR=0 -j$(nproc)
+# 無印 Pico 2 向けは RPI_PICO2_W → RPI_PICO2 に差し替えるだけ
 ```
+
+cmake実行後のログに`Found User C Module(s): hd61700_lib, ...`（空でないこと）が
+出ていることと、`Pico W Wi-Fi build support available.`（Pico 2 Wの場合のみ出る
+べき行）の有無がボードと一致していることを確認すると、上記の不具合が起きていない
+ことの簡単な確認になります。
 
 `CFLAGS` は上記のように必ず1行にすること。複数行（埋め込み改行入り）で `export` すると、
 `build-<BOARD>/` が存在しない完全新規のビルド（cmake の初回コンパイラチェック）で

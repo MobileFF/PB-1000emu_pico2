@@ -2,11 +2,13 @@
 
 This guide lists the emulator's default **USB keyboard → real PB-1000 key** assignments
 (the default keymap). The implementation lives in `mp/keymap.py` (built-in fallback
-defaults). To create or edit a custom keymap, use `tools/keymap_editor.py` (a GUI tool
-that loads/saves the human-friendly JSON form) and its "Export for Device" command to
-produce `keymap.map` — the compact, line-based format the device actually parses
-(switched away from reading JSON directly on 2026-10-17, to avoid the generic parse-tree
-cost that format has on the device's own heap).
+defaults). To create or edit a custom keymap, use `tools/keymap_editor.py` (a GUI tool)
+to open and save `keymap.map` **directly** — the compact, line-based format the device
+actually parses (2026-10-18-; the device never reads JSON, to avoid the generic parse-
+tree cost that format has on its own heap, but until then this editor itself only worked
+with a separate JSON form that had to be explicitly "exported" to `keymap.map`). Anyone
+with only an existing `keymap.json` can bring it in via that editor's "Import legacy
+keymap.json…" command.
 
 For emulator-wide operations (Save State, screenshots, the emulator menu, and other
 system-function keys that have no equivalent on the real PB-1000), see `usage_guide_en.md`
@@ -37,15 +39,16 @@ Meaning of the `mod` bits (from the `get_label()` docstring):
 ### Customizing the keymap
 
 At boot, the emulator searches for a `keymap.map` file in the following order and uses
-it if found (otherwise it falls back to the built-in defaults in `mp/keymap.py`):
+it if found (otherwise it falls back to the built-in defaults in `mp/keymap.py`).
+Internal flash is checked before the SD card (2026-10-17, changed to match the
+`rom0.bin`/`rom1.bin` fallback direction):
 
 ```
-/sd/roms/keymap.map > /sd/keymap.map > /roms/keymap.map > /keymap.map
+/roms/keymap.map > /keymap.map > /sd/roms/keymap.map > /sd/keymap.map
 ```
 
-Generate `keymap.map` from `tools/keymap_editor.py`'s "Export for Device" command after
-editing your JSON keymap there (the file's own leading comments document the format if
-you'd rather write one by hand).
+Edit `keymap.map` directly in `tools/keymap_editor.py` (the file's own leading comments
+document the format too, if you'd rather write one by hand).
 
 ---
 
@@ -216,6 +219,6 @@ touch keys TK13–TK16 effectively refer to the same PB-1000 key.
 ## References
 
 - Implementation: `mp/keymap.py` (built-in defaults, overridden by `keymap.map`'s content when a custom keymap is present)
-- Editing a custom keymap: `tools/keymap_editor.py` (edit/save as JSON, then "Export for Device" to produce `keymap.map`)
+- Editing a custom keymap: `tools/keymap_editor.py` (opens/saves `keymap.map` directly; "Import legacy keymap.json…" brings in an existing JSON file)
 - System-function keys (Save State, screenshots, emulator menu, etc.): `usage_guide_en.md` §3
 - Keymap verification script: `mp/test/verify_keymap_against_pb1000es.py` (cross-checks against the `KeyTab` of the original `pb1000es` emulator)

@@ -342,7 +342,8 @@ def main():
     # Step 5: Merged config (global + profile-specific override)
     cfg = load_config(profile_dir)
 
-    # Boot status overlay (profile name / clock / mirrored last log line) --
+    # Boot status overlay (profile name / mirrored last log line -- no
+    # clock any more, see boot_status.py's docstring, 2026-10-18) --
     # only when the physical LCD is actually the active display (HDMI, if
     # enabled, took over the picker screen instead -- see the `_early_lcd`
     # branch above and boot_status.py's BootStatusOverlay docstring for why
@@ -356,7 +357,6 @@ def main():
             boot_status = BootStatusOverlay(
                 display, selected,
                 show_profile=get_bool(cfg, "overlay", "show_profile_name"),
-                show_clock=get_bool(cfg, "overlay", "show_clock"),
                 show_log=get_bool(cfg, "overlay", "show_log"),
             )
             boot_status.start()
@@ -785,8 +785,21 @@ def main():
             ram_autosave = RamAutosave(system)
             system._ram_autosave = ram_autosave  # reachable from emulator_menu_ram.py
             if ram_autosave.has_pending_cache():
-                from boot_session import confirm_restore_autosave
-                if confirm_restore_autosave(display):
+                # [emulator] ram_autosave_restore: prompt (default) asks via
+                # confirm_restore_autosave()'s on-screen Yes/No; yes/no skip
+                # the prompt and act as if that answer had been given every
+                # time (see config.py's default table for the full comment).
+                _restore_mode = get_str(cfg, "emulator", "ram_autosave_restore").lower()
+                if _restore_mode not in ("yes", "no", "prompt"):
+                    _restore_mode = "prompt"
+                if _restore_mode == "yes":
+                    _do_restore = True
+                elif _restore_mode == "no":
+                    _do_restore = False
+                else:
+                    from boot_session import confirm_restore_autosave
+                    _do_restore = confirm_restore_autosave(display)
+                if _do_restore:
                     if ram_autosave.restore_from_cache():
                         # 2026-10-17: commit the restore into the profile's
                         # own ram0.bin/ram1.bin by default (previously
@@ -813,26 +826,44 @@ def main():
                 # it returns (see the `_picker_used_hdmi` fill_rect right
                 # after select_profile_ui() above), so nothing of the
                 # prompt can still be showing underneath.
-                if not getattr(system, "_hdmi_enabled", False):
-                    display.fill_rect(0, 0, display.width, display.height, 0x0000)
-                system.force_full_redraw()
-                if fkbar is not None:
-                    fkbar.draw()
-                # The raw clear above also wipes boot_status.py's profile-
-                # name/clock row (top-left corner) -- force_full_redraw()/
-                # fkbar.draw() don't touch that area, and boot_status
-                # itself was already stop()ped earlier (right before
-                # system.force_full_redraw() at Step 9, above) so nothing
-                # else was going to repaint it. redraw_header() honors
-                # show_profile_name/show_clock from pb1000.ini, same as
-                # the original boot-time paint.
-                if boot_status is not None:
-                    boot_status.redraw_header()
+                # Only needed when the prompt was actually shown (yes/no
+                # skip it entirely, so the screen was never touched here).
+                if _restore_mode == "prompt":
+                    if not getattr(system, "_hdmi_enabled", False):
+                        display.fill_rect(0, 0, display.width, display.height, 0x0000)
+                    system.force_full_redraw()
+                    if fkbar is not None:
+                        fkbar.draw()
+                    # The raw clear above also wipes boot_status.py's profile-
+                    # name row (top-left corner) -- force_full_redraw()/
+                    # fkbar.draw() don't touch that area, and boot_status
+                    # itself was already stop()ped earlier (right before
+                    # system.force_full_redraw() at Step 9, above) so nothing
+                    # else was going to repaint it. redraw_header() honors
+                    # show_profile_name from pb1000.ini, same as the
+                    # original boot-time paint.
+                    if boot_status is not None:
+                        boot_status.redraw_header()
         except Exception as _e:
             print(f"ram_autosave unavailable: {_e}")
             sys.print_exception(_e)
             ram_autosave = None
         gc.collect()
+
+    # TEMPORARY investigation diagnostic (2026-10-18, see mp/ram_autosave.py's
+    # VarAreaAutosave docstring): a real-hardware PEEK(&H6F51) in CAL mode
+    # came back 0 (CALC bit not set), contradicting references/sysvars.txt's
+    # MODE layout, so VarAreaAutosave's trigger never fires. This write-hook
+    # logs every write to MODE/&H6F52/&H6F53 (&H6F51-53) so the actual ROM
+    # behavior around CAL mode entry/exit can be observed directly, independent
+    # of whether [emulator] ram_autosave is even enabled. Not gated by
+    # ram_autosave_log on purpose -- this needs to work even with autosave off.
+    # Remove once the trigger condition is confirmed/fixed.
+    def _investigate_mode_area_write(addr, data, bank):
+        print("[investigate] MODE-area write addr=0x%04X data=0x%02X bank=%d"
+              % (addr, data, bank))
+    system.register_mem_write_hook(
+        0x6F51, _investigate_mode_area_write, 0x6F53, owner="investigate_mode_area")
 
     try:
         while True:
@@ -939,6 +970,14 @@ def main():
                                            _AUTOSAVE_STATS_TOAST_MS)
                     else:
                         print("[ram_autosave] disabled in pb1000.ini -- no stats")
+            elif sc == 0x3A:  # F1 → TEMPORARY investigation: dump &H6F51-53
+                if time.ticks_diff(gui_active_until, now) > 0:
+                    gui_active_until = 0
+                    _m1 = hd61700.read_mem(0x6F51)
+                    _m2 = hd61700.read_mem(0x6F52)
+                    _m3 = hd61700.read_mem(0x6F53)
+                    print("[investigate] &H6F51=0x%02X &H6F52=0x%02X "
+                          "&H6F53=0x%02X" % (_m1, _m2, _m3))
             elif sc == 0x53:  # NumLock → RESET
                 system.reset_emulator()
                 # reset_emulator() only resets CPU registers/PC -- a real

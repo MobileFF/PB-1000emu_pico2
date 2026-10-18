@@ -92,15 +92,34 @@ default (`src/micropython.cmake`'s `option(USE_PIO_USB ... ON)`). See "8. USB Ke
 
 **To build the previous configuration (native USB host only, USB-C port is keyboard-only)**:
 
-```bash
-# For a fresh build-<BOARD>/ directory, pass it via CMAKE_ARGS
-make BOARD=RPI_PICO2_W USER_C_MODULES="$USER_C_MODULES" CMAKE_ARGS="-DUSE_PIO_USB=OFF" WERROR=0 -j$(nproc)
+**Never pass `CMAKE_ARGS="..."` directly on the `make` command line.** Under GNU Make's
+variable-override rules, a command-line assignment to a variable overrides every assignment to
+that same variable inside the Makefile for the rest of the run -- including the Makefile's own
+`CMAKE_ARGS += ...` lines, which are exactly how `BOARD=`/`USER_C_MODULES=` reach cmake at all.
+Passing `CMAKE_ARGS=` on the command line alongside them silently drops `MICROPY_BOARD` and
+`USER_C_MODULES` entirely (confirmed 2026-10-18: board selection fell back to the plain
+Raspberry Pi Pico's default, RP2040, and `USER_C_MODULES` was treated as empty, producing a
+stock MicroPython build with none of PB-1000's own C code in it at all -- the build itself
+succeeds with no error, so this is easy to miss until you check the output `.uf2`'s size or the
+memory-map printout, where the `FLASH:`/`RAM:` region sizes come out completely different from
+an RP2350 build).
 
-# If build-<BOARD>/ already exists, CMAKE_ARGS is ignored (the configure step only
-# re-runs when build-<BOARD>/Makefile is missing) -- reconfigure explicitly first
-cmake -S . -B build-RPI_PICO2_W -DUSE_PIO_USB=OFF
+For both a fresh and an already-existing `build-<BOARD>/`, always run cmake's configure step as
+its own explicit command first, and never use `CMAKE_ARGS` on the `make` invocation that follows:
+
+```bash
+cmake -S . -B build-RPI_PICO2_W \
+  -DMICROPY_BOARD=RPI_PICO2_W \
+  -DMICROPY_BOARD_DIR="$(pwd)/boards/RPI_PICO2_W" \
+  -DUSER_C_MODULES="$USER_C_MODULES" \
+  -DUSE_PIO_USB=OFF
 make BOARD=RPI_PICO2_W USER_C_MODULES="$USER_C_MODULES" WERROR=0 -j$(nproc)
+# For the plain Pico 2, swap RPI_PICO2_W for RPI_PICO2 throughout
 ```
+
+A quick sanity check that the bug above didn't recur: the cmake configure log should show a
+non-empty `Found User C Module(s): hd61700_lib, ...` line, and a `Pico W Wi-Fi build support
+available.` line should appear if and only if you're building for the Pico 2 W.
 
 Keep `CFLAGS` on a single line as shown above. A multi-line value (with embedded newlines) breaks
 cmake's initial compiler-check Makefile generation on a completely fresh build (no existing

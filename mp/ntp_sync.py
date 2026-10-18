@@ -144,6 +144,30 @@ def sync_ntp(*, ssid, password, ntp_server="pool.ntp.org",
     return (year, month, day, hour, minute, second)
 
 
+def _from_bcd(b):
+    return (b >> 4) * 10 + (b & 0x0F)
+
+
+def read_pb1000_clock():
+    """Read DATE$/TIME$/REG_TM back out exactly as set_pb1000_time() wrote
+    them -- (yy, month, day, hour, minute, second), yy as the 2-digit raw
+    binary value (NOT BCD-decoded -- see set_pb1000_time()'s own note).
+    Useful from the REPL while main.py is already running, to verify a
+    write landed correctly or to watch for drift over time (call this a few
+    times a minute apart and compare against wall-clock -- see
+    mp/test/test_ntp_timesync.py, which isolates the WiFi/NTP/timezone/Pico-
+    RTC stages instead, since those don't need a running PB-1000 session at
+    all)."""
+    import hd61700
+    yy = hd61700.read_mem(_ADDR_DATE)                      # raw binary
+    mm = _from_bcd(hd61700.read_mem(_ADDR_DATE + 1))
+    dd = _from_bcd(hd61700.read_mem(_ADDR_DATE + 2))
+    minute = _from_bcd(hd61700.read_mem(_ADDR_TIME))
+    hour = _from_bcd(hd61700.read_mem(_ADDR_TIME + 1))
+    second = hd61700.get_reg8(6) & 0x3F
+    return (yy, mm, dd, hour, minute, second)
+
+
 def set_pb1000_time(year, month, day, hour, minute, second):
     """
     Write date/time into PB-1000 system variable RAM in BCD format.

@@ -1,9 +1,8 @@
 """
 Live TIME$/DATE$ clock overlay, shown in the top-right corner of the
-physical LCD while the emulator is actually running -- distinct from
-boot_status.py's clock, which only exists during boot and stops before
-this point (the CPU isn't even stepping yet during that window, so
-TIME$/DATE$ aren't advancing).
+physical LCD while the emulator is actually running. This is now the ONLY
+clock this codebase ever draws (2026-10-18 -- see below); there is no
+separate boot-time clock any more.
 
 Reads the values directly from PB-1000 system variable RAM -- the same
 addresses ntp_sync.py's set_pb1000_time() writes (DATE$ at 0x6BAD, TIME$
@@ -20,14 +19,25 @@ the EMULATOR MENU (which paints over the whole screen while open) -- the
 next poll() after the menu closes repaints it, since redraws are
 unconditional on a timer rather than gated on the text actually changing.
 
-Toggled via `[overlay] show_clock` in pb1000.ini (default off -- unlike
-boot_status.py's transient splash, this stays on screen for the entire
-session, so it's opt-in rather than on-by-default; it may not fit cleanly
-above the bezel in every scale/y_offset combination). The same key also
-governs BootStatusOverlay's boot-time clock (a separate implementation --
-see that class's docstring for why boot-time and runtime need different
-clock sources -- unified into one on/off toggle in main.py, which reads
-`[overlay] show_clock` for both).
+Toggled via `[overlay] show_clock` in pb1000.ini (default off -- this stays
+on screen for the entire session, so it's opt-in rather than on-by-default;
+it may not fit cleanly above the bezel in every scale/y_offset
+combination). This class is only constructed/polled once main_entry.py's
+whole boot sequence (including `[ntp] enable=true`'s sync, if enabled) has
+finished -- see main_entry.py's call sites -- so the very first time a
+clock is ever visible on screen, it's already past NTP sync, by
+construction.
+
+2026-10-18: boot_status.py's BootStatusOverlay used to ALSO draw a clock,
+during boot, reading the Pico's own RTC (the CPU isn't stepping yet during
+boot, so there's no PB-1000 TIME$/DATE$ to read). It was removed after
+real-hardware feedback that showing a clock before NTP sync has even run is
+close to meaningless -- for however long WiFi connect + the NTP request
+takes, the displayed time was simply whatever the Pico's RTC already held
+(stale or outright wrong), with no indication it hadn't been corrected yet.
+`[overlay] show_clock` now means "clock visible once the emulator has
+finished starting" end to end, which this class already satisfied on its
+own -- see boot_status.py's docstring for the removal.
 
 Drawing goes through draw_text.py's shared draw_text(), which never
 allocates more than one fixed 128-byte buffer per call regardless of
@@ -39,7 +49,7 @@ import time
 from draw_text import draw_text as _draw_text
 
 _BG = 0x0000
-_FG = 0x07E0  # matches boot_status.py's clock color
+_FG = 0x07E0
 
 _REDRAW_INTERVAL_MS = 1000
 
@@ -82,7 +92,16 @@ class ClockOverlay:
     def _draw(self, text):
         try:
             W = self._display.width
-            x = max(0, W - len(text) * 8 - 4)
+            # text is always "YY/MM/DD HH:MM:SS" (17 chars, every field
+            # %02d), so a clear sized to this call's own text is always the
+            # same width every redraw -- no other renderer shares this
+            # corner any more (boot_status.py no longer draws a clock at
+            # all, see its own docstring), so there's no stray-pixel risk
+            # from a differently-sized previous draw to guard against here.
+            clear_w = len(text) * 8
+            x_clear = max(0, W - clear_w - 4)
+            self._display.fill_rect(x_clear, 4, clear_w, 10, _BG)
+            x = x_clear
             _draw_text(self._display, x, 4, text, _FG, _BG)
         except Exception:
             pass

@@ -84,6 +84,9 @@ SCHEMA = [
     ("emulator", "timer_tick_ms",          "int",  (0, 60000), False, False),
     ("emulator", "loop_idle_ms",           "int",  (0, 1000),  False, False),
     ("emulator", "step_chunk",             "int",  (64, 65535), False, False),
+    ("emulator", "ram_autosave",           "bool", None,                     True,  False),
+    ("emulator", "ram_autosave_log",       "bool", None,                     False, False),
+    ("emulator", "ram_autosave_restore",   "enum", ["prompt", "yes", "no"],  True,  False),
 
     # disk
     ("disk", "enabled",  "bool", None,               True,  False),

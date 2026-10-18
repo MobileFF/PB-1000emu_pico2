@@ -3,10 +3,11 @@
 このガイドでは、エミュレータが標準で用意している **USB キーボード → PB-1000 実機キー** の
 割り当て（デフォルトキーマップ）を一覧化します。実装は `mp/keymap.py`（フォールバック用の
 組み込みデフォルト）にあります。カスタムキーマップを作成・編集する場合は
-`tools/keymap_editor.py`（人間が編集しやすい JSON 形式で保存・読み込みする GUI ツール）を
-使い、「Export for Device」コマンドでデバイスへ配備する `keymap.map`（実機側が読み込む
-軽量なテキスト形式。JSONの汎用パース木を実機のヒープ上に構築するコストを避けるため、
-2026-10-17 に JSON 直読みから切り替えた）を書き出してください。
+`tools/keymap_editor.py`（GUIツール）で、実機が読み込む軽量なテキスト形式
+`keymap.map`を**直接開いて編集・保存**してください（2026-10-18〜。実機側がJSONの
+汎用パース木を構築するコストを避けるため実機は`keymap.map`しか読まないが、以前は
+編集もJSON経由でしか行えなかった — 既存の`keymap.json`しか持っていない場合は
+同ツールの「Import legacy keymap.json…」で一度取り込める）。
 
 エミュレータ全体の操作（Save State・スクリーンショット・エミュレータメニューなど、
 PB-1000 実機に存在しないシステム機能キー）については `usage_guide.md` §3 を参照してください。
@@ -34,14 +35,16 @@ PB-1000 実機に存在しないシステム機能キー）については `usag
 ### キーマップのカスタマイズ
 
 起動時に以下の優先順で `keymap.map` ファイルを探し、見つかればそちらを使用します
-（見つからなければ `mp/keymap.py` の組み込みデフォルトを使用）。
+（見つからなければ `mp/keymap.py` の組み込みデフォルトを使用）。内蔵フラッシュが
+SDカードより先に検索されます（2026-10-17、`rom0.bin`/`rom1.bin`のフォールバック
+順と同じ方向に変更済み）。
 
 ```
-/sd/roms/keymap.map > /sd/keymap.map > /roms/keymap.map > /keymap.map
+/roms/keymap.map > /keymap.map > /sd/roms/keymap.map > /sd/keymap.map
 ```
 
-`keymap.map` は`tools/keymap_editor.py`で編集した JSON から「Export for Device」で
-生成します（直接手書きする場合はコメント先頭に書式の説明があります）。
+`keymap.map` は`tools/keymap_editor.py`で直接編集・保存できます（直接手書きする
+場合はコメント先頭に書式の説明があります）。
 
 ---
 
@@ -210,6 +213,6 @@ TK13–TK16 は事実上同じ PB-1000 キーを指しています。
 ## 参考
 
 - 実装: `mp/keymap.py`（組み込みデフォルト、カスタムキーマップ時は`keymap.map`の内容で上書き）
-- カスタムキーマップの編集: `tools/keymap_editor.py`（JSON形式で編集・保存し、「Export for Device」で`keymap.map`を生成）
+- カスタムキーマップの編集: `tools/keymap_editor.py`（`keymap.map`を直接開いて編集・保存。既存の`keymap.json`は「Import legacy keymap.json…」で取り込み可能）
 - システム機能キー（Save State・スクリーンショット・エミュレータメニュー等）: `usage_guide.md` §3
 - キーマップの検証スクリプト: `mp/test/verify_keymap_against_pb1000es.py`（オリジナルエミュレータ `pb1000es` の `KeyTab` との照合）

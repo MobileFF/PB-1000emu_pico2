@@ -31,6 +31,13 @@ _DEFAULTS = {
         # Per-flush print() from ram_autosave.py -- off by default (an
         # actively-written profile can flush several times a second).
         "ram_autosave_log": "false",
+        # What to do at boot when a pending autosave cache is found
+        # (boot_session.py's confirm_restore_autosave()):
+        #   prompt -- ask on screen (EXE=yes, BRK=no, auto-yes after 10s)
+        #   yes    -- always restore automatically, no prompt
+        #   no     -- never restore (same as always answering "no")
+        # Any other value falls back to "prompt" -- see main_entry.py.
+        "ram_autosave_restore": "prompt",
     },
     "disk": {
         "enabled": "false",
@@ -104,7 +111,10 @@ _DEFAULTS = {
     # the Pico's own RTC instead. See boot_status.py/clock_overlay.py docstrings).
     "overlay": {
         "show_profile_name": "true",   # boot-time only
-        "show_clock": "false",         # boot-time (Pico RTC) + runtime (PB-1000 TIME$/DATE$)
+        "show_clock": "false",         # runtime only (PB-1000 TIME$/DATE$) -- no
+                                        # boot-time clock any more (2026-10-18:
+                                        # showing it before NTP sync finished was
+                                        # meaningless -- see clock_overlay.py)
         "show_mem_free": "false",      # runtime only
         "show_log": "false",           # boot-time only -- mirrors the last REPL log line to the LCD
     },

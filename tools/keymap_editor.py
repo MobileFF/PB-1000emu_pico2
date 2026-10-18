@@ -1,18 +1,25 @@
 #!/usr/bin/env python3
 """
 PB-1000 Keymap Editor
-GUI tool for editing keymap.json files used by the PB-1000 emulator.
+GUI tool for editing the PB-1000 emulator's keymap.
 
-After editing, use File > "Export for Device..." to produce keymap.map --
-the compact, line-based format mp/keymap.py actually loads on the device
-(2026-10-17: switched away from loading keymap.json directly there, since
-a generic JSON parse tree cost real heap on a tight real-hardware boot;
-see mp/keymap.py's module docstring). This editor keeps working with plain
-JSON throughout -- no heap constraint on a PC -- and is the one place that
-produces that deployable file.
+2026-10-18: this editor now opens and saves `keymap.map` **directly** --
+the same compact, line-based format mp/keymap.py actually loads on the
+device (see that module's docstring: a generic JSON parse tree cost real
+heap on a tight real-hardware boot, which is why the device itself never
+reads JSON). Earlier, this editor only worked with a separate keymap.json
+working format, requiring an explicit "Export for Device" step to produce
+keymap.map; keymap.json is no longer required at all -- Open/Save/Save As
+all auto-detect the format from the file extension (`.map` or `.json`),
+and `.map` is the default. `.json` is still read/written for anyone with
+an existing keymap.json, or who prefers editing a JSON file in another
+tool, but there is no reason to create a new one. "Export for Device..."
+still exists as a convenience for saving a device-format copy to a
+*different* path than the file currently open (e.g. straight onto an SD
+card's mount point) without changing what Save/Save As target.
 
 Usage:
-    python keymap_editor.py [keymap.json]
+    python keymap_editor.py [keymap.map | keymap.json]
 """
 
 import tkinter as tk
@@ -51,9 +58,25 @@ HID_NAMES = {
 }
 MOD_FLAGS = [(1, 'Shift'), (2, 'Alt'), (4, 'Ctrl'), (8, 'GUI')]
 
-DEFAULT_JSON = os.path.normpath(
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'mp', 'keymap.json')
-)
+_MP_DIR = os.path.normpath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'mp'))
+DEFAULT_MAP = os.path.join(_MP_DIR, 'keymap.map')
+DEFAULT_JSON = os.path.join(_MP_DIR, 'keymap.json')
+
+
+def default_path() -> str:
+    """The file to auto-open on startup when none was given on the command
+    line: mp/keymap.map (the actual deployed file) if present, else the
+    legacy mp/keymap.json, else '' (start empty)."""
+    if os.path.isfile(DEFAULT_MAP):
+        return DEFAULT_MAP
+    if os.path.isfile(DEFAULT_JSON):
+        return DEFAULT_JSON
+    return ''
+
+
+def is_device_format(path: str) -> bool:
+    return path.lower().endswith('.map')
 
 
 def hid_name(sc: int) -> str:
@@ -97,6 +120,68 @@ class KeymapData:
         self.filepath = path
         self.dirty = False
 
+    def load_device_format(self, path: str):
+        """Parse keymap.map's own compact line format directly -- the
+        exact inverse of save_device_format() below, and kept in lockstep
+        with mp/keymap.py's _load_text_keymap(), which is the authority on
+        this format (see that function's own format comment). Unlike that
+        loader (which silently skips anything it can't parse, since a
+        malformed override file on the device should fall back to
+        defaults rather than crash the boot), this one raises on the
+        first bad line -- editing is exactly where you want to be told
+        about a typo immediately, not have it silently dropped."""
+        usb: dict = {}
+        adv: dict = {}
+        with open(path, encoding='utf-8') as f:
+            for lineno, raw_line in enumerate(f, 1):
+                line = raw_line.rstrip('\r\n')
+                if not line or line[0] == '#':
+                    continue
+                tag = line[0]
+                parts = line.split('|', 4)
+                if tag == 'U':
+                    if len(parts) != 5:
+                        raise ValueError(f'Line {lineno}: malformed U entry: {line!r}')
+                    sc = int(parts[1], 16)
+                    usb[sc] = (int(parts[2]), int(parts[3]), parts[4])
+                elif tag == 'A':
+                    if len(parts) != 5:
+                        raise ValueError(f'Line {lineno}: malformed A entry: {line!r}')
+                    sc = int(parts[1], 16)
+                    mod = int(parts[2])
+                    coords = [tuple(int(x) for x in cp.split(','))
+                              for cp in parts[3].split(';')]
+                    adv[(sc, mod)] = (coords, parts[4])
+                else:
+                    raise ValueError(f'Line {lineno}: unknown tag {tag!r}: {line!r}')
+        self.usb_map = usb
+        self.adv_map = adv
+        self.filepath = path
+        self.dirty = False
+
+    def load_any(self, path: str):
+        """Open either format, auto-detected by extension (see
+        is_device_format())."""
+        if is_device_format(path):
+            self.load_device_format(path)
+        else:
+            self.load(path)
+
+    def save_any(self, path: str):
+        """Save either format, auto-detected by extension -- this is what
+        File > Save / Save As use, so opening a .map file and saving it
+        keeps it a .map file (and likewise for .json). Unlike
+        save_device_format() below (used by "Export for Device...", which
+        deliberately leaves the currently-open file alone), this updates
+        self.filepath/self.dirty, since it IS what's now open."""
+        if is_device_format(path):
+            self.save_device_format(path)
+        else:
+            self.save(path)
+            return  # save() already updated filepath/dirty
+        self.filepath = path
+        self.dirty = False
+
     def save(self, path: str):
         usb_out = {}
         for sc in sorted(self.usb_map):
@@ -113,17 +198,18 @@ class KeymapData:
         self.dirty = False
 
     def save_device_format(self, path: str):
-        """Export to the compact line-based format mp/keymap.py actually
-        parses on the device (keymap.map, not this editor's own keymap.json
-        working format) -- see that module's docstring for why: a generic
-        JSON tree cost ~17KB of GC heap on a tight real-hardware boot, for
-        data that's really just a couple hundred ints/strings. This editor
-        keeps editing/saving plain JSON (no heap constraint on a PC), and
-        this is the one place that produces the deployable file."""
+        """Write the compact line-based format mp/keymap.py actually
+        parses on the device -- see that module's docstring for why: a
+        generic JSON tree cost ~17KB of GC heap on a tight real-hardware
+        boot, for data that's really just a couple hundred ints/strings.
+        Used both as the native save path for an open .map file
+        (save_any()) and by "Export for Device..." (a copy to another
+        path, leaving the currently-open file alone)."""
         lines = [
             '# PB-1000 Keyboard Map Override',
-            '# Generated by tools/keymap_editor.py -- edit the .json, not this',
-            '# file, and re-export. See mp/keymap.py for the format.',
+            '# Generated/edited by tools/keymap_editor.py -- this file can',
+            '# be opened and edited directly in that tool. See',
+            '# mp/keymap.py for the format.',
             '',
         ]
         for sc in sorted(self.usb_map):
@@ -624,8 +710,10 @@ class KeymapEditorApp(tk.Tk):
         self._build_statusbar()
         if initial_file and os.path.isfile(initial_file):
             self._do_open(initial_file)
-        elif os.path.isfile(DEFAULT_JSON):
-            self._do_open(DEFAULT_JSON)
+        else:
+            _default = default_path()
+            if _default:
+                self._do_open(_default)
         self.protocol('WM_DELETE_WINDOW', self._on_close)
 
     # ── Menu ─────────────────────────────────────────────────────────────────
@@ -640,7 +728,9 @@ class KeymapEditorApp(tk.Tk):
         fm.add_command(label='Save',         accelerator='Ctrl+S', command=self._save)
         fm.add_command(label='Save As…',     accelerator='Ctrl+Shift+S', command=self._save_as)
         fm.add_separator()
-        fm.add_command(label='Export defaults as JSON…', command=self._export_defaults)
+        fm.add_command(label='Import legacy keymap.json…', command=self._import_json)
+        fm.add_separator()
+        fm.add_command(label='Export built-in defaults…', command=self._export_defaults)
         fm.add_command(label='Export for Device…', accelerator='Ctrl+E', command=self._export_device)
         fm.add_separator()
         fm.add_command(label='Exit', command=self._on_close)
@@ -688,16 +778,18 @@ class KeymapEditorApp(tk.Tk):
         if self.data.dirty and not self._confirm_discard():
             return
         path = filedialog.askopenfilename(
-            title='Open keymap.json',
-            filetypes=[('JSON files', '*.json'), ('All files', '*.*')],
-            initialdir=os.path.dirname(self.data.filepath or DEFAULT_JSON),
+            title='Open keymap',
+            filetypes=[('Keymap files', '*.map *.json'),
+                       ('Device format (.map)', '*.map'),
+                       ('JSON files', '*.json'), ('All files', '*.*')],
+            initialdir=os.path.dirname(self.data.filepath or default_path() or DEFAULT_MAP),
         )
         if path:
             self._do_open(path)
 
     def _do_open(self, path: str):
         try:
-            self.data.load(path)
+            self.data.load_any(path)
             self.base_tab.refresh()
             self.adv_tab.refresh()
             self._update_title()
@@ -707,41 +799,85 @@ class KeymapEditorApp(tk.Tk):
         except Exception as e:
             messagebox.showerror('Open Error', str(e))
 
+    def _import_json(self):
+        """For anyone with an existing keymap.json from before 2026-10-18
+        (when this editor started opening/saving keymap.map directly --
+        see this module's docstring): load it the same way Open does, but
+        then clear self.data.filepath so the user is naturally routed
+        through "Save As" (defaulting to .map, the only format the device
+        itself reads) rather than silently re-saving over the old .json
+        -- this is a one-way migration step, not an ongoing editing
+        workflow. Plain "Open" still opens a .json in place (format
+        preserved) for anyone who genuinely wants to keep editing JSON."""
+        if self.data.dirty and not self._confirm_discard():
+            return
+        path = filedialog.askopenfilename(
+            title='Import legacy keymap.json',
+            filetypes=[('JSON files', '*.json'), ('All files', '*.*')],
+            initialdir=os.path.dirname(self.data.filepath or DEFAULT_JSON),
+        )
+        if not path:
+            return
+        try:
+            self.data.load(path)
+            self.data.filepath = ''
+            self.data.dirty = True
+            self.base_tab.refresh()
+            self.adv_tab.refresh()
+            self._update_title()
+            self._set_status(
+                f'Imported {os.path.basename(path)} — '
+                f'{len(self.data.usb_map)} base, {len(self.data.adv_map)} adv entries. '
+                f'Use Save As to write a keymap.map.')
+        except Exception as e:
+            messagebox.showerror('Import Error', str(e))
+
     def _save(self):
         if not self.data.filepath:
             self._save_as()
             return
         try:
-            self.data.save(self.data.filepath)
+            self.data.save_any(self.data.filepath)
             self._update_title()
             self._set_status(f'Saved: {self.data.filepath}')
         except Exception as e:
             messagebox.showerror('Save Error', str(e))
 
     def _save_as(self):
+        # Default to whichever format is already open (new/untitled data
+        # defaults to .map, the native device format -- see this editor's
+        # own docstring for why there's no reason to default to .json any
+        # more).
+        current_is_json = bool(self.data.filepath) and not is_device_format(self.data.filepath)
         path = filedialog.asksaveasfilename(
-            title='Save keymap.json',
-            defaultextension='.json',
-            filetypes=[('JSON files', '*.json')],
-            initialdir=os.path.dirname(self.data.filepath or DEFAULT_JSON),
-            initialfile='keymap.json',
+            title='Save keymap',
+            defaultextension='.json' if current_is_json else '.map',
+            filetypes=([('JSON files', '*.json'), ('Device format (.map)', '*.map')]
+                       if current_is_json else
+                       [('Device format (.map)', '*.map'), ('JSON files', '*.json')]),
+            initialdir=os.path.dirname(self.data.filepath or default_path() or DEFAULT_MAP),
+            initialfile=os.path.basename(self.data.filepath) if self.data.filepath else
+                        ('keymap.json' if current_is_json else 'keymap.map'),
         )
         if not path:
             return
         try:
-            self.data.save(path)
+            self.data.save_any(path)
             self._update_title()
             self._set_status(f'Saved as: {path}')
         except Exception as e:
             messagebox.showerror('Save Error', str(e))
 
     def _export_defaults(self):
-        """Load and save the built-in defaults from keymap.py."""
+        """Load the built-in defaults from keymap.py and save them to a
+        file of the user's choosing, in either format -- useful as a
+        starting point for a new override (Open it afterward to keep
+        editing)."""
         path = filedialog.asksaveasfilename(
             title='Export built-in defaults',
-            defaultextension='.json',
-            filetypes=[('JSON files', '*.json')],
-            initialfile='keymap_defaults.json',
+            defaultextension='.map',
+            filetypes=[('Device format (.map)', '*.map'), ('JSON files', '*.json')],
+            initialfile='keymap_defaults.map',
         )
         if not path:
             return
@@ -749,24 +885,25 @@ class KeymapEditorApp(tk.Tk):
             sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'mp'))
             import importlib, keymap as km_mod
             importlib.reload(km_mod)
-            usb_out = {}
+            defaults = KeymapData()
             for sc, (coord, label) in km_mod.USB_MAP.items():
-                usb_out[f'0x{sc:02X}'] = {'row': coord[0], 'ki': coord[1], 'label': label}
-            adv_out = {}
+                defaults.usb_map[sc] = (coord[0], coord[1], label)
             for (sc, mod), (coords, label) in km_mod.ADV_MAP.items():
-                adv_out[f'0x{sc:02X},{mod}'] = {'coords': [list(c) for c in coords], 'label': label}
-            with open(path, 'w', encoding='utf-8') as f:
-                json.dump({'usb_map': usb_out, 'adv_map': adv_out}, f, indent=2, ensure_ascii=False)
+                defaults.adv_map[(sc, mod)] = (list(coords), label)
+            defaults.save_any(path)
             self._set_status(f'Defaults exported to {os.path.basename(path)}')
         except Exception as e:
             messagebox.showerror('Export Error', str(e))
 
     def _export_device(self):
-        """Export the currently-open keymap to mp/keymap.map's compact
-        format -- see KeymapData.save_device_format()'s docstring. This is
-        the file to actually copy to the device (mpremote cp / the SD
-        card's /roms/ or /sd/roms/), not this editor's own .json files."""
-        default_dir = os.path.dirname(self.data.filepath or DEFAULT_JSON)
+        """Save a device-format (.map) copy of the currently-open keymap
+        to a path of the user's choosing, WITHOUT changing what Save/Save
+        As target (see KeymapData.save_device_format()'s docstring) --
+        handy for writing straight onto an SD card's mount point, or for
+        producing a .map while still editing a legacy .json file. If the
+        file already open IS a .map, plain Save already does this; this
+        command is for saving an *additional* copy elsewhere."""
+        default_dir = os.path.dirname(self.data.filepath or default_path() or DEFAULT_MAP)
         path = filedialog.asksaveasfilename(
             title='Export for Device',
             defaultextension='.map',
@@ -796,11 +933,13 @@ class KeymapEditorApp(tk.Tk):
         messagebox.showinfo(
             'About',
             'PB-1000 Keymap Editor\n\n'
-            'Edits keymap.json for the PB-1000 emulator.\n\n'
-            'JSON search order on Pico:\n'
-            '  /sd/roms/keymap.json\n'
-            '  /sd/keymap.json\n'
-            '  /roms/keymap.json\n\n'
+            'Edits the PB-1000 emulator keymap -- opens/saves keymap.map\n'
+            '(the device format) directly, or legacy keymap.json.\n\n'
+            'keymap.map search order on the device:\n'
+            '  /roms/keymap.map\n'
+            '  /keymap.map\n'
+            '  /sd/roms/keymap.map\n'
+            '  /sd/keymap.map\n\n'
             'Modifier bits: Shift=1, Alt=2, Ctrl=4, GUI=8\n'
             'PB-1000 coords: (Row=KO line, KI=KI line)',
         )

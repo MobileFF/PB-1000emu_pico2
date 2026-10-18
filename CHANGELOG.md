@@ -7,6 +7,104 @@ push される運用のため、バージョン番号や「未リリース」の
 
 ---
 
+## 2026-10-19
+
+### 修正
+
+- **エミュレータメニューの Storage > Full Capture を高速化**（`mp/
+  emulator_menu_capture.py`）: 実機で完了まで1分前後かかっていた。実際のPB-1000
+  画面内容は出力ピクセル全体のごく一部（デフォルト設定で1割前後）に過ぎず、
+  残りの大部分（ベゼルの縁取り・ファンクションキーバーの背景や枠線など）は
+  1色または列位置だけで決まる単純なパターンのため、それらをPython側の
+  1ピクセルずつのループではなく、まとまった範囲への一括代入で描画するように
+  変更。生成されるPNGの内容は変えていない。
+- **Full Captureのファンクションキーバー部分に文字（キーラベル）が描画されない
+  不具合を修正**（`mp/emulator_menu_capture.py`）: 上記の高速化以前から、枠と
+  塗りつぶしのみで文字が一切描画されない状態だった。実機のファンクションキーバー
+  描画ロジック（`funckey_bar.py`の`FuncKeyBar.draw()`）を、実ディスプレイの
+  代わりに使い捨ての`framebuf.FrameBuffer`に対して実行することで、キー塗り・
+  ラベル・枠線を実機と同じ内容で再現するよう修正。
+
+### ドキュメント
+
+- `doc/usage_guide.md`・`doc/usage_guide_en.md`の「画面全体のキャプチャ
+  （Full Capture）」節が「PPM画像として保存」という古い記載のままだったため
+  `PNG`に修正し、上記2点の変更内容も追記。
+
+---
+
+## 2026-10-18
+
+### 追加
+
+- **RAMオートセーブの起動時キャッシュ復元動作を設定可能に**（`[emulator]
+  ram_autosave_restore`、デフォルト`prompt`）: `prompt`（画面で確認、既存動作）/
+  `yes`（常に自動で復元）/`no`（常に復元しない）から選択できる（`mp/config.py`・
+  `mp/main_entry.py`）。
+- **F1 BIOS風セットアップメニューに`ram_autosave`関連3項目を追加**
+  （`mp/setup_menu.py`の`SCHEMA`に`ram_autosave`/`ram_autosave_log`/
+  `ram_autosave_restore`を追加）。以降、新しい設定項目を追加する際は必ず
+  このメニューにも反映する運用とする（`doc/dev_guide.md`「設定マージ」節）。
+- **NTP時刻同期の切り分け用テストスクリプトを追加**（`mp/test/
+  test_ntp_timesync.py`）: WiFi接続・NTPサーバー応答・タイムゾーン適用・Pico
+  RTC設定の各段階を個別に確認できる。実行中のPB-1000側時刻を確認する
+  `ntp_sync.read_pb1000_clock()`も追加。
+- **キーマップエディタ（`tools/keymap_editor.py`）が`keymap.map`（実機が読み込む
+  形式）を直接開いて編集・保存できるように**: これまでは`keymap.json`という
+  別の編集用形式でしか編集できず、「Export for Device」コマンドで別途
+  `keymap.map`へ書き出す必要があったが、この変更により通常の運用では
+  `keymap.json`自体が不要になった。既存の`keymap.json`しか持っていない場合は
+  「Import legacy keymap.json…」コマンドで一度取り込める。起動時に自動で開く
+  ファイルも`mp/keymap.map`優先に変更。
+
+### 修正
+
+- **変数領域スナップショット（`VarAreaAutosave`、watch 3）の実機不具合を複数修正**
+  （`mp/ram_autosave.py`）:
+  - CALモードの判定条件を、`references/sysvars.txt`記載の`MODE`バイト（`&H6F51`）
+    bit4（CALC）ではなく、実機検証で確認した「全ビット0」に修正。
+  - CALプロンプトでアイドル状態が続くと継続的にフラッシュが発生していた問題を、
+    直前に書き込んだ内容とのチェックサム比較によるダーティチェックで解消。
+  - ファイル領域キャッシュ（watch 1/2）が存在しない場合、変数領域キャッシュ
+    （watch 3）の復元が丸ごとスキップされてしまう不具合を修正（両者を独立に
+    復元するよう変更）。
+  - 変数領域の内容バイトだけでなく、その内部構造（数値・文字列変数テーブルや
+    FOR/GOSUBスタックの現在位置を示す18バイトのポインタ群、`&H692F`〜`&H6940`）
+    も一緒にスナップショット・復元するよう修正。内容バイトは復元されていても
+    このポインタが古いままだと、ROM側が変数を未定義（値0）として扱ってしまう
+    不具合があった（キャッシュファイル形式が変わったため、先頭にマジック
+    バイトを追加し、旧形式のキャッシュは安全に破棄するようにした）。
+- **起動中の時計表示（`[overlay] show_clock`）を廃止し、実行中のみ表示するように
+  変更**（`mp/boot_status.py`・`mp/clock_overlay.py`・`mp/main_entry.py`）:
+  NTP同期が完了する前の時刻（Pico内蔵RTC）を表示しても意味が無いため。これに
+  伴い、起動時計とランタイム時計の文字幅の差によるグレー残り描画（西暦の上2桁
+  だけ色が異なる）も解消。
+- `[emulator] ram_autosave_log`有効時に出力されていた`vararea ready ...`形式の
+  診断用トレースログを削除（その他のram_autosaveログは維持）。
+- **`USE_PIO_USB=OFF`（ネイティブUSB版）ビルド手順に潜んでいた不具合を修正**
+  （`CLAUDE.md`・`doc/build_guide.md`・`doc/build_guide_en.md`）: `CMAKE_ARGS="..."`
+  を`BOARD=`/`USER_C_MODULES=`と同時に`make`のコマンドラインへ直接指定すると、
+  GNU Makeの仕様でMakefile内部の`CMAKE_ARGS += ...`（`BOARD=`/`USER_C_MODULES=`
+  がcmakeへ渡る仕組みそのもの）が丸ごと上書きされ、ボード判定が無印Raspberry Pi
+  Pico(RP2040)のデフォルトにフォールバックし、PB-1000本体のCコードを一切含まない
+  ビルドが生成されてしまう（ビルド自体はエラー無く成功するため気付きにくい）。
+  以前のドキュメント自体にこの誤った手順が書かれていたため、実際にネイティブ
+  USB版をビルドした際に発覚した。cmakeの明示的な設定を別コマンドとして先に
+  実行する安全な手順に修正。
+
+### ドキュメント
+
+- `doc/config_guide.md`（設定リファレンス）の`[emulator]`セクションに
+  `ram_autosave`/`ram_autosave_log`/`ram_autosave_restore`の記載が無かったため
+  追加（既存の`ram_autosave`/`ram_autosave_log`も含め、元々未記載だった）。
+- `tools/launcher.py`・`doc/keymap_guide.md`・`doc/keymap_guide_en.md`の
+  キーマップエディタに関する説明が、上記の`keymap.map`直接編集対応後も
+  `keymap.json`前提のままだったため更新。`keymap_guide.md`の`keymap.map`
+  検索優先順位の記載が実際と逆（SDカード優先と記載されていたが、実際は
+  2026-10-17以降フラッシュ優先）になっていたのも合わせて修正。
+
+---
+
 ## 2026-10-17
 
 ### 追加

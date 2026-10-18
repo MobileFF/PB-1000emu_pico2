@@ -1,18 +1,29 @@
 """
-Boot-time status overlay for the physical LCD: profile name (top-left), a
-clock (top-right), and the most recent line printed to the REPL (bottom).
-Meant to be shown from right after profile selection (main.py, once the
-screen is cleared) until the emulator's own screen takes over at the end
-of main()'s startup sequence -- see BootStatusOverlay.start()/stop().
+Boot-time status overlay for the physical LCD: profile name (top-left) and
+the most recent line printed to the REPL (bottom). Meant to be shown from
+right after profile selection (main.py, once the screen is cleared) until
+the emulator's own screen takes over at the end of main()'s startup
+sequence -- see BootStatusOverlay.start()/stop().
 
-show_profile/show_clock/show_log are supplied by main.py from `[overlay]
-show_profile_name`/`show_clock`/`show_log` in pb1000.ini. show_clock's key is shared
-with clock_overlay.py's runtime clock (one on/off toggle spans both boot
-and execution) even though the two are separate implementations -- the CPU
-isn't stepping yet during boot, so there's no PB-1000 TIME$/DATE$ to read
-from RAM the way clock_overlay.py does at runtime; this class reads the
-Pico's own RTC instead. See clock_overlay.py's docstring for the runtime
-side of this.
+show_profile/show_log are supplied by main.py from `[overlay]
+show_profile_name`/`show_log` in pb1000.ini.
+
+2026-10-18: this overlay no longer draws a clock during boot. It used to
+(reading the Pico's own RTC, since the CPU isn't stepping yet during boot
+and there's no PB-1000 TIME$/DATE$ to read from RAM), but real-hardware
+feedback was that showing a clock before `[ntp] enable=true`'s sync has even
+run is close to meaningless -- for however long WiFi connect + the NTP
+request takes (`[ntp] timeout_ms`, up to several seconds), the displayed
+time is whatever the Pico's RTC happened to already hold (stale from a
+previous sync, or simply wrong on a fresh board), and there's no visual cue
+telling the user it hasn't been corrected yet. `[overlay] show_clock` now
+means "clock visible once the emulator has finished starting", which
+clock_overlay.py's ClockOverlay already naturally satisfies on its own
+(it's only constructed/polled after main_entry.py's whole boot sequence,
+NTP sync included, has finished) -- see that module's docstring for the
+runtime side of this. The config key is still shared between the two
+(main_entry.py reads it once, for ClockOverlay only now), so this file no
+longer takes a show_clock parameter at all.
 
 The log line is captured by registering a tiny io.IOBase stream on
 os.dupterm() (index 0 -- this port only has one dupterm slot, see
@@ -24,13 +35,6 @@ calls (main_boot.py, ntp_sync.py, etc.) -- without needing print() call
 sites threaded through all of them. The stream's read()/readinto() always
 report "nothing available" (see _LogMirrorStream), so it can never be
 typed into as a second REPL; it is purely an output tap.
-
-Clock updates piggyback on incoming log lines rather than a timer: boot is
-a synchronous, single-threaded stretch of main.py with no event loop
-running yet, and driving a periodic redraw from a hardware timer IRQ here
-would risk interleaving with whatever SPI transfer (LCD or SD card) is
-already in flight on the same core. Log lines arrive often enough during
-boot to keep the clock reasonably current without that risk.
 
 Heap safety: this overlay is active across exactly the part of boot that's
 tightest on contiguous heap -- PB1000System's [ext] module loader runs right
@@ -49,7 +53,6 @@ longer needs its own per-instance scratch buffer to get the same guarantee.
 """
 import io
 import os
-import time
 
 from draw_text import draw_text as _draw_text
 
@@ -95,11 +98,10 @@ class BootStatusOverlay:
     screen -- see main.py's `_early_lcd is None` check), since the two are
     exclusive elsewhere in this codebase (pb1000.py's update_display())."""
 
-    def __init__(self, display, profile_name, show_profile=True, show_clock=True, show_log=True):
+    def __init__(self, display, profile_name, show_profile=True, show_log=True):
         self._display = display
         self._profile_name = profile_name or "(none)"
         self._show_profile = show_profile
-        self._show_clock = show_clock
         self._show_log = show_log
         self._mirror = None
         self._active = False
@@ -107,8 +109,6 @@ class BootStatusOverlay:
     def start(self):
         if self._show_profile:
             _draw_text(self._display, 4, 4, self._profile_name, _HDR)
-        if self._show_clock:
-            self._draw_clock()
         self._active = True
         if not self._show_log:
             return
@@ -127,31 +127,17 @@ class BootStatusOverlay:
                 pass
 
     def redraw_header(self):
-        """Redraw just the profile-name/clock row (show_profile/show_clock,
-        per pb1000.ini), honoring whichever of the two is actually enabled
-        -- without re-starting the log mirror (unlike start()). start()
-        paints this once at boot and nothing redraws it again afterward
-        (by design: this header should stay put through the whole
-        session) -- but some later full-screen repaint (e.g. RAM
+        """Redraw just the profile-name row (show_profile_name, per
+        pb1000.ini) -- without re-starting the log mirror (unlike
+        start()). start() paints this once at boot and nothing redraws it
+        again afterward (by design: this header should stay put through
+        the whole session) -- but some later full-screen repaint (e.g. RAM
         Autosave's restore-prompt clear in main.py) can legitimately wipe
         the whole physical screen including this corner, needing an
         explicit redraw of just this row. Safe to call any time,
         including after stop()."""
         if self._show_profile:
             _draw_text(self._display, 4, 4, self._profile_name, _HDR)
-        if self._show_clock:
-            self._draw_clock()
-            self._mirror = None
-
-    def _draw_clock(self):
-        try:
-            t = time.localtime()
-            text = "%04d-%02d-%02d %02d:%02d:%02d" % (t[0], t[1], t[2], t[3], t[4], t[5])
-        except Exception:
-            return
-        W = self._display.width
-        x = max(0, W - len(text) * 8 - 4)
-        _draw_text(self._display, x, 4, text, _HDR)
 
     def _on_log_line(self, line):
         if not self._active:
@@ -165,11 +151,9 @@ class BootStatusOverlay:
             # other boot-time code (e.g. create_system()'s bezel draw) can
             # paint over the top row in between log lines, and this is the
             # only place that redraws after start() -- so on the next log
-            # line, bring both back rather than letting the profile name
-            # go missing while the clock (which redraws below) keeps working.
+            # line, bring the profile name back rather than letting it go
+            # missing.
             if self._show_profile:
                 _draw_text(self._display, 4, 4, self._profile_name, _HDR)
-            if self._show_clock:
-                self._draw_clock()
         except Exception:
             pass

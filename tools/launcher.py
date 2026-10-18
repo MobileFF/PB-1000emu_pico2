@@ -31,9 +31,11 @@ TOOLS = [
     {
         'name': 'Keymap Editor',
         'script': 'keymap_editor.py',
-        'description': 'Edit keymap.json USB/advanced key mappings',
-        'file_label': 'keymap.json (optional):',
-        'filetypes': [('JSON files', '*.json'), ('All files', '*.*')],
+        'description': 'Edit keymap.map (device format) USB/advanced key mappings',
+        'file_label': 'keymap.map/.json (optional):',
+        'filetypes': [('Keymap files', '*.map *.json'),
+                       ('Device format (.map)', '*.map'),
+                       ('JSON files', '*.json'), ('All files', '*.*')],
     },
     {
         'name': 'pb1000.ini Editor',

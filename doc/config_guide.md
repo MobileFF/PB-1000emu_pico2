@@ -111,8 +111,12 @@ RGB332形式（8ビット）: ビット7-5=R(3bit)、ビット4-2=G(3bit)、ビ�
 | `timer_tick_ms` | `1000` | リアルタイムタイマーティックの間隔（ms）。`0`以下でこのティック処理自体を無効化 |
 | `loop_idle_ms` | `0` | メインループのアイドル待機（ms） |
 | `step_chunk` | `2048` | CPU実行スライスの内部チャンクサイズ（ステップ数）。PIO UARTブリッジのサービス頻度にも使われる |
+| `ram_autosave` | `true` | RAMオートセーブ機能そのものの有効/無効（詳細は`dev_guide.md`「RAMオートセーブ」節） |
+| `ram_autosave_log` | `false` | フラッシュへの書き込みが発生するごとにログ出力するか |
+| `ram_autosave_restore` | `prompt` | 起動時に未保存キャッシュが見つかった場合の動作。`prompt`=画面で確認（EXE=はい、BRK=いいえ、10秒で自動的にはい）、`yes`=常に自動で復元、`no`=常に復元しない |
 
-実装: `mp/main.py`（メインループ定数の読み込み・使用箇所）、`mp/main_runtime.py`（`run_cpu_slice`）。
+実装: `mp/main.py`（メインループ定数の読み込み・使用箇所）、`mp/main_runtime.py`（`run_cpu_slice`）、
+`mp/ram_autosave.py`（RAMオートセーブ本体）。
 
 ---
 
@@ -309,17 +313,21 @@ enable=true`）は物理LCDとHDMIの排他方針により、これらのオー�
 | キー | デフォルト | 説明 |
 | --- | --- | --- |
 | `show_profile_name` | `true` | 起動中のみ。左上にプロファイル名を表示するか |
-| `show_clock` | `false` | 起動中・実行中を通して常に時計を表示するか。**表示内容の出所はフェーズによって異なる**(下記参照) |
+| `show_clock` | `false` | 実行中のみ。右上にPB-1000本体のTIME$/DATE$を直読みした時計を表示するか |
 | `show_mem_free` | `false` | 実行中のみ。画面中央上部に Pico 2 のヒープ空き容量（`gc.mem_free()`）を常時表示するか |
 | `show_log` | `false` | 起動中のみ。画面最下部に直近の REPL ログ1行をミラー表示するか |
 
-`show_clock` は1つのキーで起動中・実行中の両方をまとめて切り替えますが、実装(表示する時刻の
-出所)はフェーズごとに異なります。CPUがまだ実行されていない起動中は PB-1000 側の時刻情報を
-読み取れないため、**起動中は Pico 本体の内蔵RTC**（`[ntp] enable=true` の場合はこの起動区間の
-途中でNTP同期が完了すると表示も正しい時刻へ切り替わる）、**実行中は PB-1000本体のシステム
-変数RAM上のTIME$/DATE$の値そのもの**（`DATE$`=`&H6BAD`、`TIME$`=`&H6BB0`、秒はタイマー
-レジスタ下位6ビット）を直接読み取って表示します。実行中の表示はBASICから `PRINT TIME$`
-`PRINT DATE$` した場合と常に一致します（NTP無効時や、ユーザーがPOKEで書き換えた場合も含めて）。
+`show_clock`の時計は**PB-1000本体のシステム変数RAM上のTIME$/DATE$の値そのもの**
+（`DATE$`=`&H6BAD`、`TIME$`=`&H6BB0`、秒はタイマーレジスタ下位6ビット）を直接読み取って
+表示するため、BASICから `PRINT TIME$` `PRINT DATE$` した場合と常に一致します（NTP無効時や、
+ユーザーがPOKEで書き換えた場合も含めて）。表示が始まるのはエミュレータの起動処理
+（`[ntp] enable=true`のNTP同期を含む）が完全に終わった後のみです（`ClockOverlay`は
+main_entry.py の起動シーケンス全体が終わってから初めて生成・ポーリングされる）。
+以前は起動中にもPico本体の内蔵RTCを読んで時計を表示していましたが（CPUがまだ実行されて
+いない起動中はPB-1000側の時刻情報を読み取れないため）、2026-10-18に廃止しました —
+NTP同期が終わる前の時刻を見せても、WiFi接続＋NTP応答待ちの間（Picoの内蔵RTCが古いまま、
+あるいは単に不正確な値のまま、しかも補正済みかどうかの見分けもつかない状態で表示される）
+ほとんど意味がないためです。
 
 デフォルトが無効なのは、起動時だけの一時的な表示と異なり実行中ずっと画面の一部を占有し
 続けるため、レイアウト（`scale`・`x_offset`・`y_offset`）によってはベゼル上端の余白と
@@ -334,12 +342,12 @@ enable=true`）は物理LCDとHDMIの排他方針により、これらのオー�
 読み取り前に `gc.collect()` は行いません — 事前に回収してしまうと、このオーバーレイ本来の
 目的（実行中に実際に起きている断片化・メモリ逼迫をそのまま見せること）が損なわれるためです。
 
-実装: `mp/boot_status.py`（`BootStatusOverlay`、起動中）、`mp/clock_overlay.py`
-（`ClockOverlay`、実行中）、`mp/mem_overlay.py`（`MemOverlay`、実行中）、`mp/main.py`
-（起動シーケンスでの `boot_status.start()`/`stop()` 呼び出し位置、メインループでの
+実装: `mp/boot_status.py`（`BootStatusOverlay`、起動中 — プロファイル名とログ行のみ、
+時計は無し）、`mp/clock_overlay.py`（`ClockOverlay`、実行中）、`mp/mem_overlay.py`
+（`MemOverlay`、実行中）、`mp/main.py`（起動シーケンスでの
+`boot_status.start()`/`stop()` 呼び出し位置、メインループでの
 `clock_overlay.poll()`/`mem_overlay.poll()` 呼び出し）、`mp/ntp_sync.py`（TIME$/DATE$への
-書き込み側）。BootStatusOverlay と ClockOverlay は設定キー(`show_clock`)を共有するのみで、
-実装は別クラスのまま独立しています（上記の通り時刻の出所が起動中/実行中で異なるため）。
+書き込み側）。
 
 ---
 

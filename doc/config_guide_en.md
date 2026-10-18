@@ -115,8 +115,12 @@ Implementation: boot sequence in `mp/main.py`; defaults in `mp/config.py` `_DEFA
 | `timer_tick_ms` | `1000` | Real-time timer tick interval (ms). Set to `0` or below to disable this tick processing. |
 | `loop_idle_ms` | `0` | Main-loop idle wait (ms). |
 | `step_chunk` | `2048` | Inner chunk size (in steps) used within a CPU execution slice; also paces how often the PIO UART bridge is serviced. |
+| `ram_autosave` | `true` | Enable/disable RAM Autosave itself (see `dev_guide_en.md`'s "RAM Autosave" section for details). |
+| `ram_autosave_log` | `false` | Print a line to the log every time a flush actually writes to flash. |
+| `ram_autosave_restore` | `prompt` | What to do at boot when a pending unsaved cache is found. `prompt` = ask on screen (EXE=yes, BRK=no, auto-yes after 10s), `yes` = always restore automatically, `no` = never restore. |
 
-Implementation: main-loop constant loading/usage in `mp/main.py`; `run_cpu_slice()` in `mp/main_runtime.py`.
+Implementation: main-loop constant loading/usage in `mp/main.py`; `run_cpu_slice()` in
+`mp/main_runtime.py`; `mp/ram_autosave.py` (RAM Autosave itself).
 
 ---
 
@@ -317,18 +321,21 @@ exclusivity policy (see §14).
 | Key | Default | Description |
 | --- | --- | --- |
 | `show_profile_name` | `true` | Boot only. Show the profile name in the top-left |
-| `show_clock` | `false` | Show a clock throughout both boot and runtime. **What the clock actually reads differs by phase** (see below) |
+| `show_clock` | `false` | Runtime only. Show a clock at the top-right, reading PB-1000's own TIME$/DATE$ |
 | `show_mem_free` | `false` | Runtime only. Show the Pico 2's free heap (`gc.mem_free()`) at the top-center |
 | `show_log` | `false` | Boot only. Mirror the most recent REPL log line at the bottom of the screen |
 
-`show_clock` is a single key that toggles the clock for both phases, but the underlying
-implementation differs: the CPU isn't stepping yet during boot, so there's no PB-1000 time
-information to read yet. **During boot it reads the Pico's own built-in RTC** (if `[ntp]
-enable=true`, the display switches to the correct time once NTP sync finishes partway through
-this window); **during runtime it reads TIME$/DATE$ directly from PB-1000's own system variable
-RAM** (`DATE$` at `0x6BAD`, `TIME$` at `0x6BB0`, seconds in the timer register's low 6 bits), so
-it always matches what `PRINT TIME$` / `PRINT DATE$` would show from BASIC — including when NTP
-is disabled or the user has POKEd those addresses directly.
+`show_clock`'s clock **reads TIME$/DATE$ directly from PB-1000's own system variable RAM**
+(`DATE$` at `0x6BAD`, `TIME$` at `0x6BB0`, seconds in the timer register's low 6 bits), so it
+always matches what `PRINT TIME$` / `PRINT DATE$` would show from BASIC — including when NTP is
+disabled or the user has POKEd those addresses directly. It is only ever shown once the emulator
+has fully finished starting up (`ClockOverlay` is only constructed/polled after main_entry.py's
+whole boot sequence, `[ntp] enable=true`'s sync included, has finished) -- there used to also be
+a boot-time clock (reading the Pico's own RTC, since the CPU isn't stepping yet during boot), but
+it was removed on 2026-10-18: showing a clock before NTP sync has even run was close to
+meaningless, since for however long WiFi connect + the NTP request takes, the display was simply
+whatever the Pico's RTC already held (stale or outright wrong) with no indication it hadn't been
+corrected yet.
 
 Defaults to off because, unlike the one-time boot splash, `show_clock`/`show_mem_free` occupy
 part of the screen for the entire runtime session, and depending on layout
@@ -345,13 +352,11 @@ before reading `gc.mem_free()` — doing that would defeat the point of that rea
 show the fragmentation/pressure actually happening during normal operation, not an artificially
 cleaned-up number.
 
-Implementation: `mp/boot_status.py` (`BootStatusOverlay`, boot-time), `mp/clock_overlay.py`
-(`ClockOverlay`, runtime), `mp/mem_overlay.py` (`MemOverlay`, runtime), `mp/main.py` (where
-`boot_status.start()`/`stop()` are called in the boot sequence, and where
-`clock_overlay.poll()`/`mem_overlay.poll()` are called from the main loop), `mp/ntp_sync.py`
-(writes to the TIME$/DATE$ addresses). `BootStatusOverlay` and `ClockOverlay` only share the
-`show_clock` config key -- they remain separate implementations, for the phase-dependent reason
-above.
+Implementation: `mp/boot_status.py` (`BootStatusOverlay`, boot-time -- profile name + log line
+only now, no clock), `mp/clock_overlay.py` (`ClockOverlay`, runtime), `mp/mem_overlay.py`
+(`MemOverlay`, runtime), `mp/main.py` (where `boot_status.start()`/`stop()` are called in the
+boot sequence, and where `clock_overlay.poll()`/`mem_overlay.poll()` are called from the main
+loop), `mp/ntp_sync.py` (writes to the TIME$/DATE$ addresses).
 
 ---
 
