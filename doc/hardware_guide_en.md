@@ -232,6 +232,105 @@ reboot). **LCD and HDMI are exclusive outputs** — while HDMI is enabled, the p
 updating and everything is shown on HDMI instead (see [usage_guide_en.md](usage_guide_en.md)
 §11).
 
+### 10. Waveshare RP2350-PiZero (onboard DVI output, experimental)
+
+**This is a separate, dedicated board from the Pico 2 / Pico 2 W** (RP2350B, 48 GPIO, no SPI
+LCD, onboard DVI + onboard microSD), targeting **HDMI/DVI output only** — no physical LCD or
+touch panel at all. This port reuses the board definition and DVI output library
+(`src/libdvi/`, BSD-3-Clause, see [THIRD-PARTY-NOTICES.md](../THIRD-PARTY-NOTICES.md)) from the
+sibling MSX_emu_pico2 project's own already real-hardware-confirmed port to this exact board.
+
+**Status**: with `[display] driver=DVI` set in `pb1000.ini` (a template for this board is
+`mp/pb1000_pizero.ini`) and a normal boot (`main.py`), the following has been confirmed on real
+hardware:
+
+- The emulator screen (PB-1000's LCD), bezel, FunKeyBar, status line, and the always-on
+  clock/memory readouts (`[overlay]`) over DVI
+- The boot-time profile picker and the Win+F7 emulator menu over DVI
+- A USB keyboard (on the board's USB-PIO connector, via PIO-USB)
+- Reading and writing the onboard microSD (`/sd`)
+- DVI output keeps running while flash is being written (e.g. saving a RAM profile)
+
+RS-232C (PIO UART) has been confirmed to initialize; actual sending/receiving hasn't been
+confirmed yet.
+
+**Display details**:
+
+- Output is fixed at 640×480 / 60Hz. Internally, a 320×240 screen is scaled up 2× in both
+  directions (one dot becomes 2×2 monitor pixels).
+- The LCD area is drawn by reading the emulator's LCD VRAM directly, scanline by scanline. Menus,
+  the profile picker, FunKeyBar, etc. are drawn into a separate 320×240 layer on top of it (up to
+  16 colors at a time).
+- Choose a `[display] scale` that fits within 320 dots of width. At `scale = 1.0`, one LCD dot
+  is exactly 2×2 monitor pixels. If the value doesn't fit (e.g. `2.0` = 384 dots wide), it is
+  reduced automatically at boot to the largest scale that fits (320/192 ≈ 1.67). Since that is not
+  an integer scale, dot widths become slightly uneven.
+
+**PIO assignment**: pio0 = DVI output, pio1 = PIO-USB (USB keyboard), pio2 = RS-232C (PIO UART,
+state machines 8/9, TX=GP6, RX=GP13). This differs from the Pico 2 / Pico 2 W.
+
+**microSD**: the onboard slot is wired to SPI1 (SCK=GP30, MOSI=GP31, MISO=GP40, CS=GP43), on
+different pins from the Pico 2 / Pico 2 W's SD card module. It is used automatically when the
+DVI driver is selected.
+
+**Build**: `bash bldfrm.sh pizero` (from `/home/flex/projects/micropython.pb1000/ports/rp2/`;
+note the explicit argument — plain `bash bldfrm.sh` still builds Pico 2 / Pico 2 W as before).
+Output: `firmware/firmware_pb1000_pizero.uf2`. The build procedure includes board-specific
+patches:
+
+- `memmap_mp_rp2350.ld`: moves core0's C stack (16KB) into regular SRAM, leaving SCRATCH_X/Y to
+  core1 (DVI)
+- `CMakeLists.txt`: stack size adjustments
+- An explicit `MICROPY_C_HEAP_SIZE` (MicroPython's rp2 port defaults the C heap to 0 bytes, which
+  makes a `calloc()` call inside this board's DVI init return a garbage pointer)
+
+These are applied and reverted automatically depending on which target you build.
+
+**Connecting**: after flashing, `mpremote connect <port>` works — either the native USB-C
+port's CDC REPL, or the UART0 (GP0/GP1) REPL. This board's USB-C port cannot act as a native USB
+host for the keyboard, so plug the keyboard into the USB-PIO connector (PIO-USB, GP28/29; see
+`src/usb_host_core.c`'s `PB1000_PIO_USB_DP_PIN` comment for details).
+
+**Wiring a USB-A connector from the 40-pin header (GP22 build)**: GP28/29 are not on the 40-pin
+header, so for an external USB-A connector on the header use
+`firmware/firmware_pb1000_pizero_gp22.uf2` (`bash bldfrm.sh pizero gp22`), which puts PIO-USB on
+GP22/GP23. With this firmware the board's USB-PIO connector is not used; everything else is the
+same as the regular build.
+
+| USB-A | GPIO | Header pin |
+|---|---|---|
+| D+ | GP22 (22Ω in series) | 15 |
+| D- | GP23 (22Ω in series) | 16 |
+| VBUS | 5V | 2 or 4 |
+| GND | GND | 14, etc. |
+
+To check the wiring, run `mp/test/pio_usb_gp22_test.py` (`mpremote run mp/test/pio_usb_gp22_test.py`).
+It checks the keyboard connection from the D+/D- levels, checks from the GPIO function
+assignments whether the flashed firmware is the GP22 build, and prints the name of each key
+pressed.
+
+**Extension modules**: as on the other boards, `mp/ext/` is not frozen into the firmware, so copy
+it to the internal flash's `/ext/` or to `/sd/ext/` if you use it. This includes
+`dotds_64dot.py`, which shows all 8 lines in 64-dot mode.
+
+**Confirming the DVI signal itself (for troubleshooting)**: run `mp/test/test_dvi_display.py`
+directly instead of the normal boot sequence (`main.py`):
+
+```
+mpremote connect <port> run mp/test/test_dvi_display.py
+```
+
+If the DVI signal path (clocks, PIO, DMA, core1 launch) is working, your HDMI/DVI monitor should
+show 8 vertical color bars (white/yellow/cyan/green/magenta/red/blue/black) plus a thin white
+line across the vertical middle.
+
+**Known limitations**:
+
+- There is no WiFi, so no NTP time sync. PB-1000's own clock runs on from the time saved in the
+  RAM profile.
+- The overlay layer (menus etc.) shows up to 16 colors at a time; further colors are shown as the
+  nearest of those.
+
 ## Wiring Considerations
 
 - **SPI Sharing**: The CS (Chip Select) pins must be independent for the LCD, SD, and Touch. Ensure all CS pins are pulled HIGH initially in code to avoid bus contention.

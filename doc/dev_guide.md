@@ -389,7 +389,7 @@ system.list_mem_write_hooks()
 call_hook・mem_write_hook をアドレス・登録元(owner)・有効/無効状態つきで一覧表示するメニュー項目。
 Win+F7 のエミュレータメニューから **Hook Status** を選択すると表示される（`emulator_menu_debug.py`
 の `_do_hook_status()`。CPU Status とともに、稼働中セッションでの選択時にオンデマンドで
-コンパイルされる。上下キーでスクロール、BREAK で閉じる。デバッグ時に「どの拡張がどの
+コンパイルされる。上下キーでスクロール、ESC で閉じる。デバッグ時に「どの拡張がどの
 アドレスをフックしているか」「MENU 表示モードなどで意図通り無効化されているか」を確認する用途。
 
 実際の使用例として `mp/ext/dotds_64dot.py` が DSPMD レジスタ（0x68D0）へのメモリ書き込みフックを登録し、
@@ -854,8 +854,8 @@ dirty区間を次のデバウンス完了時にまとめて1回フラッシュ�
 
 起動時にキャッシュが見つかった場合の動作は`[emulator] ram_autosave_restore`
 （`main_entry.py`、2026-10-18〜）で選べる: デフォルトの`prompt`は
-`confirm_restore_autosave()`（`boot_session.py`）による画面確認（EXE=はい、
-BRK=いいえ、10秒操作がなければ自動的にはい — 実機の電池バックアップRAMの
+`confirm_restore_autosave()`（`boot_session.py`）による画面確認（Enter=はい、
+ESC=いいえ、10秒操作がなければ自動的にはい — 実機の電池バックアップRAMの
 「電源を入れたら直前の状態に戻る」挙動に近づける意図）、`yes`/`no`はこの確認を
 省略して常にその答えだったものとして扱う。
 

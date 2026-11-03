@@ -187,6 +187,29 @@ Windows ネイティブビルドは上記 CFLAGS の関係で非推奨です。W
 > 実際のビルドスクリプトの例は `/home/flex/projects/micropython.pb1000/ports/rp2/bldfrm.sh`
 >（このプロジェクト専用のチェックアウト、このプロジェクト固有の作業環境向け）を参照してください。
 
+### 5. Waveshare RP2350-PiZero 版のビルド（実験的）
+
+Pico 2 / Pico 2 W とは別の専用ボード（オンボードDVI出力、物理LCDなし）向けのビルドです。
+上記の `bldfrm.sh` に `pizero` を明示的な引数として渡します:
+
+```bash
+bash bldfrm.sh pizero
+```
+
+通常の `bash bldfrm.sh`（引数なし）は従来通り Pico 2 W + Pico 2 の2つをビルドするのみで、
+この変更による影響は受けません。出力は `firmware/firmware_pb1000_pizero.uf2` です。
+
+USBキーボードを40ピンヘッダのGP22/GP23に接続する版は、2つ目の引数に `gp22` を指定します
+（出力は `firmware/firmware_pb1000_pizero_gp22.uf2`）:
+
+```bash
+bash bldfrm.sh pizero gp22
+```
+
+詳細（必須のリンカスクリプトパッチ、接続方法、動作状況・既知の制約等）は
+[Hardware Guide §10](hardware_guide.md#10-waveshare-rp2350-pizeroオンボードdvi出力実験的)
+を参照してください。
+
 ## 書き込み
 
 1.  **BOOTSEL モードへの移行**: Pico 2 (W) の BOOTSEL ボタンを押しながら、USB で PC に接続します。

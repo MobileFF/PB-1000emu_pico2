@@ -370,7 +370,7 @@ A menu entry that lists every currently registered call_hook and mem_write_hook 
 owning module (owner), and enabled/disabled state — using `system.list_call_hooks()` /
 `system.list_mem_write_hooks()`. Available from the Win+F7 emulator menu as **Hook Status**
 (`_do_hook_status()` in `emulator_menu_debug.py` — compiled on demand, along with CPU Status,
-the first time either is opened in a running session). Use Up/Down to scroll, BREAK to close. Handy when
+the first time either is opened in a running session). Use Up/Down to scroll, ESC to close. Handy when
 debugging which extension owns a given address, or confirming a hook was correctly
 disabled/enabled (e.g. in MENU display mode).
 
@@ -828,8 +828,8 @@ reset never touches).
 
 What happens at boot when a cache is found is controlled by `[emulator]
 ram_autosave_restore` (`main_entry.py`, 2026-10-18-): the default `prompt` shows the
-on-screen confirmation (`confirm_restore_autosave()`, `boot_session.py` -- EXE=yes,
-BRK=no, auto-yes after 10s with no input, matching the real PB-1000's battery-backed RAM
+on-screen confirmation (`confirm_restore_autosave()`, `boot_session.py` -- Enter=yes,
+ESC=no, auto-yes after 10s with no input, matching the real PB-1000's battery-backed RAM
 behaviour of picking up where you left off); `yes`/`no` skip that prompt and act as if that
 answer had been given every time.
 

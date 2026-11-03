@@ -44,6 +44,13 @@ TOOLS = [
         'file_label': 'pb1000.ini (optional):',
         'filetypes': [('INI files', '*.ini'), ('All files', '*.*')],
     },
+    {
+        'name': 'Device Files (PC Link)',
+        'script': 'device_files_gui.py',
+        'description': 'Disk images, screenshots and RAM profiles on the device SD card '
+                       '(press F2 at the device profile picker first; needs pyserial)',
+        'file_label': None,  # no file argument; the tool picks the serial port itself
+    },
 ]
 
 
@@ -66,10 +73,11 @@ class ToolRow(ttk.Frame):
 
         file_row = ttk.Frame(self)
         file_row.pack(fill='x', pady=(4, 0))
-        ttk.Label(file_row, text=tool['file_label'], width=22, anchor='w').pack(side='left')
         self.path_var = tk.StringVar()
-        ttk.Entry(file_row, textvariable=self.path_var, width=40).pack(side='left', padx=(0, 4))
-        ttk.Button(file_row, text='Browse...', command=self._browse).pack(side='left', padx=(0, 4))
+        if tool['file_label'] is not None:
+            ttk.Label(file_row, text=tool['file_label'], width=22, anchor='w').pack(side='left')
+            ttk.Entry(file_row, textvariable=self.path_var, width=40).pack(side='left', padx=(0, 4))
+            ttk.Button(file_row, text='Browse...', command=self._browse).pack(side='left', padx=(0, 4))
         launch_btn = ttk.Button(file_row, text='Launch', command=self._launch)
         launch_btn.pack(side='left', padx=(8, 0))
         if not self.available:

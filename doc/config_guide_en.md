@@ -63,9 +63,9 @@ Implementation: `load_config()` / `_FLASH_ONLY_SECTIONS` in `mp/config.py`.
 
 | Key | Default | Description |
 | --- | --- | --- |
-| `driver` | `ILI9341` | `ILI9341` (320×240) or `ST7796` (480×320, e.g. MSP4021). `display =` is accepted as an alias. *Internal-flash-only key.* |
+| `driver` | `ILI9341` | `ILI9341` (320×240), `ST7796` (480×320, e.g. MSP4021), or `DVI` (Waveshare RP2350-PiZero only — onboard DVI output, no physical LCD; see [Hardware Guide §10](hardware_guide_en.md#10-waveshare-rp2350-pizero-onboard-dvi-output-experimental). Safe but non-functional if selected on a Pico 2/2 W build). `display =` is accepted as an alias. *Internal-flash-only key.* |
 | `spi_baudrate` | ILI9341: `26000000` / ST7796: `40000000` | LCD SPI baud rate (Hz). *Internal-flash-only key.* |
-| `scale` | ILI9341: `1.5` / ST7796: `2.0` | On-screen magnification. The default follows ST7796 sizing whenever the actual display width is 480px or more. |
+| `scale` | ILI9341: `1.5` / ST7796: `2.0` | On-screen magnification. The default follows ST7796 sizing whenever the actual display width is 480px or more. On DVI, a value that doesn't fit within 320 dots of width (e.g. `2.0`) is reduced at boot to the largest scale that fits (about 1.67) — see [Hardware Guide §10](hardware_guide_en.md#10-waveshare-rp2350-pizero-onboard-dvi-output-experimental). |
 | `lcd_height` | `32` | `32` = original PB-1000, `64` = extended mode (enables row-address bit\<2\>, allowing writes to pages 4-7 / rows 32-63). Falls back to `32` for any value other than 32/64. |
 | `x_offset` | auto (horizontal center) | X position of the LCD's left edge, in pixels. Auto-computed as `(display width - 192*scale) / 2` when omitted. |
 | `y_offset` | auto (vertical center) | Y position of the top of the LCD+FuncKeyBar group, in pixels. Auto-centers the whole group when omitted; smaller values move it up. |
@@ -114,10 +114,10 @@ Implementation: boot sequence in `mp/main.py`; defaults in `mp/config.py` `_DEFA
 | `step_timer_tick_steps` | `40000` | CPU steps per timer-tick unit. |
 | `timer_tick_ms` | `1000` | Real-time timer tick interval (ms). Set to `0` or below to disable this tick processing. |
 | `loop_idle_ms` | `0` | Main-loop idle wait (ms). |
-| `step_chunk` | `2048` | Inner chunk size (in steps) used within a CPU execution slice; also paces how often the PIO UART bridge is serviced. |
+| `step_chunk` | `2048` | Inner chunk size (in steps) used within a CPU execution slice; also paces how often the PIO UART bridge and the USB keyboard are serviced. |
 | `ram_autosave` | `true` | Enable/disable RAM Autosave itself (see `dev_guide_en.md`'s "RAM Autosave" section for details). |
 | `ram_autosave_log` | `false` | Print a line to the log every time a flush actually writes to flash. |
-| `ram_autosave_restore` | `prompt` | What to do at boot when a pending unsaved cache is found. `prompt` = ask on screen (EXE=yes, BRK=no, auto-yes after 10s), `yes` = always restore automatically, `no` = never restore. |
+| `ram_autosave_restore` | `prompt` | What to do at boot when a pending unsaved cache is found. `prompt` = ask on screen (Enter=yes, ESC=no, auto-yes after 10s), `yes` = always restore automatically, `no` = never restore. |
 
 Implementation: main-loop constant loading/usage in `mp/main.py`; `run_cpu_slice()` in
 `mp/main_runtime.py`; `mp/ram_autosave.py` (RAM Autosave itself).
@@ -243,10 +243,13 @@ Implementation: `mp/main.py`; `initialize_usb_host_and_pio()` in `mp/main_boot.p
 
 | Key | Default | Description |
 | --- | --- | --- |
-| `ssid` | (empty) | WiFi SSID. Leave empty to skip NTP sync entirely. |
+| `ssid` | (empty) | WiFi SSID. Leave empty to skip NTP sync entirely; PC Link then doesn't use WiFi either. |
 | `password` | (empty) | WiFi password. |
 
-Implementation: `mp/main.py` (only consulted when `[ntp] enable=true`); `mp/ntp_sync.py`.
+Used by NTP sync (when `[ntp] enable=true`) and by PC Link's WiFi connection (Pico 2 W only; see
+"F2: PC Link" in the [Usage Guide](usage_guide_en.md)).
+
+Implementation: `mp/main_entry.py`, `mp/ntp_sync.py` (NTP sync); `mp/pc_link.py` (PC Link).
 
 ---
 
@@ -322,7 +325,7 @@ exclusivity policy (see §14).
 | --- | --- | --- |
 | `show_profile_name` | `true` | Boot only. Show the profile name in the top-left |
 | `show_clock` | `false` | Runtime only. Show a clock at the top-right, reading PB-1000's own TIME$/DATE$ |
-| `show_mem_free` | `false` | Runtime only. Show the Pico 2's free heap (`gc.mem_free()`) at the top-center |
+| `show_mem_free` | `false` | Runtime only. Show the Pico 2's free heap (`gc.mem_free()`) at the top-center (on DVI output: second line at the top-right, below the clock) |
 | `show_log` | `false` | Boot only. Mirror the most recent REPL log line at the bottom of the screen |
 
 `show_clock`'s clock **reads TIME$/DATE$ directly from PB-1000's own system variable RAM**
@@ -341,7 +344,8 @@ Defaults to off because, unlike the one-time boot splash, `show_clock`/`show_mem
 part of the screen for the entire runtime session, and depending on layout
 (`scale`/`x_offset`/`y_offset`) may not fit cleanly in the margin above the bezel. Enabling both
 together on narrower displays (e.g. 320px wide) can visually overlap the top-right clock text
-with the top-center memory text — combining them is left to the user's judgment. Both
+with the top-center memory text — combining them is left to the user's judgment (on DVI output
+the memory text goes on the line below the clock, so they never overlap). Both
 temporarily disappear while the EMULATOR MENU occupies the whole screen, and repaint themselves
 automatically on the next once-per-second redraw after the menu closes.
 

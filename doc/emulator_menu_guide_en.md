@@ -15,13 +15,20 @@ how to open it, how to navigate it, and what each item does.
 | :--- | :--- |
 | **Win (GUI) + F7** | Open the EMULATOR MENU |
 | **Up / Down** | Move the cursor (only active inside this menu) |
-| **EXE** | Select / activate the highlighted item |
-| **BREAK** | Go back one screen (inside a sub-menu) / close the menu (at the top level) |
+| **Enter** | Select / activate the highlighted item |
+| **ESC** | Go back one screen (inside a sub-menu). **Disabled at the top level** (see below) -- select **Exit** to close the menu |
 
 While the menu is open, the PB-1000's own execution (CPU stepping) is paused. Closing the menu
 resumes whatever program was running from exactly where it left off. Changes take effect
 immediately; unless a section explicitly says it's written to `pb1000.ini`, the setting reverts
 to its default on the next boot.
+
+> [!NOTE]
+> ESC at the top level was **intentionally disabled on 2026-10-20**. ESC is bound to the real
+> PB-1000's BRK key, and CPU stepping resumes the instant the menu closes; if ESC/BRK was still
+> physically held down at that exact moment, it used to be forwarded into the running BASIC
+> program as a real BREAK (sub-menus are unaffected, since closing one never resumes CPU
+> stepping). Select **Exit** to close the top-level menu instead.
 
 ---
 
@@ -49,7 +56,7 @@ Each row shows a **badge** on the right (`ON` / `OFF` / `N/A`, or a current sett
 | :--- | :--- |
 | **Beep** | Mute/unmute the beep sound |
 
-Flips ON/OFF immediately on EXE; not saved to a config file. Kept because muting mid-session
+Flips ON/OFF immediately on Enter; not saved to a config file. Kept because muting mid-session
 without losing running state (which a reboot would cost) is a real need a boot-time setting
 can't cover.
 
@@ -74,7 +81,7 @@ at the same time. RS-232C (PIO UART, GP6/GP13) is unrelated and remains availabl
 | **FD Swap** | Switch the virtual floppy disk's image file |
 | **RAM Save** | Snapshot the current RAM contents and CPU state (PC/registers) to the SD card (`/sd/rams/`) |
 | **VRAM Save** | Save the current screen contents (LCD VRAM) to a file — same as the PrintScreen key |
-| **Full Capture** | Save the entire physical screen, including the bezel and function key bar, as a single image (PPM) |
+| **Full Capture** | Save the entire physical screen, including the bezel and function key bar, as a single image (PNG) |
 
 **RAM Save** opens a screen for picking the destination folder name (when saving a new one, you
 can type a name using letters, digits, and hyphens).
@@ -97,10 +104,10 @@ can type a name using letters, digits, and hyphens).
 | **LCD Height** | Toggle the LCD's vertical resolution between 32-dot and 64-dot |
 
 Selecting **Foreground Color** / **Background Color** opens a numeric entry screen (RGB332
-value, 0–255) followed by a color preview screen. Confirming with EXE saves the value to
+value, 0–255) followed by a color preview screen. Confirming with Enter saves the value to
 `pb1000.ini`, so it persists across reboots.
 
-**LCD Height** flips between 32-dot and 64-dot immediately on each EXE press (no sub-screen).
+**LCD Height** flips between 32-dot and 64-dot immediately on each Enter press (no sub-screen).
 Like the other toggle-style items, it is session-only and is NOT saved to `pb1000.ini` — it
 reverts to the `[display] lcd_height` setting on the next boot. Right after switching to
 64-dot mode, the newly-added rows (5-8) may still show whatever was previously sitting in VRAM
@@ -134,7 +141,7 @@ not a bug.
 
 > [!WARNING]
 > **NEW ALL erases all of the user's memory** (saved programs and data). A confirmation screen
-> (EXE: yes / BRK: no) is shown first — be careful not to trigger it by accident. This action
+> (Enter: yes / ESC: no) is shown first — be careful not to trigger it by accident. This action
 > cannot be undone.
 
 > [!WARNING]
@@ -146,17 +153,18 @@ not a bug.
 
 **Reset** runs immediately with no confirmation screen, and the EMULATOR MENU closes
 automatically afterward (matching the real hardware's NumLock key). **Reboot Emulator (MCU)**
-differs here — it goes through a confirmation screen (EXE: yes / BRK: no) first.
+differs here — it goes through a confirmation screen (Enter: yes / ESC: no) first.
 
-Inside the **Hook Status** / **CPU Status** screens, Up/Down scrolls the list; BREAK returns to
+Inside the **Hook Status** / **CPU Status** screens, Up/Down scrolls the list; ESC returns to
 the System sub-menu.
 
 ---
 
 ## 7. Troubleshooting
 
-- **Lost track of which menu level you're on?** Keep pressing BREAK — it always steps you back:
-  sub-menu → top-level menu → menu closed.
+- **Lost track of which menu level you're on?** Keep pressing ESC — it always steps you back to
+  the top-level menu (sub-menu → top-level menu). To close the top-level menu itself, select
+  **Exit** (ESC alone does nothing there as of 2026-10-20 — see the note in section 1).
 - **Accidentally ran NEW ALL or Reboot Emulator (MCU)?** These take effect immediately and can't
   be undone. Get in the habit of using **RAM Save** regularly to keep backups.
 

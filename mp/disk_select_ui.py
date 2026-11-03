@@ -80,7 +80,7 @@ def _draw_disk_ui(display, entries, cursor, scroll, current_name):
             _draw_text(display, 4, y, "  " + label, _COL_FG, _COL_BG)
         y += _ROW_H
 
-    _draw_text(display, 2, H - 10, "UP/DN:move  EXE:ok  BREAK:cancel", _COL_FOOTER)
+    _draw_text(display, 2, H - 10, "UP/DN:move  Enter:ok  ESC:cancel", _COL_FOOTER)
 
 
 # ---- main entry point --------------------------------------------------------
@@ -135,10 +135,10 @@ def select_disk_ui(display, images, current_path):
                     elif cursor < scroll:
                         scroll = 0
                     _draw_disk_ui(display, entries, cursor, scroll, current_name)
-                elif sc == 0x28:    # EXE — confirm
+                elif sc == 0x28:    # Enter — confirm
                     _, path = entries[cursor]
                     return path     # None = eject, str = new path
-                elif sc == 0x29:    # BREAK — cancel
+                elif sc == 0x29:    # ESC — cancel
                     return False
 
             hdmi_flush(display)

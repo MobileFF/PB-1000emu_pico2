@@ -159,6 +159,29 @@ it was built with is clear from the filename:
 > See `/home/flex/projects/micropython.pb1000/ports/rp2/bldfrm.sh` (this project's own dedicated
 > MicroPython checkout) for this project's actual (environment-specific) build script.
 
+### 5. Building the Waveshare RP2350-PiZero variant (experimental)
+
+A separate, dedicated board from the Pico 2 / Pico 2 W (onboard DVI output, no physical LCD).
+Pass `pizero` explicitly to the `bldfrm.sh` script above:
+
+```bash
+bash bldfrm.sh pizero
+```
+
+Plain `bash bldfrm.sh` (no argument) still builds only the Pico 2 W + Pico 2 pair as before --
+unaffected by this. Output: `firmware/firmware_pb1000_pizero.uf2`.
+
+For the variant with the USB keyboard on header pins GP22/GP23, pass `gp22` as a second argument
+(output: `firmware/firmware_pb1000_pizero_gp22.uf2`):
+
+```bash
+bash bldfrm.sh pizero gp22
+```
+
+See [Hardware Guide §10](hardware_guide_en.md#10-waveshare-rp2350-pizero-onboard-dvi-output-experimental)
+for details (required linker-script patches, how to connect, current status and known
+limitations).
+
 ## Flashing
 
 1.  **Enter BOOTSEL mode**: Hold the BOOTSEL button on your Pico 2 (W) while connecting it to your PC via USB.

@@ -129,6 +129,8 @@ def main():
     # Step 1: Display init (no CPU core required)
     display_ret = init_display_only()
 
+    gc.collect()
+
     # Step 2: Global config (needed for timeout, default_profile)
     global_cfg = load_config()
 
@@ -850,21 +852,6 @@ def main():
             ram_autosave = None
         gc.collect()
 
-    # TEMPORARY investigation diagnostic (2026-10-18, see mp/ram_autosave.py's
-    # VarAreaAutosave docstring): a real-hardware PEEK(&H6F51) in CAL mode
-    # came back 0 (CALC bit not set), contradicting references/sysvars.txt's
-    # MODE layout, so VarAreaAutosave's trigger never fires. This write-hook
-    # logs every write to MODE/&H6F52/&H6F53 (&H6F51-53) so the actual ROM
-    # behavior around CAL mode entry/exit can be observed directly, independent
-    # of whether [emulator] ram_autosave is even enabled. Not gated by
-    # ram_autosave_log on purpose -- this needs to work even with autosave off.
-    # Remove once the trigger condition is confirmed/fixed.
-    def _investigate_mode_area_write(addr, data, bank):
-        print("[investigate] MODE-area write addr=0x%04X data=0x%02X bank=%d"
-              % (addr, data, bank))
-    system.register_mem_write_hook(
-        0x6F51, _investigate_mode_area_write, 0x6F53, owner="investigate_mode_area")
-
     try:
         while True:
             service_pio_uart_bridge(system, cpu_core)
@@ -884,6 +871,11 @@ def main():
                 active_steps=system._active_step_count,
                 sleep_ms=sleep_poll_ms,
                 step_chunk=step_chunk,
+                # Service USB between step chunks too: each HID report is
+                # only re-armed from tuh_task(), so once-per-iteration
+                # servicing delays every key press/release by up to a
+                # whole slice plus the frame update.
+                extra_svc=usb_host.task,
             )
             usb_host.task()
 

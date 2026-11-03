@@ -53,6 +53,7 @@ Configuration priority (low → high): flash `/pb1000.ini` → `/sd/pb1000.ini` 
      If there are more profiles than fit on screen, it scrolls automatically.
    - After a 30-second timeout the `default_profile` value is selected automatically.
    - **F1**: opens the BIOS-style setup menu (see below).
+   - **F2**: enters PC Link mode, to work with the SD card's files from a PC (see below).
    - **F12**: after a confirmation prompt, exits to the MicroPython REPL without booting (see
      below).
    - Once a profile is confirmed, its name is saved as `default_profile` in `pb1000.ini`
@@ -71,9 +72,9 @@ running).
 
 1. **Pick a target file**: the internal flash's `/pb1000.ini`, the SD card's `/sd/pb1000.ini`
    (shown only if the SD card is mounted), or any RAM profile's `pb1000.ini`.
-2. **Edit keys**: Up/Down selects a row, EXE edits it (bool keys toggle ON/OFF with EXE; enum
-   keys cycle through choices with EXE or Left/Right; int/str keys open a numeric/text entry
-   screen via EXE). BS clears that key's setting (unset = falls back to the default).
+2. **Edit keys**: Up/Down selects a row, Enter edits it (bool keys toggle ON/OFF with Enter; enum
+   keys cycle through choices with Enter or Left/Right; int/str keys open a numeric/text entry
+   screen via Enter). BS clears that key's setting (unset = falls back to the default).
    - Only the more commonly-used keys are shown by default (toggle `Show ALL keys` to ON to see
      everything).
    - Flash-only keys — such as everything under `[hdmi]` (see [config_guide_en.md](config_guide_en.md)
@@ -84,6 +85,68 @@ running).
    the new configuration from scratch.
 4. **Discard & Back**: discards any changes and returns to the profile selection screen (a
    confirmation prompt appears if there are unsaved changes).
+
+### F2: PC Link (Work With SD Card Files From a PC)
+
+Pressing **F2** on the profile selection screen enters PC Link mode. With the SD card still in
+the device, a PC-side GUI tool can then:
+
+- **Disk images** (`.img` in `/sd/disks`, `/sd` and each profile folder): open one directly in
+  the MD-100 Disk Image Utility and write it back to the device when that window is closed; also
+  download, upload and delete.
+- **Screenshots** (`/sd/screenshots`): PNG preview, download several at once, delete.
+- **RAM profiles** (`/sd/rams/<profile>`): download, upload (as a new profile, or replacing an
+  existing one) and delete whole profile folders.
+
+**How to use it**
+
+1. Press **F2** at the device's profile selection screen. The screen shows "PC LINK".
+2. Connect the PC to the device's REPL serial port (the USB-C port on the default build; on
+   `USE_PIO_USB=OFF` builds, a USB-serial adapter on UART0, which is slower). A Pico 2 W can
+   also connect over WiFi (see below).
+3. On the PC, start **Device Files (PC Link)** from `tools/launcher.py` (or run
+   `tools/device_files_gui.py` directly), pick the port and press **Connect**.
+4. Press **Finish** when done. The device returns to the profile selection screen, with any
+   added or removed profiles reflected in the list. Pressing **ESC** on the device also returns.
+
+The PC side needs pyserial (`pip install pyserial`). It can also be used from the command line,
+e.g. `python tools/pc_link.py ls /sd/rams` (see `python tools/pc_link.py -h`).
+
+Before connecting, close any other program using the same serial port (an `mpremote connect ...
+run main.py` still running, a serial terminal, etc.). On Linux several programs can open the same
+port at once, and the device's replies then get split between them, so the link cannot work
+(Connect reports which programs are holding the port in that case).
+
+**Connecting over WiFi (Pico 2 W only)**
+
+On a Pico 2 W with `[wifi] ssid` and `password` set in `pb1000.ini` (the same settings NTP sync
+uses; see the [Config Guide](config_guide_en.md)), entering the PC Link screen also joins WiFi, so
+the PC can connect without a USB cable (the serial port keeps working at the same time).
+
+1. The PC Link screen shows the progress, e.g. `WiFi: connecting to <SSID>... 5s`, and once
+   connected two lines: `WiFi: 192.168.x.x:8100` and `PIN: 1234`. Connecting can take from a few
+   seconds to over ten (getting an IP address may take a while right after power-on); if it has
+   not connected after 45 seconds, `WiFi: could not connect (...)` is shown.
+2. In Device Files, type the IP address shown on the screen (e.g. `192.168.1.125`) into the
+   **Port / WiFi** box, press **Connect**, then enter the **PIN** (4 digits) from the screen.
+3. Addresses that connected successfully are remembered and listed next time as e.g.
+   `WiFi: 192.168.1.125` (the 5 most recent, saved in `~/.pb1000_device_files.json`).
+
+- The PIN changes every time F2 is pressed, and a wrong PIN is refused. One PC can be connected at
+  a time.
+- The `WiFi: pb1000.local` entry connects by the device's name (mDNS). Some PC environments cannot
+  resolve that name (e.g. the Linux environment on ChromeOS); "cannot resolve pb1000.local" is then
+  shown before the PIN is asked for. Type the IP address instead.
+- From the command line: `python tools/pc_link.py --port 192.168.1.125 --pin 1234 ls /sd/rams`
+  (without `--pin` you are prompted for it). pyserial is not needed for WiFi-only use.
+- Leaving the PC Link screen (Finish / ESC) also disconnects WiFi.
+- The PIN only restricts who can connect; the traffic is not encrypted. Use it on a network you
+  trust.
+
+This mode is only available before the emulator starts (before any ROM/RAM loading or CPU
+startup), so it can never change a disk image or RAM profile while the emulator is using it.
+Uploads replace the original file only after the whole file has arrived intact, so a failed
+upload leaves the original untouched.
 
 ### F12: Exit to REPL (Development/Recovery)
 
@@ -405,12 +468,14 @@ program has changed `TIME$` directly. It redraws once per second, in the margin 
 ## 13. Always-On Memory Usage Display (Optional)
 
 While the emulator is running, the Pico 2's free heap can be shown continuously at the
-**top-center** of the screen. Enable it with `[overlay] show_mem_free = true` in `pb1000.ini`
+**top-center** of the screen (on DVI output: the second line at the top-right, just below the
+always-on clock). Enable it with `[overlay] show_mem_free = true` in `pb1000.ini`
 (off by default). See [config_guide_en.md](config_guide_en.md) §15 for details.
 
 Same mechanism as the always-on clock above (runtime-only, redraws once per second), but a
 separate feature with a different position and content. No `gc.collect()` is called before
 reading the value, so it shows the actual free-memory pressure/fragmentation happening in real
 time. On narrower screens, enabling this together with the always-on clock can put the top-right
-and top-center text close together or overlapping. Not shown when `[hdmi] enable = true`, per
+and top-center text close together or overlapping (on DVI output it uses a separate line from
+the clock, so the two never overlap). Not shown when `[hdmi] enable = true`, per
 §11's exclusivity policy.

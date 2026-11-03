@@ -59,13 +59,21 @@
 #include "host/hcd.h"
 #include "host/usbh.h"
 
-/* TinyUSB reserves rhport 0 for this project's native USB controller
- * (kept available for a future USB-device/CDC-REPL use, once this is
- * proven working); pio_usb's single root port is addressed as rhport 1
- * here (tuh_init(1) at the call site, usb_host_core.c), matching
- * pio_usb's own upstream convention (its example glue uses the same
- * offset). This project only ever uses rhport 1 for pio_usb. */
+/* Must match usb_host_core.c's PB1000_PIO_USB_RHPORT exactly (that file's
+ * own header comment has the full rationale). 2026-10-30 changed pizero
+ * from 0 to 1 to match MSX_emu_pico2's own rhport number; 2026-10-31
+ * REVERTED back to 0 for pizero after that change correlated with the
+ * board's native USB CDC never enumerating post-reflash -- see
+ * usb_host_core.c's own comment and
+ * 調査用/RP2350-PiZero_実機認識しない問題調査.md. Pico 2 (W)'s UNIFIED
+ * TinyUSB build still uses rhport 1 (rhport 0 is the native USB
+ * controller/CDC REPL there, matching pio_usb's own upstream example
+ * convention) -- unaffected by this revert. */
+#ifdef PB1000_BOARD_PIZERO
+#define PIO_USB_RHPORT 0
+#else
 #define PIO_USB_RHPORT 1
+#endif
 #define PIO_USB_ROOT_IDX(rhport) ((rhport) - PIO_USB_RHPORT)
 
 static pio_usb_configuration_t pio_host_cfg = PIO_USB_DEFAULT_CONFIG;

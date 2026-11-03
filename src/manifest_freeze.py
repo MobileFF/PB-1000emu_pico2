@@ -69,6 +69,7 @@ freeze(
         "pb1000.py",
         "pb1000_fdd.py",
         "pb1000_state_io.py",
+        "pc_link.py",
         "pio_uart.py",
         "png_writer.py",
         "ram_autosave.py",

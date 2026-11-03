@@ -59,9 +59,9 @@ SD/プロファイルiniの影響を受けない仕組みですが、`[hdmi]` �
 
 | キー | デフォルト | 説明 |
 | --- | --- | --- |
-| `driver` | `ILI9341` | `ILI9341`（320×240）または `ST7796`（480×320、MSP4021等）。`display =` も同じ意味のエイリアスとして受け付ける。※内蔵フラッシュ限定キー |
+| `driver` | `ILI9341` | `ILI9341`（320×240）、`ST7796`（480×320、MSP4021等）、または`DVI`（Waveshare RP2350-PiZero専用、オンボードDVI出力、物理LCDなし — [Hardware Guide §10](hardware_guide.md#10-waveshare-rp2350-pizeroオンボードdvi出力実験的)参照。Pico 2/2W向けビルドで選択しても安全だが機能しない）。`display =` も同じ意味のエイリアスとして受け付ける。※内蔵フラッシュ限定キー |
 | `spi_baudrate` | ILI9341: `26000000` / ST7796: `40000000` | LCD SPI のボーレート（Hz）。※内蔵フラッシュ限定キー |
-| `scale` | ILI9341: `1.5` / ST7796: `2.0` | エミュレータ画面の拡大倍率（物理ディスプレイ幅が480px以上ならST7796扱いのデフォルトになる） |
+| `scale` | ILI9341: `1.5` / ST7796: `2.0` | エミュレータ画面の拡大倍率（物理ディスプレイ幅が480px以上ならST7796扱いのデフォルトになる）。DVI では320ドット幅に収まらない値（`2.0` 等）は起動時に収まる最大の倍率（約1.67）へ自動縮小される — [Hardware Guide §10](hardware_guide.md#10-waveshare-rp2350-pizeroオンボードdvi出力実験的)参照 |
 | `lcd_height` | `32` | `32`＝PB-1000オリジナル、`64`＝拡張モード（rowアドレスBit\<2\>を有効化し pages 4-7／行32-63に書き込み可能にする）。32/64以外を指定した場合は32にフォールバック |
 | `x_offset` | 自動（水平センタリング） | LCD左端のX座標（ピクセル）。省略時は `(表示幅 - 192*scale) / 2` で自動計算 |
 | `y_offset` | 自動（垂直センタリング） | LCD＋シートキーバー全体の上端Y座標（ピクセル）。省略時はグループ全体を垂直センタリング。値を小さくするほど上寄りになる |
@@ -110,10 +110,10 @@ RGB332形式（8ビット）: ビット7-5=R(3bit)、ビット4-2=G(3bit)、ビ�
 | `step_timer_tick_steps` | `40000` | タイマーティック換算ステップ数 |
 | `timer_tick_ms` | `1000` | リアルタイムタイマーティックの間隔（ms）。`0`以下でこのティック処理自体を無効化 |
 | `loop_idle_ms` | `0` | メインループのアイドル待機（ms） |
-| `step_chunk` | `2048` | CPU実行スライスの内部チャンクサイズ（ステップ数）。PIO UARTブリッジのサービス頻度にも使われる |
+| `step_chunk` | `2048` | CPU実行スライスの内部チャンクサイズ（ステップ数）。PIO UARTブリッジとUSBキーボードのサービス頻度にも使われる |
 | `ram_autosave` | `true` | RAMオートセーブ機能そのものの有効/無効（詳細は`dev_guide.md`「RAMオートセーブ」節） |
 | `ram_autosave_log` | `false` | フラッシュへの書き込みが発生するごとにログ出力するか |
-| `ram_autosave_restore` | `prompt` | 起動時に未保存キャッシュが見つかった場合の動作。`prompt`=画面で確認（EXE=はい、BRK=いいえ、10秒で自動的にはい）、`yes`=常に自動で復元、`no`=常に復元しない |
+| `ram_autosave_restore` | `prompt` | 起動時に未保存キャッシュが見つかった場合の動作。`prompt`=画面で確認（Enter=はい、ESC=いいえ、10秒で自動的にはい）、`yes`=常に自動で復元、`no`=常に復元しない |
 
 実装: `mp/main.py`（メインループ定数の読み込み・使用箇所）、`mp/main_runtime.py`（`run_cpu_slice`）、
 `mp/ram_autosave.py`（RAMオートセーブ本体）。
@@ -236,10 +236,13 @@ st7796.y_offset = -4
 
 | キー | デフォルト | 説明 |
 | --- | --- | --- |
-| `ssid` | （空） | WiFiのSSID。空欄の場合はNTP同期をスキップする |
+| `ssid` | （空） | WiFiのSSID。空欄の場合はNTP同期をスキップし、PC Link も WiFi を使わない |
 | `password` | （空） | WiFiのパスワード |
 
-実装: `mp/main.py`（`[ntp] enable=true` の場合のみ参照）、`mp/ntp_sync.py`。
+NTP 同期（`[ntp] enable=true` の場合）と、PC Link の WiFi 接続（Pico 2 W のみ。
+[Usage Guide](usage_guide.md) の「F2: PC Link」参照）で使う。
+
+実装: `mp/main_entry.py`・`mp/ntp_sync.py`（NTP 同期）、`mp/pc_link.py`（PC Link）。
 
 ---
 
@@ -314,7 +317,7 @@ enable=true`）は物理LCDとHDMIの排他方針により、これらのオー�
 | --- | --- | --- |
 | `show_profile_name` | `true` | 起動中のみ。左上にプロファイル名を表示するか |
 | `show_clock` | `false` | 実行中のみ。右上にPB-1000本体のTIME$/DATE$を直読みした時計を表示するか |
-| `show_mem_free` | `false` | 実行中のみ。画面中央上部に Pico 2 のヒープ空き容量（`gc.mem_free()`）を常時表示するか |
+| `show_mem_free` | `false` | 実行中のみ。画面中央上部（DVI出力時は右上の2行目、時計の下）に Pico 2 のヒープ空き容量（`gc.mem_free()`）を常時表示するか |
 | `show_log` | `false` | 起動中のみ。画面最下部に直近の REPL ログ1行をミラー表示するか |
 
 `show_clock`の時計は**PB-1000本体のシステム変数RAM上のTIME$/DATE$の値そのもの**
@@ -333,7 +336,8 @@ NTP同期が終わる前の時刻を見せても、WiFi接続＋NTP応答待ち�
 続けるため、レイアウト（`scale`・`x_offset`・`y_offset`）によってはベゼル上端の余白と
 重なる可能性があるためです。`show_clock`/`show_mem_free` を狭い画面（320px幅など）で同時に
 有効にした場合、右上の時計表示と中央上部のメモリ表示が視覚的に重なる可能性があります
-（組み合わせはユーザーの判断に委ねています）。EMULATOR MENU表示中など画面全体を使う操作の
+（組み合わせはユーザーの判断に委ねています。DVI出力時はメモリ表示を時計の下の行に置くため
+重なりません）。EMULATOR MENU表示中など画面全体を使う操作の
 後は、次の1秒ごとの再描画タイミングで自動的に復帰します。
 
 最下部のログ行表示（起動中のみ・設定キーはなし・常時ON）は `os.dupterm()` 経由でREPL出力を

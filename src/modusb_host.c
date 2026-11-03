@@ -145,6 +145,19 @@ static mp_obj_t mod_usb_host_debug4(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(mod_usb_host_debug4_obj, mod_usb_host_debug4);
 
+// Python API: usb_host.debug5() -> fdebug
+// Raw FDEBUG register of whichever PIO block services PIO-USB (pio1 on
+// pizero, pio0 elsewhere) -- see usb_host_core.c's
+// usb_host_core_debug_pio_fdebug() comment. TXSTALL = (fdebug>>24)&0xF,
+// TXOVER = (fdebug>>16)&0xF, RXUNDER=(fdebug>>12)&0xF, RXSTALL=fdebug&0xF
+// -- one bit per state machine, sticky (write-1-to-clear).
+static mp_obj_t mod_usb_host_debug5(void) {
+  uint32_t fdebug;
+  usb_host_core_debug_pio_fdebug(&fdebug);
+  return mp_obj_new_int_from_uint(fdebug);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(mod_usb_host_debug5_obj, mod_usb_host_debug5);
+
 
 static const mp_rom_map_elem_t usb_host_module_globals_table[] = {
     {MP_ROM_QSTR(MP_QSTR___name__), MP_ROM_QSTR(MP_QSTR_usb_host)},
@@ -158,6 +171,7 @@ static const mp_rom_map_elem_t usb_host_module_globals_table[] = {
     {MP_ROM_QSTR(MP_QSTR_debug2), MP_ROM_PTR(&mod_usb_host_debug2_obj)},
     {MP_ROM_QSTR(MP_QSTR_debug3), MP_ROM_PTR(&mod_usb_host_debug3_obj)},
     {MP_ROM_QSTR(MP_QSTR_debug4), MP_ROM_PTR(&mod_usb_host_debug4_obj)},
+    {MP_ROM_QSTR(MP_QSTR_debug5), MP_ROM_PTR(&mod_usb_host_debug5_obj)},
 };
 static MP_DEFINE_CONST_DICT(usb_host_module_globals,
                             usb_host_module_globals_table);

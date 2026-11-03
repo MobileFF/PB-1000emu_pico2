@@ -107,6 +107,13 @@ def create_system(display_ret, profile_dir=None, config=None):
     dh = getattr(display_obj, "height", 240)
     default_scale = 2.0 if dw >= 480 else 1.5
     scale = float(disp_cfg.get("scale", str(default_scale)))
+    if getattr(display_obj, "is_dvi", False) and int(192 * scale) > dw:
+        # DVI: the PB-1000 screen is composited into a fixed 320-wide
+        # canvas, so a wider scale (e.g. 2.0 = 384px) would be cut off at
+        # the right edge. Use the widest scale that fits instead (5/3 for
+        # 320, i.e. the full width).
+        scale = dw / 192
+        print(f"DVI: scale reduced to {scale:.3f} to fit {dw}px")
     lcd_height = int(disp_cfg.get("lcd_height", "32"))
     if lcd_height not in (32, 64):
         lcd_height = 32
@@ -222,11 +229,18 @@ def initialize_usb_host_and_pio(system, *, enable_usb_kbd, pio_uart_baudrate=960
         return
 
     try:
+        import sys
         from pio_uart import PioUart
+        # pio1 (SM 4-7) is PIO-USB's on the RP2350-PiZero (pio0 is DVI), so
+        # the soft UART uses pio2 (SM 8-11) there instead.
+        if "PiZero" in sys.implementation._machine:
+            sm_tx, sm_rx = 8, 9
+        else:
+            sm_tx, sm_rx = 6, 7
         pio_uart = PioUart(tx_pin=pio_uart_tx_pin, rx_pin=pio_uart_rx_pin,
-                            baudrate=pio_uart_baudrate, sm_tx=6, sm_rx=7)
+                            baudrate=pio_uart_baudrate, sm_tx=sm_tx, sm_rx=sm_rx)
         system.pio_uart = pio_uart
-        print(f"PIO UART (GP{pio_uart_tx_pin}/GP{pio_uart_rx_pin}) initialized on SM 6/7 @ {pio_uart_baudrate}bps.")
+        print(f"PIO UART (GP{pio_uart_tx_pin}/GP{pio_uart_rx_pin}) initialized on SM {sm_tx}/{sm_rx} @ {pio_uart_baudrate}bps.")
         import gc
         print(f"[MEM] after PIO init: free={gc.mem_free()} alloc={gc.mem_alloc()}")
     except Exception as e:

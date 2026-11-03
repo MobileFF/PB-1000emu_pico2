@@ -288,8 +288,18 @@ class SDCard:
                     self.readinto(mv[offset : offset + 512])
                     offset += 512
                     nblocks -= 1
-                if self.cmd(12, 0, 0xFF, skip1=True) != 0:
+                if self.cmd(12, 0, 0xFF, release=False, skip1=True) != 0:
+                    self.cs(1)
                     raise OSError(5)  # EIO
+                # CMD12's response is R1b: the card holds MISO low while
+                # busy. Release it only once that clears, or the next
+                # command can fail with EIO.
+                for _ in range(50000):
+                    self.spi.readinto(self.tokenbuf, 0xFF)
+                    if self.tokenbuf[0] != 0x00:
+                        break
+                self.cs(1)
+                self.spi.write(b"\xff")
         finally:
             self.spi.init(baudrate=self.restore_baudrate, polarity=0, phase=0)
 

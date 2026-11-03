@@ -7,6 +7,191 @@ date heading instead of a version number or "Unreleased" marker.
 
 ---
 
+## 2026-11-03
+
+### Added
+
+- **Waveshare RP2350-PiZero support (experimental)**: a new build that shows the PB-1000 screen
+  on the board's onboard DVI output (HDMI connector), with no physical LCD or touch panel.
+  Build with `bash bldfrm.sh pizero`; the output is `firmware/firmware_pb1000_pizero.uf2` (the
+  no-argument Pico 2 W / Pico 2 build is unchanged). See
+  [Hardware Guide §10](doc/hardware_guide_en.md#10-waveshare-rp2350-pizero-onboard-dvi-output-experimental)
+  for details.
+  - Display: 320×240 output as 640×480 (60Hz) at 2×. The LCD area is read from LCD VRAM per
+    scanline; the boot-time profile picker, the Win+F7 emulator menu, the F1 setup menu, the
+    FunKeyBar, the bezel, the status bar and the clock/memory overlays are drawn on a 320×240
+    layer on top of it (up to 16 colors at once).
+  - Selected with `[display] driver=DVI` in `pb1000.ini`. Added a config template,
+    `mp/pb1000_pizero.ini`.
+  - A `[display] scale` that does not fit the 320-pixel width (such as `2.0`) is reduced at boot
+    to the largest one that fits (320/192 ≈ 1.67).
+  - The memory overlay is shown on the line below the clock, so the two don't overlap at the top
+    right (Pico 2 / Pico 2 W keep it at the top center).
+  - The USB keyboard goes on the board's USB-PIO connector (PIO-USB, GP28/GP29). The REPL is on
+    USB-C (CDC) or UART0 (GP0/GP1).
+  - For an external USB-A connector on the 40-pin header, there is also
+    `firmware/firmware_pb1000_pizero_gp22.uf2` (`bash bldfrm.sh pizero gp22`), which puts
+    PIO-USB on GP22/GP23. Added the test script `mp/test/pio_usb_gp22_test.py` to check the
+    wiring.
+  - The onboard microSD (SPI1: SCK=GP30, MOSI=GP31, MISO=GP40, CS=GP43) is mounted at `/sd`.
+  - RS-232C (PIO UART) uses pio2 (state machines 8/9); pio0 is DVI and pio1 is PIO-USB.
+  - DVI output keeps running during flash writes (saving the RAM profile, etc.).
+  - The board has no WiFi, so the clock cannot be set over NTP.
+  - New files: `src/dvi_display.c/.h`, `src/moddvi_display.c`, `src/libdvi/` (from PicoDVI,
+    BSD-3-Clause; see `src/libdvi/PROVENANCE.md`) and `src/boards/WAVESHARE_RP2350_PIZERO/`.
+  - For checking: `dvi_display.timing_info()`, `dvi_display.pio_debug_info()`,
+    `usb_host.debug5()`, and the test scripts `mp/test/test_dvi_display.py` (color bars),
+    `test_dvi_init_trace.py`, `test_dvi_lcd_vram.py` and `test_dvi_pio_fdebug_colorbar.py`.
+- **The PIO-USB D+ pin can be set at build time** (`PB1000_PIO_USB_DP_PIN` in
+  `src/usb_host_core.c`; D- is the next pin). The default is still GP4; the pizero target uses
+  GP28.
+
+### Improved
+
+- **USB keyboard response** (`mp/main_entry.py`): the USB keyboard used to be serviced only once
+  per main-loop iteration, so when an iteration (CPU execution plus screen update) took long,
+  key presses and releases reached the emulator late. It is now also serviced after every
+  `step_chunk` (default 2048 steps) of CPU execution. Applies to all boards.
+
+### Fixed
+
+- **End of SD card multi-block reads** (`mp/sdcard.py`): after the stop command (CMD12), wait
+  for the card to finish before sending the next command.
+
+### Changed
+
+- Removed the REPL log of writes to the MODE area (&H6F51–53) (`[investigate]`,
+  `mp/main_entry.py`).
+
+### Other
+
+- Updated every firmware file in `firmware/` (`firmware_pb1000_pico2w.uf2`,
+  `firmware_pb1000_pico2.uf2`, `firmware_pb1000_pico2w_native_usb.uf2`,
+  `firmware_pb1000_pico2_native_usb.uf2`, `firmware_pb1000_pizero.uf2`), and added
+  `firmware_pb1000_pizero_gp22.uf2`.
+
+---
+
+## 2026-10-27
+
+### Added
+
+- **PC Link: a Pico 2 W can also connect over WiFi**: with `[wifi] ssid` set in `pb1000.ini`,
+  entering the PC Link screen joins WiFi, and the PC connects to the IP address shown on the
+  screen (port 8100) with the 4-digit PIN shown there. The serial port keeps working at the same
+  time.
+  - Device side (`mp/pc_link.py`): shows the connection progress (seconds elapsed, retry count)
+    and retries automatically when an attempt fails (up to 45 seconds). The PIN changes on every
+    F2 and connections with a wrong PIN are refused. One PC at a time. Leaving the PC Link screen
+    also disconnects WiFi.
+  - PC side: type the IP address into the **Port / WiFi** box of `tools/device_files_gui.py` and
+    connect (entering the PIN). Addresses that connected are remembered and listed next time
+    (`~/.pb1000_device_files.json`). The list also offers the device's mDNS name `pb1000.local`;
+    where that name cannot be resolved, this is reported before the PIN is asked for.
+    `tools/pc_link.py` connects over WiFi with `--port <IP address> --pin <PIN>`.
+  - The traffic is not encrypted (the PIN only restricts who can connect).
+  - See "F2: PC Link" in the [Usage Guide](doc/usage_guide_en.md).
+
+### Fixed
+
+- **The PC Link screen could stop reacting to ESC and stop updating** (`mp/pc_link.py`): when the
+  control characters `mpremote` and similar tools send to the serial port on disconnect
+  (`\r\x02`) were left over, the device kept waiting for the rest of the PC's next request
+  line, and ESC and screen updates (such as the WiFi connection progress) stalled meanwhile.
+  The serial port is now read without blocking on a whole line.
+
+### Other
+
+- Updated `firmware/firmware_pb1000_pico2w.uf2` and `firmware/firmware_pb1000_pico2.uf2` (they
+  now include the `mp/*.py` changes since 2026-10-25, frozen). If you previously put any of
+  these files on the device with `mpremote cp` (`pc_link.py`, `boot_session.py`,
+  `setup_menu.py`, `emulator_menu.py`), remove them with `mpremote rm`: a file on the flash
+  takes priority over the frozen version.
+
+---
+
+## 2026-10-25
+
+### Added
+
+- **PC Link: work with the SD card's files from a PC GUI tool, without removing the card**:
+  pressing **F2** at the boot-time profile selection screen enters PC Link mode, which exchanges
+  files with the PC over the REPL serial port (USB-C on the default build).
+  - Device side: `mp/pc_link.py` (new, added to the freeze list). F2 added to the profile picker
+    (`mp/boot_session.py`), which re-scans the profile list when PC Link returns.
+  - PC side: `tools/device_files_gui.py` (new, added to `tools/launcher.py` as "Device Files (PC
+    Link)"): edit a disk image directly in the MD-100 Disk Image Utility and write it back,
+    preview and download screenshots, and download/upload/delete RAM profiles. The transport is
+    `tools/pc_link.py` (new, also usable from the command line). Needs pyserial on the PC.
+  - Only available before the emulator starts, so files in use are never changed. Uploads
+    replace the original file only after checking the CRC.
+  - The link cannot work while another program (e.g. a still-running `mpremote ... run main.py`)
+    has the same serial port open; on Linux, Connect detects this and lists the programs holding
+    the port.
+  - See "F2: PC Link" in the [Usage Guide](doc/usage_guide_en.md).
+
+### Improved
+
+- **The emulator menu (Win+F7) no longer blanks the whole screen before redrawing**
+  (`mp/emulator_menu.py`): every cursor move used to fill the entire screen with black and then
+  redraw every item, so the screen visibly flashed on each keypress.
+  - A cursor move now repaints only the two rows that lose and gain the highlight (about a tenth
+    of the screen).
+  - Full redraws (after running an item, when opening a submenu) no longer clear first either: the
+    header, each row, the empty body area and the message line are painted over in place with
+    their own background colors. The resulting screen is identical to before.
+  - The HDMI mirror output likewise sends only the changed parts (the receiver already draws on
+    top of its existing content, so it needs no change).
+  - The disk selector and the menu's own settings screens still clear the screen before
+    redrawing, as before.
+- **The boot-time profile picker no longer blanks the whole screen on every Up/Down keypress**
+  (`mp/boot_session.py`): same approach as the emulator menu above. A cursor move repaints only
+  the two affected rows; a full redraw (when the list scrolls, or after returning from the F1
+  setup menu / F2 PC Link) paints over the previous content in place without clearing first.
+- **The F1 setup menu no longer blanks the whole screen on every operation**
+  (`mp/setup_menu.py`): same approach. Cursor moves in the key list repaint only two rows;
+  scrolling, changing a value and switching screens paint over in place without clearing first.
+  The text/number entry screens repaint only the input line on each keystroke, and the
+  confirmation and "Saved" screens are drawn without clearing first too.
+
+---
+
+## 2026-10-20
+
+### Fixed
+
+- **Disabled ESC as a way to close the top-level Emulator Menu (Win+F7)**
+  (`mp/emulator_menu.py`): ESC is bound to the real PB-1000's BRK key, and
+  CPU stepping resumes the instant the menu closes; if ESC/BRK was still
+  physically held down at that exact moment -- which naturally happens when
+  using it to close the menu -- it used to be forwarded into the running
+  BASIC program as a real BREAK. ESC is now a no-op at the top level; only
+  selecting **Exit** closes the menu. Submenus (Toggles/Storage/Display/
+  System) are unaffected -- ESC still backs out one level there, since that
+  never resumes CPU stepping.
+- **Fixed the on-screen key-guide labels "EXE"/"BRK" to say "Enter"/"ESC"**
+  (`mp/emulator_menu.py`, `mp/emulator_menu_debug.py`,
+  `mp/emulator_menu_display_actions.py`, `mp/emulator_menu_system_actions.py`,
+  `mp/emulator_menu_ram.py`, `mp/disk_select_ui.py`, `mp/boot_session.py`,
+  `mp/setup_menu.py`): these screens read the USB HID keyboard's Enter key
+  (scancode 0x28) and Esc key (0x29) directly, independent of the real
+  PB-1000's own EXE/BRK key semantics. Updated the labels to match the key
+  you actually need to press.
+
+### Documentation
+
+- Updated `doc/emulator_menu_guide.md`/`doc/emulator_menu_guide_en.md` to
+  match the two fixes above: the key-guide table (EXE/BRK -> Enter/ESC), an
+  explanation of why ESC is disabled at the top level, and the
+  "Troubleshooting" section's steps (close via Exit, not ESC). Also fixed a
+  stale "PPM" reference in its Full Capture description to `PNG` (this guide
+  had been missed when `doc/usage_guide.md` got the same fix on 2026-10-19).
+- Fixed the same kind of stale "EXE"/"BRK" wording still present in
+  `doc/usage_guide.md`/`_en.md`, `doc/dev_guide.md`/`_en.md`, and
+  `doc/config_guide.md`/`_en.md`.
+
+---
+
 ## 2026-10-19
 
 ### Fixed

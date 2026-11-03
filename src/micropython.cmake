@@ -24,6 +24,33 @@ set(MICROPY_BLUETOOTH_BTSTACK OFF)
 set(MICROPY_PY_BLUETOOTH_CYW43 OFF)
 # ------------------------------------------------------------------------
 
+# ------------------------------------------------------------------------
+# Board switch — Waveshare RP2350-PiZero (onboard DVI, no physical SPI
+# LCD) vs. the default Pico 2 / Pico 2 W (SPI LCD). 2026-10-21, Phase 1 of
+# the RP2350-PiZero port (see doc/hardware_guide.md and dvi_display.c).
+#
+# ${MICROPY_BOARD} is already defined by the time MicroPython's own
+# ports/rp2/CMakeLists.txt includes this file (via USER_C_MODULES) -- see
+# the sibling MSX_emu_pico2 project's own identical check (its
+# micropython_msx.cmake), which this is ported from, for the exact same
+# reasoning (a plain `BOARD` CMake variable does NOT exist in this scope
+# and would silently never match).
+# ------------------------------------------------------------------------
+set(PB1000_IS_PIZERO OFF)
+if(MICROPY_BOARD STREQUAL "WAVESHARE_RP2350_PIZERO")
+    set(PB1000_IS_PIZERO ON)
+    # PB1000_BOARD_PIZERO / PICO_PIO_USE_GPIO_BASE are NOT defined here via
+    # add_compile_definitions() -- MicroPython's QSTR-extraction pre-pass
+    # does not see definitions added from this file (it runs too early in
+    # rp2/CMakeLists.txt, before USER_C_MODULES is included) and silently
+    # fails to pick up new MP_QSTR_* names guarded by them. bldfrm.sh's
+    # pizero target passes both via CFLAGS_EXTRA instead, which reaches
+    # every compilation unit including that pass (see its own comment,
+    # and the sibling MSX_emu_pico2 project's bldfrm_msx.sh, which hit
+    # this as a real build failure first on 2026-09-22).
+endif()
+# ------------------------------------------------------------------------
+
 add_compile_options(-Wno-error -Wno-error=implicit-function-declaration)
 add_compile_definitions(CFG_TUH_HID_EP_BUFSIZE=64)
 
@@ -43,21 +70,58 @@ option(USE_PIO_USB "Use PIO-USB (GP4/GP5) instead of the native USB host control
 # USB host: CFG_TUH_ENABLED=1 must be global so MicroPython's build pulls
 # in TinyUSB host utility symbols (tu_edpt_*, tusb_time_delay_ms_api)
 # needed by usbh.c.
-add_compile_definitions(CFG_TUH_ENABLED=1)
-add_compile_definitions(CFG_TUSB_RHPORT1_MODE=0x0101)
+#
+# 2026-10-23 EXCEPT on the Waveshare RP2350-PiZero (PB1000_IS_PIZERO):
+# real-hardware bring-up found that this exact global declaration,
+# combined with CFG_TUSB_RHPORT0_MODE=OPT_MODE_DEVICE below (i.e. a
+# genuine unified dual-rhport DEVICE+HOST TinyUSB config reaching
+# MicroPython's own main-firmware CDC build, not just usb_host_core_lib),
+# hangs this board completely before any UART/USB output -- reproduced
+# with tuh_init() itself never even called (USB_HOST_SKIP_INIT=ON), DVI
+# excluded (PB1000_PIZERO_SKIP_DVI=ON), and mp/*.py freezing excluded,
+# which isolates this global RHPORT0=DEVICE + RHPORT1=HOST combination
+# itself -- not any runtime USB/DVI/freeze code -- as the cause. Pico 2
+# (W)'s own PIO-USB build keeps this exact same global config unchanged
+# (real-hardware confirmed working there; not touched by this fix).
+#
+# Fix (pizero only): don't declare any of CFG_TUH_ENABLED/
+# CFG_TUSB_RHPORT0_MODE/CFG_TUSB_RHPORT1_MODE at this global scope at
+# all. The main firmware's own CDC build then falls back to TinyUSB's
+# stock default (RHPORT0=OPT_MODE_DEVICE, the only rhport it knows
+# about -- tusb_option.h only applies that default when NEITHER
+# RHPORT0_MODE nor RHPORT1_MODE is defined). The PIO-USB host instead
+# gets its own fully SEPARATE, isolated TinyUSB build, scoped PRIVATE to
+# usb_host_core_lib via usb_host/tusb_config.h (-include'd there only --
+# see that header's own CFG_TUSB_RHPORT0_MODE=(OPT_MODE_HOST|...)
+# fallback, which now actually takes effect for this board since nothing
+# global pre-empts it; usb_host_core.c's PB1000_PIO_USB_RHPORT comment
+# has the matching rhport-numbering half of this fix). This exactly
+# matches the sibling MSX_emu_pico2 project's own architecture for this
+# same board/chip (two separately-compiled TinyUSB instances that never
+# share one CFG_TUSB_RHPORTx_MODE pair), confirmed working on real
+# hardware there.
+if(NOT PB1000_IS_PIZERO)
+    add_compile_definitions(CFG_TUH_ENABLED=1)
+    add_compile_definitions(CFG_TUSB_RHPORT1_MODE=0x0101)
+endif()
 
 if(USE_PIO_USB)
-    # The USB keyboard host moved to PIO-USB (GP4/GP5, rhport1, see
-    # USE_PIO_USB below) -- rhport0's native controller is free, so the
-    # native USB-C port can run in device mode (CDC REPL) instead of
-    # being left idle. CFG_TUSB_RHPORT0_MODE must be explicit: TinyUSB's
-    # own tusb_option.h only defaults it to OPT_MODE_DEVICE when NEITHER
-    # RHPORT0_MODE nor RHPORT1_MODE is defined, and this file already
-    # defines RHPORT1_MODE above, so without this rhport0 would get no
-    # mode at all and CDC would silently never come up (confirmed on
-    # real hardware: flashed fine, enumerated as PIO-USB host correctly,
-    # but USB-C CDC never appeared, not even at the OS USB-device level).
-    add_compile_definitions(CFG_TUSB_RHPORT0_MODE=OPT_MODE_DEVICE)
+    if(NOT PB1000_IS_PIZERO)
+        # The USB keyboard host moved to PIO-USB (GP4/GP5, rhport1, see
+        # USE_PIO_USB below) -- rhport0's native controller is free, so the
+        # native USB-C port can run in device mode (CDC REPL) instead of
+        # being left idle. CFG_TUSB_RHPORT0_MODE must be explicit: TinyUSB's
+        # own tusb_option.h only defaults it to OPT_MODE_DEVICE when NEITHER
+        # RHPORT0_MODE nor RHPORT1_MODE is defined, and this file already
+        # defines RHPORT1_MODE above, so without this rhport0 would get no
+        # mode at all and CDC would silently never come up (confirmed on
+        # real hardware: flashed fine, enumerated as PIO-USB host correctly,
+        # but USB-C CDC never appeared, not even at the OS USB-device level).
+        #
+        # Deliberately NOT applied for pizero -- see this block's own
+        # 2026-10-23 comment above the CFG_TUH_ENABLED line.
+        add_compile_definitions(CFG_TUSB_RHPORT0_MODE=OPT_MODE_DEVICE)
+    endif()
 else()
     # Native-host build (default): USB-C port is the keyboard host itself
     # (rhport0), so device mode must stay off.
@@ -90,11 +154,105 @@ target_sources(hd61700_lib INTERFACE
     ${CMAKE_CURRENT_LIST_DIR}/modlcd_controller.c
     ${CMAKE_CURRENT_LIST_DIR}/modusb_host.c
     ${CMAKE_CURRENT_LIST_DIR}/moddotds64.c
+    # dvi_display.c/moddvi_display.c are always compiled (every board),
+    # but reduce to a tiny no-op stub (dvi_display.c's #else branch)
+    # unless PB1000_BOARD_PIZERO is actually defined -- kept unconditional
+    # here, rather than only adding these sources inside the
+    # PB1000_IS_PIZERO block below, so `import dvi_display` never raises
+    # ImportError regardless of board (simpler mp/ code: no per-board
+    # hasattr/try-import branching needed just to probe which board this
+    # firmware was built for).
+    ${CMAKE_CURRENT_LIST_DIR}/dvi_display.c
+    ${CMAKE_CURRENT_LIST_DIR}/moddvi_display.c
 )
 
 target_include_directories(hd61700_lib INTERFACE
     ${CMAKE_CURRENT_LIST_DIR}
 )
+
+# ============================================================
+# 1b) Onboard DVI (Waveshare RP2350-PiZero only) -- vendored libdvi (see
+#     src/libdvi/PROVENANCE.md). Not part of hd61700_lib's unconditional
+#     source list above since a Pico 2 / Pico 2 W build must never try to
+#     compile PIO/DVI code for hardware it doesn't have.
+# ============================================================
+# 2026-10-21 DIAGNOSTIC ONLY: lets a one-off build test whether this
+# board's total real-hardware silence (no UART, no USB, even with USB
+# host init skipped) is caused by the DVI/core1/SCRATCH_X-Y-shrink
+# machinery below, by excluding it entirely while still targeting the
+# same WAVESHARE_RP2350_PIZERO board. Not wired into bldfrm.sh -- pass
+# -DPB1000_PIZERO_SKIP_DVI=ON by hand for this one test. Remove once the
+# real cause is found; this is not meant to be a permanent build knob.
+option(PB1000_PIZERO_SKIP_DVI "Diagnostic: exclude libdvi/dvi_display's core1 launch on the pizero board" OFF)
+
+if(PB1000_IS_PIZERO AND NOT PB1000_PIZERO_SKIP_DVI)
+    target_sources(hd61700_lib INTERFACE
+        ${CMAKE_CURRENT_LIST_DIR}/libdvi/dvi.c
+        ${CMAKE_CURRENT_LIST_DIR}/libdvi/dvi_serialiser.c
+        ${CMAKE_CURRENT_LIST_DIR}/libdvi/dvi_timing.c
+        ${CMAKE_CURRENT_LIST_DIR}/libdvi/tmds_encode.c
+        ${CMAKE_CURRENT_LIST_DIR}/libdvi/tmds_encode.S
+    )
+    target_include_directories(hd61700_lib INTERFACE
+        ${CMAKE_CURRENT_LIST_DIR}/libdvi
+    )
+
+    # 2026-10-23: real-hardware finding -- dvi.c's own dvi_init() mallocs
+    # DVI_N_TMDS_BUFFERS TMDS buffers (default 3, ~3840B each) from the
+    # separate pico_malloc/newlib heap, NOT MicroPython's own GC heap (see
+    # .claude/rules/micropython-module.md's note on usb_host_core.c using
+    # that same separate heap via tu_malloc). On this board's MicroPython-
+    # custom linker script (memmap_mp_rp2350.ld, already SCRATCH_X/Y-
+    # patched for this port -- see doc/hardware_guide.md), that heap turns
+    # out to be too small/nonexistent to satisfy even one such malloc():
+    # confirmed on real hardware as panic("TMDS buffer allocation
+    # failed") (visible only over the UART0 REPL -- panic()'s interrupt-
+    # disabling halt loop stops the native USB CDC connection dead,
+    # mirroring the unrelated USB-isolation bug found earlier this same
+    # day, but with a different root cause). dvi_config_defs.h's own
+    # comment documents DVI_N_TMDS_BUFFERS=0 as the intended escape hatch
+    # ("you can set this to 0 if you want to allocate your own, e.g. if
+    # you want static buffers") -- used here, scoped to dvi.c's own
+    # compile unit only (dvi_display.c's `#define DVI_N_TMDS_BUFFERS 8`
+    # is a separate translation unit and never actually reached dvi.c in
+    # the first place; that mismatch is moot now that dvi.c mallocs
+    # nothing). dvi_display.c supplies its own statically-allocated
+    # (BSS, not malloc) buffer pool and pushes it onto dvi0.q_tmds_free
+    # itself, right after dvi_init() returns -- see its own comment.
+    set_source_files_properties(
+        ${CMAKE_CURRENT_LIST_DIR}/libdvi/dvi.c
+        PROPERTIES COMPILE_DEFINITIONS "DVI_N_TMDS_BUFFERS=0"
+    )
+
+    # (DVI_USE_SIO_TMDS_ENCODER is left at the library's own default (1,
+    # SIO encoder) -- byte-for-byte matches the sibling MSX_emu_pico2
+    # project's own confirmed-working pizero_dvi_cfg/encoder choice. A
+    # 2026-10-24 bisection briefly suspected this register, and separately
+    # suspected SCRATCH_X placement of the hot loop, but real-hardware
+    # testing ruled both out -- the actual root cause was a completely
+    # different, non-DVI-specific bug: bldfrm.sh's MICROPY_C_HEAP_SIZE
+    # fix below. See 調査用/RP2350-PiZero_実機認識しない問題調査.md for
+    # the full trail.)
+
+    # dvi_serialiser.c needs dvi_serialiser.pio.h -- vendored as a plain
+    # pre-generated file (pioasm output), not produced at build time via
+    # pico_generate_pio_header(), for the same QSTR-extraction-pre-pass
+    # timing reason noted above for PB1000_BOARD_PIZERO/
+    # PICO_PIO_USE_GPIO_BASE -- see src/libdvi/dvi_serialiser.pio.h's own
+    # header comment ("autogenerated by pioasm... do not edit") and
+    # src/libdvi/PROVENANCE.md.
+
+    # libdvi's own dependencies beyond what hd61700_lib/usermod already
+    # link elsewhere in this file.
+    target_link_libraries(usermod INTERFACE
+        hardware_pio
+        hardware_interp
+        hardware_pwm
+        hardware_vreg
+        pico_multicore
+        pico_util
+    )
+endif()
 
 # debugging aid: normally we want the real initialization, but
 # for earlier testing we added a compile-time define.  make it
@@ -207,6 +365,18 @@ target_include_directories(usb_host_core_lib PRIVATE
     # Allow usb_host_core.c to use MicroPython headers (mp_printf etc.)
     # CMAKE_SOURCE_DIR is ports/rp2/ in the MicroPython build, so ../../ = micropython root
     ${CMAKE_SOURCE_DIR}/../..
+    # 2026-10-21: MICROPY_BOARD_DIR is the one path MicroPython's own
+    # ports/rp2/CMakeLists.txt guarantees points at wherever mpconfigboard.h
+    # actually lives, for EVERY board -- both in-tree (defaults to
+    # ${CMAKE_SOURCE_DIR}/boards/${MICROPY_BOARD}, same as the next line
+    # below) and external, via an explicit -DMICROPY_BOARD_DIR= override
+    # (e.g. this project's own WAVESHARE_RP2350_PIZERO board, which lives
+    # under src/boards/ instead -- see bldfrm.sh's pizero target). Added
+    # after a real build failure on that board ("mpconfigboard.h: No such
+    # file or directory" from ports/rp2/mpconfigport.h, since none of the
+    # ${CMAKE_SOURCE_DIR}/boards/... guesses below can ever resolve an
+    # external board dir). Listed first so it takes priority.
+    ${MICROPY_BOARD_DIR}
     # explicit path from this module into the micropython repo
     # (hd61700/src/../../micropython/ports/rp2/boards/<board>)
     #${CMAKE_CURRENT_LIST_DIR}/../../pico/micropython/ports/rp2/boards/${BOARD}

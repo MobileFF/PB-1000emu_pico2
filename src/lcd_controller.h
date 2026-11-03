@@ -195,6 +195,36 @@ void lcd_wait_for_idle(lcd_state_t *lcd);
 void lcd_init_hdmi_output(lcd_state_t *lcd, uint8_t cs_pin, uint32_t baudrate);
 void lcd_render_to_hdmi(lcd_state_t *lcd);
 
+/* Waveshare RP2350-PiZero onboard DVI (Phase 2a, 2026-10-23) -- see
+ * dvi_display.c's dvi_scanline_pump(). Renders ONE destination row
+ * (dst_y, 0..dst_h-1) of a dst_w x dst_h output canvas into out_row
+ * (dst_w RGB565 pixels), scaling this project's native LCD_WIDTH x
+ * (active_pages*8) picture up via the SAME isotropic fractional-scale
+ * (scale_num/scale_den) nearest-neighbor algorithm lcd_render_to_display()
+ * uses for the physical SPI panel -- but entirely independent of that
+ * function's own scale/offset config (pb1000.ini's [display] scale),
+ * since a DVI monitor's canvas size has nothing to do with any physical
+ * panel's. The scaled picture is centered within dst_w x dst_h; border_color
+ * fills whatever's outside it (a DVI monitor has no panel tint to match, so
+ * the caller picks whatever border looks right -- typically plain black,
+ * not color_off/color_lcd_off, which are the LCD panel's own tinted
+ * "pixel off"/"display off" colors).
+ *
+ * No persistent DVI framebuffer: reads lcd->vram/color_vram directly, live,
+ * each call -- same "no persistent framebuffer" approach the sibling
+ * MSX_emu_pico2 project's own disp_dvi.c uses for its VDP framebuffer (see
+ * src/libdvi/PROVENANCE.md). Safe to call from core1 interrupt context:
+ * read-only, no allocation, bounded time (O(dst_w)). Not synchronized
+ * against core0 concurrently writing lcd->vram/color_vram (e.g. a VDP
+ * write landing mid-row) -- each pixel is one independent, atomic byte
+ * read, so the only possible real-world effect is a half-updated frame
+ * flickering by for 1/60s, never a torn/corrupt individual pixel or a
+ * crash; accepted as a reasonable Phase 2a tradeoff rather than adding
+ * double-buffering purely for this. */
+void lcd_render_row_rgb565(const lcd_state_t *lcd, int dst_y, int dst_w,
+                            int dst_h, uint8_t scale_num, uint8_t scale_den,
+                            uint16_t border_color, uint16_t *out_row);
+
 /* Send an arbitrary caller-supplied RGB332 buffer (1 byte/pixel, row-major,
  * width*height bytes) to the HDMI bridge, bypassing the emulated VRAM/
  * _pixel_color() path lcd_render_to_hdmi() uses. For non-emulated-screen

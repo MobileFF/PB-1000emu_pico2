@@ -84,11 +84,13 @@ class HDMIMirrorDisplay:
 
     def flush_if_dirty(self):
         """Send the accumulated command stream to the HDMI bridge if
-        anything changed since the last flush, then reset it — each menu
-        redraw starts with a full-screen fill_rect() (see
-        emulator_menu.py's _draw_menu() etc.), so every flush represents
-        one complete, self-contained frame, matching the game screen's own
-        PKT_FRAME semantics (full frame each time, not a diff). Call this
+        anything changed since the last flush, then reset it. A flush is not
+        necessarily a complete frame: since 2026-10-25 emulator_menu.py's
+        cursor moves send only the two changed rows. That works because the
+        receiver draws these commands on top of its persistent framebuffer
+        and only clears the window when its size/position changes (see
+        render_text_cmds() in ../../hdmi_bridge_receiver/main.c); the first
+        flush of a menu session is still a full-screen _draw_menu(). Call this
         right before any polling-loop sleep in emulator_menu.py, matching
         where the physical LCD would otherwise already show the latest
         redraw."""

@@ -144,6 +144,14 @@ class LCDControllerC:
             #     print("[LCD_OFF] skip redraw: display_on=0 dirty=0")
             return
 
+        # DVI (display_init.py's _DviDisplay): dvi_display reads VRAM live,
+        # so a refresh only (re)places the screen and uncovers it.
+        set_lcd_window = getattr(self.display, "set_lcd_window", None)
+        if set_lcd_window is not None:
+            set_lcd_window(x_offset, y_offset, self._scale_num, self._scale_den)
+            lcd_c.clear_dirty()
+            return
+
         # Synchronize offsets to C module if we have hardware control
         if self.display and self._hw_params:
             if (x_offset, y_offset, self._pixel_size) != self._current_cfg:
@@ -190,13 +198,20 @@ class LCDControllerC:
         #print("end of render_display(). lcd_c.clear_dirty() called")
 
     def set_display_scale(self, scale):
-        """Set display scale. Supported: 1.0 and 1.5."""
+        """Set display scale. Supported: integers, 1.5, and on DVI also
+        other small fractions (e.g. 5/3, see main_boot.create_system())."""
         if scale == 1.5:
             self._scale_num = 3
             self._scale_den = 2
         else:
             self._scale_num = int(scale)
             self._scale_den = 1
+            for den in (2, 3, 4):
+                num = int(scale * den + 0.5)
+                if int(scale) != scale and abs(num / den - scale) < 0.001:
+                    self._scale_num = num
+                    self._scale_den = den
+                    break
         
         # Sync to integer scale if possible to avoid redundant setup_display calls
         if int(scale) == scale:

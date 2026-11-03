@@ -12,11 +12,33 @@
 #include "hardware/spi.h"
 #endif
 
-/* Static LCD state */
+#ifdef PB1000_BOARD_PIZERO
+/* Called from dvi_display.c's dvi_scanline_pump() (core1 DMA IRQ,
+ * __not_in_flash_func) -- see that file's header comment and
+ * lcd_controller.c's matching note on lcd_render_row_rgb565(): any flash-
+ * resident code reached from that IRQ contends with core0's own
+ * concurrent XIP fetches. */
+#include "pico.h"
+#endif
+
+/* Static LCD state.
+ *
+ * 2026-10-25, tried and refuted during the RP2350-PiZero DVI "No Signal"
+ * investigation: this struct was briefly forced to a 64KB-aligned SRAM
+ * bank of its own (hypothesizing CPU/DMA bank contention with dvi_display.
+ * c's dvi_static_tmds_bufs as the cause), but "No Signal" still occurred
+ * after that change -- the real cause was unrelated (a per-pixel
+ * _pixel_color() call eating the scanline callback's time budget, fixed
+ * in lcd_render_row_rgb565() -- see 調査用/
+ * RP2350-PiZero_実機認識しない問題調査.md). Reverted to a plain static. */
 static lcd_state_t lcd_state;
 
 /* Public accessor for C-to-C direct integration */
+#ifdef PB1000_BOARD_PIZERO
+lcd_state_t *__not_in_flash_func(lcd_c_get_state)(void) { return &lcd_state; }
+#else
 lcd_state_t *lcd_c_get_state(void) { return &lcd_state; }
+#endif
 
 /* ====== Module functions exposed to Python ====== */
 

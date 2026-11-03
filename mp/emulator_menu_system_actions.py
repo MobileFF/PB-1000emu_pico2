@@ -42,7 +42,7 @@ def _number_input(display, title, current=0, min_v=0, max_v=255):
     def _redraw():
         display.fill_rect(0, 0, W, H, _BG)
         _draw_text(display, 4,  4, title, _HDR)
-        _draw_text(display, 4, 16, "0-9  BS:del  EXE:ok  BRK:cancel", _FTR)
+        _draw_text(display, 4, 16, "0-9  BS:del  Enter:ok  ESC:cancel", _FTR)
         _draw_text(display, 4, H // 2 - 4, "".join(buf) + "_", _FG)
 
     _redraw()
@@ -57,13 +57,13 @@ def _number_input(display, title, current=0, min_v=0, max_v=255):
             elif sc == 0x2A and buf:        # Backspace
                 buf.pop()
                 _redraw()
-            elif sc == 0x28 and buf:        # EXE
+            elif sc == 0x28 and buf:        # Enter
                 val = int("".join(buf))
                 if min_v <= val <= max_v:
                     return val
                 display.fill_rect(0, H // 2 - 6, W, 20, _BG)
                 _draw_text(display, 4, H // 2 - 4, "!! %s only" % range_hint, _WARN)
-            elif sc == 0x29:                # BRK
+            elif sc == 0x29:                # ESC
                 return None
         hdmi_flush(display)
         time.sleep_ms(30)

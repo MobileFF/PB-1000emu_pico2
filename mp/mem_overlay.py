@@ -1,6 +1,7 @@
 """
 Live free-heap-memory overlay, shown at the top-center of the physical LCD
-while the emulator is actually running -- same lifecycle/family as
+(on DVI: at the right end of the second line, just below
+clock_overlay.py's top-right clock) while the emulator is actually running -- same lifecycle/family as
 clock_overlay.py (runtime-only, distinct from boot_status.py's boot-time
 overlay; see that module's docstring for why boot-time and runtime each
 get their own separate overlay rather than one that spans both).
@@ -12,7 +13,8 @@ steady-state free heap during normal operation, not an artificially
 cleaned-up number).
 
 Drawn in the blank margin above the bezel (same region clock_overlay.py
-uses on the right; this uses top-center), which update_display()/
+uses on the right; this uses top-center, or one line below the clock on
+DVI), which update_display()/
 force_full_redraw() never touch, so it survives normal frame updates
 without needing to redraw on every one. Like clock_overlay.py, it does NOT
 survive the EMULATOR MENU (which paints over the whole screen while open)
@@ -40,6 +42,9 @@ _FG = 0x07E0  # matches boot_status.py/clock_overlay.py's convention
 
 _REDRAW_INTERVAL_MS = 1000
 
+# DVI only: second text line (clock_overlay.py's clock occupies y=4..13).
+_Y_DVI = 16
+
 
 class MemOverlay:
     def __init__(self, display):
@@ -65,7 +70,14 @@ class MemOverlay:
             # them -- garbled, smeared-looking text.
             text = "FREE:%6d" % free
             W = self._display.width
-            x = max(0, (W - len(text) * 8) // 2)
-            _draw_text(self._display, x, 4, text, _FG, _BG)
+            if getattr(self._display, "is_dvi", False):
+                # DVI's 320-wide canvas leaves no room beside the clock:
+                # second line, right-aligned with the clock's 4px margin.
+                x = max(0, W - len(text) * 8 - 4)
+                y = _Y_DVI
+            else:
+                x = max(0, (W - len(text) * 8) // 2)
+                y = 4
+            _draw_text(self._display, x, y, text, _FG, _BG)
         except Exception:
             pass

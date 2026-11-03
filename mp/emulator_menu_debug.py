@@ -24,7 +24,7 @@ def _do_hook_status(system, display):
     """Read-only diagnostic screen listing every registered call_hook and
     mem_write_hook: address, owning module ("owner" passed to
     register_call_hook()/register_mem_write_hook()), and current enabled state.
-    Scroll with UP/DOWN, BRK to close."""
+    Scroll with UP/DOWN, ESC to close."""
     import hd61700
 
     call_hooks = system.list_call_hooks() if hasattr(system, 'list_call_hooks') else []
@@ -58,7 +58,7 @@ def _do_hook_status(system, display):
     def _redraw():
         display.fill_rect(0, 0, W, H, _BG)
         _draw_text(display, 4, 4, "==  HOOK STATUS  ==", _HDR)
-        _draw_text(display, 4, 14, "UP/DOWN:scroll  BRK:close", _FTR)
+        _draw_text(display, 4, 14, "UP/DOWN:scroll  ESC:close", _FTR)
         y = _HDR_H
         vis_end = min(len(lines), scroll + max_vis)
         for i in range(scroll, vis_end):
@@ -73,7 +73,7 @@ def _do_hook_status(system, display):
         sc = hd61700.get_last_key()
         if sc != prev_sc:
             prev_sc = sc
-            if sc == 0x29:  # BRK — close
+            if sc == 0x29:  # ESC — close
                 break
             elif sc == 0x52 and scroll > 0:               # UP
                 scroll -= 1
@@ -97,7 +97,7 @@ def _do_cpu_status(system, display):
     (Ctrl-C doesn't reliably interrupt hd61700.execute()). Also prints
     everything to the REPL (prefixed [CPU_STATUS]) in case a log capture is
     running, since screen space is limited even with scrolling. Scroll with
-    UP/DOWN, BRK to close.
+    UP/DOWN, ESC to close.
 
     2026-08-13: originally also included a disassembly section (debug.py's
     decode_basic()), dropped because importing debug.py on a long-running,
@@ -201,7 +201,7 @@ def _do_cpu_status(system, display):
     def _redraw():
         display.fill_rect(0, 0, W, H, _BG)
         _draw_text(display, 4, 4, "==  CPU STATUS  ==", _HDR)
-        _draw_text(display, 4, 14, "UP/DOWN:scroll  BRK:close", _FTR)
+        _draw_text(display, 4, 14, "UP/DOWN:scroll  ESC:close", _FTR)
         y = _HDR_H
         vis_end = min(len(lines), scroll + max_vis)
         for i in range(scroll, vis_end):
@@ -216,7 +216,7 @@ def _do_cpu_status(system, display):
         sc = hd61700.get_last_key()
         if sc != prev_sc:
             prev_sc = sc
-            if sc == 0x29:  # BRK — close
+            if sc == 0x29:  # ESC — close
                 break
             elif sc == 0x52 and scroll > 0:               # UP
                 scroll -= 1

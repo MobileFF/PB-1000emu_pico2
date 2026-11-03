@@ -22,6 +22,7 @@ This project emulates the Casio PB-1000 pocket computer, which is equipped with 
 - **Color Display Support**: Enables color display while maintaining compatibility with the PB-1000.
 - **Up to 104KB RAM**: Banks 2/3 of Page 1 (0x8000–0xFFFF) can be equipped with RAM, enabling up to 104KB of usable RAM.
 - **HDMI Mirror Output**: Optionally connect a second Pico 2 (RP2350) as an HSTX-based receiver to mirror the physical LCD output over HDMI. See the [Hardware Guide](doc/hardware_guide_en.md).
+- **Waveshare RP2350-PiZero support (experimental)**: a build that runs on the board's onboard DVI output alone, with no physical LCD (`firmware_pb1000_pizero.uf2`; `firmware_pb1000_pizero_gp22.uf2` takes the USB keyboard from the 40-pin header). See [Hardware Guide §10](doc/hardware_guide_en.md#10-waveshare-rp2350-pizero-onboard-dvi-output-experimental).
 - **Emulator Menu**: A settings/state UI opened via the F7 key or the on-screen function-key bar (RAM save, disk swap, hook status, and more).
 
 ## Quick Start

@@ -8,6 +8,7 @@
 
 #ifdef PB1000_USE_PIO_USB
 #include "hardware/timer.h"
+#include "hardware/pio.h"
 #include "pio_usb.h"
 #include "pio_usb_ll.h"
 #endif
@@ -149,14 +150,113 @@ static void pio_usb_sof_alarm_handler(uint alarm_num) {
   hardware_alarm_set_target(alarm_num, delayed_by_us(get_absolute_time(), 1000));
 }
 
-/* PIO-USB host init (GP4/GP5) — see src/usb_host/pio_usb/PROVENANCE.md
- * and src/usb_host/hcd_pio_usb_pb1000.c's header comment for the full
+/* PIO-USB host init (GP4/GP5 by default) — see
+ * src/usb_host/pio_usb/PROVENANCE.md and
+ * src/usb_host/hcd_pio_usb_pb1000.c's header comment for the full
  * rationale and the facts this relies on. Built only when USE_PIO_USB
  * is ON (src/micropython.cmake); the native-controller path below is
- * used otherwise and is unchanged. */
+ * used otherwise and is unchanged.
+ *
+ * PB1000_PIO_USB_DP_PIN: 2026-10-21, added for the Waveshare RP2350-
+ * PiZero port (doc/hardware_guide.md). That board's USB-host port is
+ * wired to GP28/29 (D-=D+ +1, same convention), not GP4/GP5 -- its
+ * native/Type-C USB controller is permanently a different port used for
+ * BOOTSEL/programming and (with USE_PIO_USB=ON) CDC REPL, and cannot be
+ * repurposed as a keyboard host (confirmed against the vendor schematic
+ * by the sibling MSX_emu_pico2 project's own identical board). Defaults
+ * to 4 (GP4) for every other board, unchanged from before this macro
+ * existed. bldfrm.sh's pizero target passes -DPB1000_PIO_USB_DP_PIN=28
+ * via CFLAGS_EXTRA (same QSTR-extraction-pre-pass reasoning as
+ * PB1000_BOARD_PIZERO -- see micropython.cmake's PB1000_IS_PIZERO
+ * block). */
+#ifndef PB1000_PIO_USB_DP_PIN
+#define PB1000_PIO_USB_DP_PIN 4
+#endif
+
+/* 2026-10-23: which TinyUSB rhport number the PIO-USB host lives on.
+ *
+ * Pico 2 (W): rhport 1, as before -- this board's main firmware uses a
+ * single, UNIFIED TinyUSB build (micropython.cmake sets
+ * CFG_TUSB_RHPORT0_MODE=DEVICE + CFG_TUSB_RHPORT1_MODE=HOST globally,
+ * reaching MicroPython's own CDC/device code too), real-hardware
+ * confirmed working.
+ *
+ * Waveshare RP2350-PiZero: rhport 0. Real-hardware bring-up found that
+ * the SAME unified dual-rhport (DEVICE+HOST) global declaration hangs
+ * this board completely before any UART/USB output -- reproduced with
+ * tuh_init() itself never even called (USB_HOST_SKIP_INIT), DVI
+ * excluded, and mp/*.py freezing excluded, isolating the global
+ * RHPORT0=DEVICE + RHPORT1=HOST combination itself (not any runtime
+ * call) as the cause. Fix: for this board only, micropython.cmake no
+ * longer declares CFG_TUSB_RHPORT0_MODE/CFG_TUSB_RHPORT1_MODE/
+ * CFG_TUH_ENABLED at the global scope at all -- the main firmware's own
+ * CDC build falls back to TinyUSB's stock default (RHPORT0=DEVICE, the
+ * only rhport it knows about), and the PIO-USB host gets its own fully
+ * SEPARATE, isolated TinyUSB build instead, scoped PRIVATE to
+ * usb_host_core_lib via usb_host/tusb_config.h (-include'd there only --
+ * see that header's CFG_TUSB_RHPORT0_MODE=(OPT_MODE_HOST|...) fallback,
+ * which now actually takes effect for this board since nothing global
+ * pre-empts it).
+ *
+ * 2026-10-30: rhport value changed from 0 to 1 to EXACTLY match the
+ * sibling MSX_emu_pico2 project's own pizero usb_host_core.c (confirmed
+ * working on real hardware there, including the just-completed decisive
+ * test of flashing MSX's own firmware onto this exact board/keyboard --
+ * see 調査用/RP2350-PiZero_実機認識しない問題調査.md). The previous
+ * 2026-10-23 comment's reasoning ("isolated host build is the only
+ * TinyUSB-host code in that compile unit, so it uses rhport 0") was this
+ * project's own assumption, not something MSX's working implementation
+ * actually relies on: MSX's own private usb_host/tusb_config.h (same
+ * isolated-library pattern) ALSO only defines CFG_TUSB_RHPORT0_MODE
+ * (never CFG_TUSB_RHPORT1_MODE) and yet calls tuh_configure(1, ...)/
+ * tuh_init(1) successfully on real hardware -- proof that TinyUSB's
+ * host core doesn't require a RHPORTx_MODE macro matching the specific
+ * rhport number passed to a virtual (non-native-silicon) HCD like
+ * pio_usb, as long as CFG_TUH_ENABLED=1. The actual 2026-10-23 fix that
+ * mattered was removing the GLOBAL-scope CFG_TUH_ENABLED/RHPORTx_MODE
+ * declarations that leaked into MicroPython's own main-firmware CDC
+ * build (see micropython.cmake's PB1000_IS_PIZERO comment) -- MSX's own
+ * micropython_msx.cmake never declared those globally for ANY board in
+ * the first place, so it never needed this board-specific rhport-number
+ * workaround at all. Aligning the number itself to 1 removes one more
+ * difference from the proven-working reference while keeping the
+ * isolation fix (no global TinyUSB macros) intact.
+ *
+ * 2026-10-31: REVERTED back to 0 for pizero. The 2026-10-30 change above
+ * (0->1) turned out to correlate with this board's native USB CDC (the
+ * REPL/BOOTSEL port) never enumerating at all after a clean rebuild+
+ * reflash -- no ttyACM device, no dmesg USB activity whatsoever, even
+ * though usb_host_core_init()/tuh_init() are only ever reached from
+ * Python's explicit usb_host.init() call (never automatically at boot),
+ * so this is suspicious on its face but was the only change in this
+ * investigation window and reverting it is the cheapest way to test
+ * whether it's responsible. See
+ * 調査用/RP2350-PiZero_実機認識しない問題調査.md for the real-hardware
+ * test this is part of -- NOT yet confirmed as the actual root cause,
+ * just the first thing being ruled in/out after the regression was
+ * noticed. */
+#ifdef PB1000_BOARD_PIZERO
+#define PB1000_PIO_USB_RHPORT 0
+#else
+#define PB1000_PIO_USB_RHPORT 1
+#endif
+
 static void usb_host_core_init_pio_usb(void) {
   pio_usb_configuration_t pio_cfg = PIO_USB_DEFAULT_CONFIG;
-  pio_cfg.pin_dp = 4;      /* GP4; D- = +1 = GP5 */
+  pio_cfg.pin_dp = PB1000_PIO_USB_DP_PIN;  /* D- = +1, same convention regardless of board */
+#ifdef PB1000_BOARD_PIZERO
+  /* pio1, not pio0: this board's onboard DVI output (dvi_display.c's
+     pizero_dvi_cfg) occupies pio0. A PIO block's IRQ flags and
+     instruction memory are shared across all 4 of its state machines,
+     not per-SM, so running PIO-USB on pio0 alongside DVI would risk a
+     real conflict the same way Pico 2's own pio0/pio1 split below
+     avoids one with mp/pio_uart.py, which uses pio2 on this board
+     instead (see mp/main_boot.py). */
+  pio_cfg.pio_tx_num = 1;
+  pio_cfg.sm_tx = 0;
+  pio_cfg.pio_rx_num = 1;
+  pio_cfg.sm_rx = 1;
+#else
   /* pio0, not pio1: mp/pio_uart.py's RS-232C soft-UART uses pio1 (SM6/7).
      A PIO block's IRQ flags and instruction memory are shared across all
      4 of its state machines, not per-SM, so running PIO-USB on pio1
@@ -171,19 +271,25 @@ static void usb_host_core_init_pio_usb(void) {
   pio_cfg.sm_tx = 0;
   pio_cfg.pio_rx_num = 0;
   pio_cfg.sm_rx = 1;
+#endif
   pio_cfg.sm_eop = 2;
   pio_cfg.tx_ch = 15;      /* Highest DMA channel (RP2350 has 0-15),
                             * claimed via dma_claim_mask() inside
                             * pio_usb.c — picked defensively far from
                             * whatever channel number any future DMA
-                            * user in this project claims first. */
+                            * user in this project claims first. Ruled
+                            * out as the TXSTALL cause (2026-10-29):
+                            * switching to channel 2 reproduced the
+                            * identical permanent TXSTALL, so the DMA
+                            * channel number itself isn't the problem --
+                            * see 調査用/RP2350-PiZero_実機認識しない問題調査.md. */
   pio_cfg.skip_alarm_pool = true;  /* mandatory -- see this function's header comment */
 
-  if (!tuh_configure(1, TUH_CFGID_RPI_PIO_USB_CONFIGURATION, &pio_cfg)) {
+  if (!tuh_configure(PB1000_PIO_USB_RHPORT, TUH_CFGID_RPI_PIO_USB_CONFIGURATION, &pio_cfg)) {
     DEBUG_PRINTF("[USB Host] ERROR: tuh_configure (PIO-USB) failed!\n");
     return;
   }
-  if (!tuh_init(1)) {
+  if (!tuh_init(PB1000_PIO_USB_RHPORT)) {
     DEBUG_PRINTF("[USB Host] ERROR: tuh_init failed!\n");
     return;
   }
@@ -247,6 +353,28 @@ void usb_host_core_debug_pio_usb_history(uint32_t *count, uint32_t *out,
                                           uint32_t out_len) {
   hcd_pio_usb_pb1000_get_event_history(count, out, out_len);
 }
+
+/* TEMPORARY DIAGNOSTIC (2026-10-28, USB keyboard not enumerating over
+ * PIO-USB investigation -- see
+ * 調査用/RP2350-PiZero_実機認識しない問題調査.md) -- same technique that
+ * already confirmed a genuine hardware-level PIO TX FIFO underrun for
+ * the unrelated DVI "No Signal" issue (dvi_display_pio_debug_info()):
+ * read the PIO block's own FDEBUG register directly (TXSTALL/TXOVER/
+ * RXUNDER/RXSTALL, one bit per state machine, sticky/write-1-to-clear)
+ * to tell "the control transfer's SETUP packet genuinely failed at the
+ * hardware TX/RX level" apart from "TX/RX looked fine to the PIO itself,
+ * the problem is elsewhere (device never responding, enumeration logic,
+ * etc)." Reads whichever PIO block pizero's build actually configures
+ * for PIO-USB (pio1, see usb_host_core_init_pio_usb()'s PB1000_BOARD_PIZERO
+ * branch) -- pio0 for every other PIO-USB board (GP4/GP5). Remove once
+ * isolated. */
+void usb_host_core_debug_pio_fdebug(uint32_t *fdebug) {
+#ifdef PB1000_BOARD_PIZERO
+  *fdebug = pio1->fdebug;
+#else
+  *fdebug = pio0->fdebug;
+#endif
+}
 #else /* !PB1000_USE_PIO_USB */
 /* No-op stubs for the native-controller build -- see these functions'
  * declarations in usb_host_core.h for why they always exist. */
@@ -290,9 +418,38 @@ void usb_host_core_debug_pio_usb_history(uint32_t *count, uint32_t *out,
   (void)out;
   (void)out_len;
 }
+
+void usb_host_core_debug_pio_fdebug(uint32_t *fdebug) {
+  *fdebug = 0;
+}
 #endif /* PB1000_USE_PIO_USB */
 
 void usb_host_core_init(void) {
+#ifdef PB1000_BOARD_PIZERO
+  /* 2026-10-28 real-hardware finding (USB keyboard not enumerating over
+   * PIO-USB -- see 調査用/RP2350-PiZero_実機認識しない問題調査.md):
+   * pizero must NOT reach the set_sys_clock_khz()/stdio_uart_init() calls
+   * below at all -- not even the (already-present) "skip if already at
+   * the target rate" guard around set_sys_clock_khz() was enough, because
+   * stdio_uart_init() itself still ran unconditionally every time. This
+   * exactly matches a real-hardware finding already made and fixed on
+   * the sibling MSX_emu_pico2 project for this identical board/feature
+   * (its own usb_host_core_init_pizero(), confirmed working with a real
+   * USB keyboard on 2026-09-29): stdio_uart_init() (pico-sdk's low-level
+   * UART0 setup) reinitializes the same physical UART0 pizero's REPL may
+   * already be actively using via MicroPython's own UART driver
+   * (MICROPY_HW_ENABLE_UART_REPL) -- calling pico-sdk's stdio_uart_init()
+   * on top of that, mid-connection, corrupts whatever is in flight over
+   * the SAME physical UART. pio_usb_host_init() (called from
+   * usb_host_core_init_pio_usb() below) computes its own PIO clock
+   * dividers dynamically from clk_sys at call time, so there is no clock
+   * adjustment needed here either -- dvi_display_init() (which runs
+   * before this, see main_entry.py's boot order) has already set clk_sys
+   * to the rate DVI needs, and that's what PIO-USB will use. */
+  usb_host_core_init_pio_usb();
+  return;
+#endif
+
   /* 240MHz = 12MHz x 20, a clean multiple required for PIO-USB's
      full-speed(12Mbit)/low-speed(1.5Mbit) bit timing. Raised from the
      previous 144MHz (12MHz x 12) after confirming on a sibling MSX-emulator

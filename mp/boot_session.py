@@ -138,6 +138,8 @@ def select_profile_ui(display, profiles, default, timeout_ms=30000, sd_mounted=F
     F1 enters the BIOS-style setup menu (mp/setup_menu.py) to edit pb1000.ini
     on flash/SD/per-profile; that menu either machine.reset()s (on save) or
     returns here (on discard), in which case the picker just redraws.
+    F2 enters PC Link mode (mp/pc_link.py) for SD file transfer with the PC
+    tools; the profile list is re-scanned when it returns.
     Returns selected profile name, or None if profiles is empty.
 
     Always shows the picker (even for a single profile) so there is a chance
@@ -186,21 +188,25 @@ def select_profile_ui(display, profiles, default, timeout_ms=30000, sd_mounted=F
 
             sc = hd61700.get_last_key()
             if sc == 0x52:  # Up arrow
+                old_sel, old_scroll = sel, scroll
                 sel = (sel - 1) % len(profiles)
                 if sel < scroll:
                     scroll = sel
                 elif sel >= scroll + max_vis:        # wrapped to bottom
                     scroll = max(0, sel - max_vis + 1)
                 deadline = time.ticks_add(time.ticks_ms(), timeout_ms)
-                _draw_profile_ui(display, profiles, sel, timeout_ms, scroll)
+                _show_profile_cursor_move(display, profiles, sel, timeout_ms,
+                                          scroll, old_sel, old_scroll)
             elif sc == 0x51:  # Down arrow
+                old_sel, old_scroll = sel, scroll
                 sel = (sel + 1) % len(profiles)
                 if sel >= scroll + max_vis:
                     scroll = sel - max_vis + 1
                 elif sel < scroll:                   # wrapped to top
                     scroll = 0
                 deadline = time.ticks_add(time.ticks_ms(), timeout_ms)
-                _draw_profile_ui(display, profiles, sel, timeout_ms, scroll)
+                _show_profile_cursor_move(display, profiles, sel, timeout_ms,
+                                          scroll, old_sel, old_scroll)
             elif sc == 0x28:  # Enter
                 print(f"[Boot] Selected profile: {profiles[sel]}")
                 return profiles[sel]
@@ -230,6 +236,28 @@ def select_profile_ui(display, profiles, default, timeout_ms=30000, sd_mounted=F
                 # used.
                 sys.modules.pop('setup_menu', None)
                 gc.collect()
+                deadline = time.ticks_add(time.ticks_ms(), timeout_ms)
+                _draw_profile_ui(display, profiles, sel, timeout_ms, scroll)
+            elif sc == 0x3B:  # F2 — PC Link (SD file transfer, mp/pc_link.py)
+                # Lazy import + unload afterward, same as F1's setup menu
+                # above: only pays for the module's heap when actually used.
+                import sys, gc
+                gc.collect()
+                try:
+                    import pc_link
+                    pc_link.run(display)
+                except MemoryError as e:
+                    print(f"[Boot] PC Link unavailable (low memory): {e}")
+                sys.modules.pop('pc_link', None)
+                gc.collect()
+                # The PC may have uploaded or deleted profiles: re-scan, and
+                # keep the cursor on the same profile if it still exists.
+                cur = profiles[sel]
+                found = scan_profiles()
+                if found:
+                    profiles[:] = found
+                sel = profiles.index(cur) if cur in profiles else 0
+                scroll = sel - max_vis + 1 if sel >= max_vis else 0
                 deadline = time.ticks_add(time.ticks_ms(), timeout_ms)
                 _draw_profile_ui(display, profiles, sel, timeout_ms, scroll)
             elif sc == 0x45:  # F12 — bail out to the REPL without booting
@@ -294,6 +322,57 @@ def _visible_profile_rows(H):
     return max(1, n)
 
 
+# Like emulator_menu.py's renderer (2026-10-25), nothing here clears the
+# screen before drawing: every function paints each pixel of its own area
+# exactly once (text cells carry their own background, the gaps around them
+# are filled with the background color), so a redraw replaces the previous
+# content in place instead of flashing to black first. _draw_profile_ui()
+# covers the whole screen this way -- which also lets it draw straight over
+# the setup menu / PC Link / confirmation screens when they return -- and
+# cursor moves only repaint the two affected rows.
+
+_ROW_H = 14
+_ROW_Y0 = 20   # text line of the first visible row (its band starts 2px above)
+
+
+def _text_band(display, x, y, text, fg, bg, W):
+    """Draw text at (x, y) and fill the rest of its 8px band (0..W) with bg."""
+    display.fill_rect(0, y, x, 8, bg)
+    _draw_text(display, x, y, text, fg, bg)
+    # Same clipping as draw_text(): whole characters up to the display edge.
+    end = x + min(len(text), max(0, (W - x) // 8)) * 8
+    if end < W:
+        display.fill_rect(end, y, W - end, 8, bg)
+
+
+def _draw_profile_row(display, name, y, is_sel):
+    """Paint one row's whole band (y-2 .. y-2+_ROW_H)."""
+    W = display.width
+    bg = 0x0210 if is_sel else 0x0000   # dark green highlight
+    display.fill_rect(0, y - 2, W, 2, bg)
+    if is_sel:
+        _text_band(display, 4, y, "> " + name, 0x07E0, bg, W)
+    else:
+        _text_band(display, 4, y, "  " + name, 0xFFFF, bg, W)
+    display.fill_rect(0, y + 8, W, _ROW_H - 10, bg)
+
+
+def _show_profile_cursor_move(display, profiles, sel, timeout_ms, scroll,
+                              old_sel, old_scroll):
+    """Same scroll position: only the rows losing and gaining the highlight
+    change, so repaint just those two; otherwise redraw the whole list."""
+    if scroll != old_scroll:
+        _draw_profile_ui(display, profiles, sel, timeout_ms, scroll)
+        return
+    try:
+        _draw_profile_row(display, profiles[old_sel],
+                          _ROW_Y0 + (old_sel - scroll) * _ROW_H, False)
+        _draw_profile_row(display, profiles[sel],
+                          _ROW_Y0 + (sel - scroll) * _ROW_H, True)
+    except Exception as e:
+        print(f"[Boot] Draw error: {e}")
+
+
 def _draw_profile_ui(display, profiles, sel, timeout_ms, scroll=0):
     """Render profile list on LCD using the common ILI9341/ST7796 drawing API (set_window/fill_rect).
     Only profiles[scroll:scroll+visible_rows] are drawn -- select_profile_ui() keeps `scroll`
@@ -303,29 +382,29 @@ def _draw_profile_ui(display, profiles, sel, timeout_ms, scroll=0):
         W = display.width
         H = display.height
 
-        # Clear screen
-        display.fill_rect(0, 0, W, H, 0x0000)
-
         # Title
-        _draw_text(display, 4, 4, "Select Profile:", 0xFFFF)
+        display.fill_rect(0, 0, W, 4, 0x0000)
+        _text_band(display, 4, 4, "Select Profile:", 0xFFFF, 0x0000, W)
+        display.fill_rect(0, 12, W, _ROW_Y0 - 2 - 12, 0x0000)
 
         # Profile list
-        row_h = 14
-        y = 20
+        y = _ROW_Y0
         max_vis = _visible_profile_rows(H)
         vis_end = min(len(profiles), scroll + max_vis)
         for i in range(scroll, vis_end):
-            name = profiles[i]
-            if i == sel:
-                display.fill_rect(0, y - 2, W, row_h, 0x0210)  # dark green highlight
-                _draw_text(display, 4, y, "> " + name, 0x07E0, 0x0210)
-            else:
-                _draw_text(display, 4, y, "  " + name, 0xFFFF, 0x0000)
-            y += row_h
+            _draw_profile_row(display, profiles[i], y, i == sel)
+            y += _ROW_H
+
+        # Blank body below the last row, down to the footer
+        foot_y = H - 12
+        if y - 2 < foot_y:
+            display.fill_rect(0, y - 2, W, foot_y - (y - 2), 0x0000)
 
         # Footer
         secs = (timeout_ms + 999) // 1000
-        _draw_text(display, 4, H - 12, f"UP/DN+ENTER F1:Setup F12:Exit Auto:{secs}s", 0x7BEF)
+        _text_band(display, 4, foot_y, f"Enter F1:Setup F2:PC Link F12:Exit {secs}s",
+                   0x7BEF, 0x0000, W)
+        display.fill_rect(0, foot_y + 8, W, H - (foot_y + 8), 0x0000)
 
     except Exception as e:
         print(f"[Boot] Draw error: {e}")
@@ -334,7 +413,7 @@ def _draw_profile_ui(display, profiles, sel, timeout_ms, scroll=0):
 def confirm_restore_autosave(display, timeout_ms=10000):
     """RAM Autosave's boot-time prompt (see mp/ram_autosave.py): asks
     whether to restore unsaved progress found in the autosave cache.
-    EXE=yes, BRK=no; auto-selects yes (restore) on timeout, matching the
+    Enter=yes, ESC=no; auto-selects yes (restore) on timeout, matching the
     real PB-1000's battery-backed RAM behaviour (power on -> pick up
     exactly where you left off) more closely than defaulting to no."""
     import hd61700
@@ -354,20 +433,20 @@ def confirm_restore_autosave(display, timeout_ms=10000):
             display.fill_rect(0, 0, W, H, 0x0000)
             _draw_text(display, 4, y0 - 10, "Unsaved progress found.", 0xFFE0)
             _draw_text(display, 4, y0 + 2, "Restore it?", 0xFFE0)
-            _draw_text(display, 4, y0 + 16, "EXE:yes  BRK:no  Auto:%ds" % secs, 0x7BEF)
+            _draw_text(display, 4, y0 + 16, "Enter:yes  ESC:no  Auto:%ds" % secs, 0x7BEF)
             hdmi_flush(display)
         sc = hd61700.get_last_key()
         if sc != prev_sc:
             prev_sc = sc
-            if sc == 0x28:   # EXE
+            if sc == 0x28:   # Enter
                 return True
-            elif sc == 0x29:  # BRK
+            elif sc == 0x29:  # ESC
                 return False
         time.sleep_ms(30)
 
 
 def _confirm_exit_to_repl(display):
-    """F12's Yes/No prompt (EXE=yes, BRK=no). Blocking, like setup_menu.py's
+    """F12's Yes/No prompt (Enter=yes, ESC=no). Blocking, like setup_menu.py's
     _confirm() -- kept as a separate minimal copy here rather than importing
     setup_menu (which this screen otherwise only loads lazily on F1, see its
     comment about not paying for that module's heap unless actually used)."""
@@ -376,16 +455,16 @@ def _confirm_exit_to_repl(display):
     y0 = H // 2 - 14
     display.fill_rect(0, 0, W, H, 0x0000)
     _draw_text(display, 4, y0 + 4, "Exit to REPL without booting?", 0xFFE0)
-    _draw_text(display, 4, y0 + 16, "EXE:yes  BRK:no", 0x7BEF)
+    _draw_text(display, 4, y0 + 16, "Enter:yes  ESC:no", 0x7BEF)
     hdmi_flush(display)
     prev_sc = -1
     while True:
         sc = hd61700.get_last_key()
         if sc != prev_sc:
             prev_sc = sc
-            if sc == 0x28:   # EXE
+            if sc == 0x28:   # Enter
                 return True
-            elif sc == 0x29: # BRK
+            elif sc == 0x29: # ESC
                 return False
         hdmi_flush(display)
         time.sleep_ms(30)

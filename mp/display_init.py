@@ -55,6 +55,16 @@ SD_INIT_BAUD = 400_000
 # already initialized) before this is treated as verified for PB-1000.
 SD_DATA_BAUD = 12_000_000
 
+# Waveshare RP2350-PiZero ([display] driver=DVI): onboard microSD slot on
+# its own SPI1 pins, not shared with anything else. Same pins and data
+# rate as the sibling MSX_emu_pico2 project's working pizero config.
+PIZERO_SD_SPI_ID = 1
+PIZERO_SD_SCK_PIN = 30
+PIZERO_SD_MOSI_PIN = 31
+PIZERO_SD_MISO_PIN = 40
+PIZERO_SD_CS_PIN = 43
+PIZERO_SD_DATA_BAUD = 4_000_000
+
 
 def init_sdcard(spi, lcd_baudrate=40_000_000):
     try:
@@ -65,6 +75,31 @@ def init_sdcard(spi, lcd_baudrate=40_000_000):
         # (the LCD's own SPI baudrate) only for idle periods between SD
         # operations, since this bus is shared with the LCD.
         sd = SDCard(spi, sd_cs, baudrate=SD_DATA_BAUD, restore_baudrate=lcd_baudrate)
+        vfs = os.VfsFat(sd)
+        os.mount(vfs, "/sd")
+        print("SD Card mounted at /sd")
+        return True
+    except Exception as e:
+        print(f"SD Card mount optional: {e}")
+        sys.print_exception(e)
+        return False
+
+
+def init_sdcard_pizero():
+    """Mounts the RP2350-PiZero's onboard microSD at /sd (dedicated SPI1,
+    so the bus is simply left at the SD data rate between operations)."""
+    try:
+        from sdcard import SDCard
+        spi = machine.SPI(
+            PIZERO_SD_SPI_ID,
+            baudrate=SD_INIT_BAUD,
+            sck=machine.Pin(PIZERO_SD_SCK_PIN),
+            mosi=machine.Pin(PIZERO_SD_MOSI_PIN),
+            miso=machine.Pin(PIZERO_SD_MISO_PIN),
+        )
+        sd_cs = machine.Pin(PIZERO_SD_CS_PIN, machine.Pin.OUT, value=1)
+        sd = SDCard(spi, sd_cs, baudrate=PIZERO_SD_DATA_BAUD,
+                    restore_baudrate=PIZERO_SD_DATA_BAUD)
         vfs = os.VfsFat(sd)
         os.mount(vfs, "/sd")
         print("SD Card mounted at /sd")
@@ -109,12 +144,61 @@ def _early_bool(s, default):
     return s.strip().lower() in ("1", "true", "yes", "on")
 
 
+class _DviDisplay:
+    """Waveshare RP2350-PiZero's `[display] driver=DVI` stand-in for the
+    ILI9341/ST7796 Python objects. This board has no physical LCD/SPI
+    panel; src/dvi_display.c keeps a 320x240 "UI plane" instead, composited
+    over the live PB-1000 screen on the DVI output. Everything the other
+    boards draw on their panel (bezel, status bar, FuncKeyBar, profile
+    picker, F1 setup menu, Win+F7 EMULATOR MENU) is drawn into that plane
+    through the same fill_rect()/set_window()/write_data() calls.
+
+    The PB-1000 screen itself is not drawn through this object: dvi_display
+    reads lcd_c's VRAM live, and lcd_controller_c.py's render_to_display()
+    only tells it where the screen sits (set_lcd_window()) whenever the
+    physical panel would have been refreshed."""
+
+    is_dvi = True
+
+    def __init__(self, width=320, height=240):
+        import dvi_display
+        self.width = width
+        self.height = height
+        self.spi_baudrate = 0
+        self.fill_rect = dvi_display.ui_fill_rect
+        self._blit = dvi_display.ui_blit
+        self.set_lcd_window = dvi_display.set_lcd_window
+        self._win = (0, 0, 0, 0)
+
+    def lcd_sync(self):
+        pass
+
+    def set_window(self, x0, y0, x1, y1):
+        self._win = (x0, y0, x1, y1)
+
+    def write_data(self, data):
+        x0, y0, x1, y1 = self._win
+        self._blit(x0, y0, x1, y1, data)
+
+
 def init_display():
     _early_cfg = _read_early_ini_sections(("display", "touch"))
     disp_cfg = _early_cfg["display"]
     touch_early_cfg = _early_cfg["touch"]
     # Accept both "driver=ST7796" and "display=ST7796" as equivalent keys.
     driver = disp_cfg.get("driver", disp_cfg.get("display", "ILI9341")).upper()
+
+    if driver == "DVI":
+        # Waveshare RP2350-PiZero: onboard DVI output, no physical LCD/SPI
+        # panel or touch panel; the onboard microSD is on its own SPI1 pins
+        # (see init_sdcard_pizero()).
+        import dvi_display
+        ok = dvi_display.init()
+        print(f"DVI display init: {'OK' if ok else 'FAILED'}")
+        if ok:
+            dvi_display.set_live_content(True)
+        sd_mounted = init_sdcard_pizero()
+        return _DviDisplay(), None, sd_mounted, None
 
     # ILI9341: 26 MHz (safe for all modules). ST7796: 40 MHz.
     # Override with spi_baudrate in [display] section of pb1000.ini if needed.

@@ -172,6 +172,7 @@ _SLOT_BANK1 = 1
 # "/pb1000.ini", distinct from "/sd/pb1000.ini") -- see _compute_cache_dir().
 _AUTOSAVE_ROOT = "/.autosave"
 
+
 # references/sysvars.txt -- "variable area" boundary pointers, used by
 # watch 3 (see VarAreaAutosave's docstring below). IOBF is the fixed top
 # (set by CLEAR); HIMEM is the same pointer watch 1/2 already use as the

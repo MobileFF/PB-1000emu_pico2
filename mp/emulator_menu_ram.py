@@ -53,7 +53,7 @@ def _pick_save_dir(display, dirs, current_dir):
     def _redraw():
         display.fill_rect(0, 0, W, H, _BG)
         _draw_text(display, 4,  4, "== RAM SAVE ==", _HDR)
-        _draw_text(display, 4, 14, "EXE:save  BRK:cancel", _FTR)
+        _draw_text(display, 4, 14, "Enter:save  ESC:cancel", _FTR)
         y = _HDR_H
         for i in range(scroll, min(len(all_items), scroll + max_vis)):
             is_cur = (i == cursor)

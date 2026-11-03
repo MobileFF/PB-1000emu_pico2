@@ -117,8 +117,8 @@ class PioUart:
                 supports 300-9600bps (see setup_menu.py's schema, which enforces this range
                 for the [rs232c] baudrate ini key); values outside that range don't
                 correspond to any real PB-1000 mode.
-            sm_tx: PIO state machine index for TX (0-7)
-            sm_rx: PIO state machine index for RX (0-7)
+            sm_tx: PIO state machine index for TX (0-11 on RP2350)
+            sm_rx: PIO state machine index for RX (0-11 on RP2350)
             buf_size: software TX/RX ring buffer size in bytes. 2048 comfortably covers
                 several seconds of buffering even at the PB-1000's max 9600bps, while still
                 being a single small, one-time allocation rather than per-byte churn.

@@ -22,6 +22,7 @@ HD61700 CPUを搭載したカシオのポケットコンピュータ PB-1000 を
 - **カラー表示サポート**: PB-1000との互換性を保ちつつ、カラー表示を可能に。
 - **最大104KBのRAM搭載可能**:ページ1(0x8000〜0xFFFF)のバンク2/3にRAMを搭載可能にし、最大104KBのRAMを利用可能。
 - **HDMI ミラー出力**: 2台目の Pico 2 (RP2350) を HSTX 経由の受信機として接続し、実機LCDの表示内容をHDMI出力にミラーリング可能（任意、詳細は [Hardware Guide](doc/hardware_guide.md) 参照）。
+- **Waveshare RP2350-PiZero 対応（実験的）**: 物理LCDを使わず、ボードのオンボードDVI出力だけで動作するビルド（`firmware_pb1000_pizero.uf2`。USBキーボードを40ピンヘッダから接続する版は `firmware_pb1000_pizero_gp22.uf2`）。詳細は [Hardware Guide §10](doc/hardware_guide.md#10-waveshare-rp2350-pizeroオンボードdvi出力実験的) 参照。
 - **エミュレータメニュー**: F7キーまたは画面下部のファンクションキーバーから開ける設定・状態管理UI（RAM保存、ディスク差し替え、フック状態表示など）。保存済みRAMの復元は起動時のプロファイル選択画面から行います。
  
 ## クイックスタート

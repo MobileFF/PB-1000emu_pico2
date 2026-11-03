@@ -52,4 +52,11 @@ void usb_host_core_debug_pio_usb_setup(uint32_t *setup_send_count,
 void usb_host_core_debug_pio_usb_history(uint32_t *count, uint32_t *out,
                                           uint32_t out_len);
 
+/* TEMPORARY DIAGNOSTIC (2026-10-28) -- see usb_host_core.c's own comment
+ * on this function. Raw FDEBUG register value of whichever PIO block
+ * PIO-USB is actually using; decode in Python (TXSTALL = (fdebug>>24)&0xF,
+ * TXOVER = (fdebug>>16)&0xF, one bit per PIO SM, sticky/write-1-to-clear
+ * -- same convention as dvi_display.pio_debug_info()). */
+void usb_host_core_debug_pio_fdebug(uint32_t *fdebug);
+
 #endif

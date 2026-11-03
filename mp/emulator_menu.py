@@ -117,46 +117,97 @@ def _build_system_items(system):
 
 
 # ── Menu renderer ──────────────────────────────────────────────────────────────
+#
+# Nothing here clears the screen before drawing (2026-10-25). Every function
+# paints each pixel of its own area exactly once -- text cells carry their own
+# background, and the gaps around them are filled with the background color --
+# so a redraw replaces the previous content in place instead of flashing to
+# black first. _draw_menu() covers the whole screen this way, which is what
+# lets it draw straight over a sub-screen (CPU Status, color picker, ...) or
+# the game screen when the menu opens. Cursor moves only repaint the two
+# affected rows (see _run_menu()).
+
+def _text_band(display, x, y, text, fg, bg, right):
+    """Draw text at (x, y) and fill the rest of its 8px band from 0 to right
+    with bg (the left margin and the space after the text)."""
+    display.fill_rect(0, y, x, 8, bg)
+    _draw_text(display, x, y, text, fg, bg)
+    # Same clipping as draw_text(): whole characters up to the display edge.
+    end = x + min(len(text), max(0, (display.width - x) // 8)) * 8
+    if end < right:
+        display.fill_rect(end, y, right - end, 8, bg)
+
+
+def _row_h(item):
+    return _SEP_ROW_H if item.get('type') == 'separator' else _ROW_H
+
+
+def _row_y(items, scroll, idx):
+    """Top text line of items[idx] when the list is scrolled to scroll."""
+    y = _HDR_H
+    for i in range(scroll, idx):
+        y += _row_h(items[i])
+    return y
+
+
+def _draw_row(display, item, y, is_cur):
+    """Paint one row's whole band (y-1 .. y-1+row height)."""
+    W = display.width
+    if item.get('type') == 'separator':
+        line_y = y + _SEP_ROW_H // 2
+        display.fill_rect(0, y - 1, W, line_y - (y - 1), _BG)
+        display.fill_rect(0, line_y, W, 1, _SEP)
+        display.fill_rect(0, line_y + 1, W, (y - 1 + _SEP_ROW_H) - (line_y + 1), _BG)
+        return
+
+    bg_r = _SEL_BG if is_cur else _BG
+    fg_r = _SEL_FG if is_cur else _FG
+    display.fill_rect(0, y - 1, W, 1, bg_r)
+
+    prefix = "> " if is_cur else "  "
+    label = prefix + item.get('label', '')
+    badge = item.get('badge', '')
+    if badge:
+        bx = W - len(badge) * 8 - 4
+        _text_band(display, 4, y, label, fg_r, bg_r, bx)
+        _draw_text(display, bx, y, badge, item.get('badge_color', fg_r), bg_r)
+        display.fill_rect(W - 4, y, 4, 8, bg_r)
+    else:
+        _text_band(display, 4, y, label, fg_r, bg_r, W)
+
+    display.fill_rect(0, y + 8, W, _ROW_H - 9, bg_r)
+
+
+def _draw_footer(display, msg):
+    W, H = display.width, display.height
+    top = H - _FTR_H
+    display.fill_rect(0, top, W, 3, _BG)
+    _text_band(display, 4, top + 3, msg[: (W - 8) // 8], _WARN, _BG, W)
+    display.fill_rect(0, top + 11, W, _FTR_H - 11, _BG)
+
 
 def _draw_menu(display, title, hint, items, cursor, scroll, msg=""):
     W, H = display.width, display.height
-    display.fill_rect(0, 0, W, H, _BG)
 
-    _draw_text(display, 4,  4, title, _HDR)
-    _draw_text(display, 4, 14, hint, _FTR)
+    display.fill_rect(0, 0, W, 4, _BG)
+    _text_band(display, 4,  4, title, _HDR, _BG, W)
+    display.fill_rect(0, 12, W, 2, _BG)
+    _text_band(display, 4, 14, hint, _FTR, _BG, W)
+    display.fill_rect(0, 22, W, _HDR_H - 23, _BG)
 
     y = _HDR_H
     vis_end = min(len(items), scroll + _MAX_VIS)
 
     for i in range(scroll, vis_end):
-        item = items[i]
-        if item.get('type') == 'separator':
-            display.fill_rect(0, y + _SEP_ROW_H // 2, W, 1, _SEP)
-            y += _SEP_ROW_H
-            continue
+        _draw_row(display, items[i], y, i == cursor)
+        y += _row_h(items[i])
 
-        is_cur = (i == cursor)
-        bg_r = _SEL_BG if is_cur else _BG
-        fg_r = _SEL_FG if is_cur else _FG
-        display.fill_rect(0, y - 1, W, _ROW_H, bg_r)
+    # Blank body below the last row, down to the footer
+    body_end = H - _FTR_H
+    if y - 1 < body_end:
+        display.fill_rect(0, y - 1, W, body_end - (y - 1), _BG)
 
-        label = item.get('label', '')
-        prefix = "> " if is_cur else "  "
-        _draw_text(display, 4, y, prefix + label, fg_r, bg_r)
-
-        badge = item.get('badge', '')
-        if badge:
-            bw = len(badge) * 8
-            bx = W - bw - 4
-            _draw_text(display, bx, y, badge, item.get('badge_color', fg_r), bg_r)
-
-        y += _ROW_H
-
-    # Footer message
-    if msg:
-        msg_trunc = msg[: (W - 8) // 8]
-        display.fill_rect(0, H - _FTR_H, W, _FTR_H, _BG)
-        _draw_text(display, 4, H - _FTR_H + 3, msg_trunc, _WARN)
+    _draw_footer(display, msg)
 
 
 # USB HID scancode → printable char (a-z, 0-9, hyphen only — for folder
@@ -190,7 +241,7 @@ def _text_input(display, title, max_len=16):
         display.fill_rect(0, 0, W, H, _BG)
         _draw_text(display, 4,  4, title, _HDR)
         _draw_text(display, 4, 16, "a-z  0-9  -  BS:del", _FTR)
-        _draw_text(display, 4, H - 12, "EXE:ok  BRK:cancel", _FTR)
+        _draw_text(display, 4, H - 12, "Enter:ok  ESC:cancel", _FTR)
         _draw_text(display, 4, H // 2 - 4, "".join(text) + "_", _FG)
 
     _redraw()
@@ -206,31 +257,31 @@ def _text_input(display, title, max_len=16):
             elif sc == 0x2A and text:   # Backspace
                 text.pop()
                 _redraw()
-            elif sc == 0x28 and text:   # EXE — confirm (reject empty)
+            elif sc == 0x28 and text:   # Enter — confirm (reject empty)
                 return "".join(text)
-            elif sc == 0x29:            # BRK — cancel
+            elif sc == 0x29:            # ESC — cancel
                 return None
         hdmi_flush(display)
         time.sleep_ms(30)
 
 
 def _confirm(display, title, detail=""):
-    """Yes/No confirmation dialog. Returns True (EXE) or False (BRK)."""
+    """Yes/No confirmation dialog. Returns True (Enter) or False (ESC)."""
     import hd61700
     W, H = display.width, display.height
     display.fill_rect(0, 0, W, H, _BG)
     _draw_text(display, 4,  4, title,  _WARN)
     if detail:
         _draw_text(display, 4, 18, detail, _FG)
-    _draw_text(display, 4, H - 10, "EXE:yes  BRK:no", _FTR)
+    _draw_text(display, 4, H - 10, "Enter:yes  ESC:no", _FTR)
     prev_sc = -1
     while True:
         sc = hd61700.get_last_key()
         if sc != prev_sc:
             prev_sc = sc
-            if sc == 0x28:   # EXE
+            if sc == 0x28:   # Enter
                 return True
-            elif sc == 0x29: # BRK
+            elif sc == 0x29: # ESC
                 return False
         hdmi_flush(display)
         time.sleep_ms(30)
@@ -256,13 +307,13 @@ def _next_cursor(items, cur, direction):
 
 # ── Generic menu loop (shared by top level and every category submenu) ───────
 
-def _run_menu(display, title, hint, build_items_fn, dispatch_fn):
+def _run_menu(display, title, hint, build_items_fn, dispatch_fn, esc_exits=True):
     """Run one menu level until it closes.
 
-    build_items_fn() -> item list, called on entry and after every EXE (so
+    build_items_fn() -> item list, called on entry and after every Enter (so
     badges stay current).
 
-    dispatch_fn(item_id, items, cursor) is called on EXE and must return
+    dispatch_fn(item_id, items, cursor) is called on Enter and must return
     (msg, close_all):
       close_all=True  — unwind every nested menu level back to the caller of
                          show_emulator_menu (Exit, Reset, Reboot Emulator
@@ -270,8 +321,17 @@ def _run_menu(display, title, hint, build_items_fn, dispatch_fn):
                          the main loop to resume CPU stepping right away).
       close_all=False — show msg, refresh the item list, keep looping here.
 
-    Returns True if the whole menu system should close, False if BRK was
+    Returns True if the whole menu system should close, False if ESC was
     pressed and this level should just return to its caller ("back").
+
+    esc_exits=False makes ESC a no-op at this level instead of returning
+    "back" (2026-10-20). Used only for the top-level call in
+    show_emulator_menu(): ESC is bound to the PB-1000's BRK key, and if the
+    physical key is still held the instant this function returns and CPU
+    stepping resumes, that held BRK would be forwarded into the running
+    BASIC program as a real BREAK. Submenus keep esc_exits=True since
+    backing out of one just returns to the still-open top-level menu loop,
+    never straight into resumed CPU stepping.
     """
     import hd61700
 
@@ -282,6 +342,15 @@ def _run_menu(display, title, hint, build_items_fn, dispatch_fn):
     prev_sc = -1
 
     _draw_menu(display, title, hint, items, cursor, scroll, msg)
+
+    def _show_cursor_move(old, old_scroll):
+        # Same scroll position: only the rows losing and gaining the
+        # highlight change, so repaint just those two.
+        if scroll != old_scroll:
+            _draw_menu(display, title, hint, items, cursor, scroll, msg)
+            return
+        _draw_row(display, items[old], _row_y(items, scroll, old), False)
+        _draw_row(display, items[cursor], _row_y(items, scroll, cursor), True)
 
     while True:
         sc = hd61700.get_last_key()
@@ -294,24 +363,26 @@ def _run_menu(display, title, hint, build_items_fn, dispatch_fn):
         if sc == 0x52:   # UP
             new = _next_cursor(items, cursor, -1)
             if new != cursor:
+                old, old_scroll = cursor, scroll
                 cursor = new
                 if cursor < scroll:
                     scroll = cursor
                 elif cursor >= scroll + _MAX_VIS:        # wrapped to bottom
                     scroll = max(0, cursor - _MAX_VIS + 1)
-                _draw_menu(display, title, hint, items, cursor, scroll, msg)
+                _show_cursor_move(old, old_scroll)
 
         elif sc == 0x51: # DOWN
             new = _next_cursor(items, cursor, 1)
             if new != cursor:
+                old, old_scroll = cursor, scroll
                 cursor = new
                 if cursor >= scroll + _MAX_VIS:
                     scroll = cursor - _MAX_VIS + 1
                 elif cursor < scroll:                    # wrapped to top
                     scroll = 0
-                _draw_menu(display, title, hint, items, cursor, scroll, msg)
+                _show_cursor_move(old, old_scroll)
 
-        elif sc == 0x28: # EXE — activate item
+        elif sc == 0x28: # Enter — activate item
             item_id = items[cursor].get('id', '')
             msg, close_all = dispatch_fn(item_id, items, cursor)
             if close_all:
@@ -319,8 +390,11 @@ def _run_menu(display, title, hint, build_items_fn, dispatch_fn):
             items = build_items_fn()  # refresh badges
             _draw_menu(display, title, hint, items, cursor, scroll, msg)
 
-        elif sc == 0x29: # BREAK — back one level
-            return False
+        elif sc == 0x29: # ESC — back one level
+            if esc_exits:
+                return False
+            # Ignored here (esc_exits=False, top level only) -- see this
+            # function's docstring. Select Exit instead.
 
 
 # ── Per-category dispatch ─────────────────────────────────────────────────────
@@ -448,28 +522,28 @@ def _dispatch_top(item_id, system, display, fkbar, cfg, state):
         return "", True
     if item_id == 'cat_toggles':
         closed = _run_menu(
-            display, "-- TOGGLES --", "EXE:select  BRK:back",
+            display, "-- TOGGLES --", "Enter:select  ESC:back",
             lambda: _build_toggle_items(system, state),
             lambda iid, items, cur: _dispatch_toggles(iid, system, state, cfg),
         )
         return "", closed
     if item_id == 'cat_storage':
         closed = _run_menu(
-            display, "-- STORAGE --", "EXE:select  BRK:back",
+            display, "-- STORAGE --", "Enter:select  ESC:back",
             _build_storage_items,
             lambda iid, items, cur: _dispatch_storage(iid, system, display, fkbar),
         )
         return "", closed
     if item_id == 'cat_display':
         closed = _run_menu(
-            display, "-- DISPLAY --", "EXE:select  BRK:back",
+            display, "-- DISPLAY --", "Enter:select  ESC:back",
             lambda: _build_display_items(system),
             lambda iid, items, cur: _dispatch_display(iid, system, display, fkbar),
         )
         return "", closed
     if item_id == 'cat_system':
         closed = _run_menu(
-            display, "-- SYSTEM --", "EXE:select  BRK:back",
+            display, "-- SYSTEM --", "Enter:select  ESC:back",
             lambda: _build_system_items(system),
             lambda iid, items, cur: _dispatch_system(iid, system, display),
         )
@@ -487,8 +561,16 @@ def show_emulator_menu(system, display, fkbar, joystick_input, cfg, boot_status=
     CPU stepping is paused implicitly because main() blocks here.
 
     The top level lists categories (Toggles / Storage / Display / System);
-    each opens as its own sub-menu via _run_menu(), BRK going back one level.
-    BRK or Exit at the top level closes the whole menu.
+    each opens as its own sub-menu via _run_menu(), ESC going back one level.
+    At the top level, ESC is intentionally disabled (2026-10-20, esc_exits=
+    False below) -- only selecting Exit closes the whole menu back to the
+    emulator. Reason: ESC is bound to the PB-1000's BRK key by default, and
+    the main loop resumes CPU stepping the instant this function returns;
+    if the user is still physically holding the ESC/BRK key at that exact
+    moment (as naturally happens when using it to close the menu), that
+    held key would be forwarded into the running BASIC program as a real
+    BREAK. Submenus are unaffected (esc_exits defaults to True there) since
+    backing out of one only returns to this still-open top-level loop.
 
     LCD and HDMI are exclusive (see pb1000.py's update_display()): while
     HDMI is the active output, the menu draws into an offscreen mirror
@@ -521,9 +603,10 @@ def show_emulator_menu(system, display, fkbar, joystick_input, cfg, boot_status=
 
     try:
         _run_menu(
-            display, "==  EMULATOR MENU  ==", "GUI+F7:open  EXE:select  BRK:exit",
+            display, "==  EMULATOR MENU  ==", "GUI+F7:open  Enter:select  Exit:close",
             _build_top_items,
             lambda iid, items, cur: _dispatch_top(iid, system, display, fkbar, cfg, state),
+            esc_exits=False,
         )
     except MemoryError as e:
         # A submenu (e.g. System > CPU Status, which on-demand-compiles

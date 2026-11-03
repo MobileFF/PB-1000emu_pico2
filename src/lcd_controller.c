@@ -6,6 +6,22 @@
 #include "lcd_controller.h"
 #include <string.h>
 
+#ifdef PB1000_BOARD_PIZERO
+/* lcd_render_row_rgb565() below is called from dvi_display.c's
+ * dvi_scanline_pump(), itself __not_in_flash_func (core1 DMA IRQ context)
+ * -- see that file's header comment: any flash-resident code reached from
+ * there contends with core0's own concurrent XIP fetches (MicroPython's
+ * bytecode interpreter), observed on the sibling project as "snow"
+ * corruption, and real-hardware-confirmed here (2026-10-25) as a full DVI
+ * "No Signal" once Phase 2a's live-content path started actually calling
+ * into this file. Only relevant on the pizero board (Pico 2/2W never
+ * launch a second core touching this function), guarded so Pico 2/2W
+ * builds are unaffected either way (the macro itself is harmless there,
+ * but there's no reason to move this into RAM on boards that never call
+ * it from an IRQ). */
+#include "pico.h"
+#endif
+
 /* ======== Internal helpers ======== */
 
 static uint8_t reverse_bits8(uint8_t v) {
@@ -452,8 +468,17 @@ void lcd_set_num_pages(lcd_state_t *lcd, uint8_t pages) {
   for (int i = 0; i < lcd->fill_pages; i++) lcd->dirty_pages[i] = true;
 }
 
-/* Inline helper used by both render paths */
+/* Inline helper used by both render paths. `static inline` doesn't
+ * guarantee the compiler actually inlines every call site -- if it falls
+ * back to a real standalone call from lcd_render_row_rgb565() (RAM-
+ * resident on PIZERO builds, see above), an un-inlined, flash-resident
+ * _pixel_color() would reintroduce the exact same core1-fetches-flash
+ * risk that function was moved to RAM to avoid. */
+#ifdef PB1000_BOARD_PIZERO
+static inline uint16_t __not_in_flash_func(_pixel_color)(const lcd_state_t *lcd, int col, int sy) {
+#else
 static inline uint16_t _pixel_color(const lcd_state_t *lcd, int col, int sy) {
+#endif
   /* Pages beyond the current active_pages must always render as background,
      regardless of which branch below is taken.  Without this clamp applied
      BEFORE the VDP branch, a page-count shrink (e.g. 64-dot menu -> 32-dot
@@ -462,16 +487,105 @@ static inline uint16_t _pixel_color(const lcd_state_t *lcd, int col, int sy) {
      they're out of range. */
   int page = sy >> 3;
   if (page >= (int)lcd->active_pages) return lcd->color_off;
-  /* Use VDP color_vram only after the ROM has finished its initial 0xFF clear
-     and written at least one real color value (vdp_init_fill_done).  During
-     the clear phase color_vram[addr]==0xFF maps to white (0xFFFF) which would
-     cause a full-screen white flash on every reset or sleep-wakeup. */
   if (lcd->vdp_enabled && lcd->vdp_init_fill_done) {
     return lcd->rgb332_to_565_table[lcd->color_vram[sy * LCD_WIDTH + col]];
   }
   int bit  = sy & 7;
   bool on  = (lcd->vram[page * LCD_WIDTH + col] >> bit) & 1;
   return on ? lcd->color_on : lcd->color_off;
+}
+
+/* See lcd_controller.h's own comment for the full rationale, and this
+ * file's top-of-file comment for why PIZERO builds must keep this
+ * function RAM-resident. */
+#ifdef PB1000_BOARD_PIZERO
+void __not_in_flash_func(lcd_render_row_rgb565)(const lcd_state_t *lcd, int dst_y, int dst_w,
+                            int dst_h, uint8_t scale_num, uint8_t scale_den,
+                            uint16_t border_color, uint16_t *out_row) {
+#else
+void lcd_render_row_rgb565(const lcd_state_t *lcd, int dst_y, int dst_w,
+                            int dst_h, uint8_t scale_num, uint8_t scale_den,
+                            uint16_t border_color, uint16_t *out_row) {
+#endif
+  if (!lcd->display_on) {
+    for (int x = 0; x < dst_w; x++) out_row[x] = lcd->color_lcd_off;
+    return;
+  }
+
+  uint8_t num = scale_num ? scale_num : 1;
+  uint8_t den = scale_den ? scale_den : 1;
+  int src_h = (int)lcd->active_pages * 8;
+  int out_w = (int)(((uint32_t)LCD_WIDTH * num) / den);
+  int out_h = (int)(((uint32_t)src_h * num) / den);
+  int border_x = (dst_w > out_w) ? (dst_w - out_w) / 2 : 0;
+  int border_y = (dst_h > out_h) ? (dst_h - out_h) / 2 : 0;
+
+  if (dst_y < border_y || dst_y >= border_y + out_h) {
+    for (int x = 0; x < dst_w; x++) out_row[x] = border_color;
+    return;
+  }
+
+  int dy = dst_y - border_y;
+  int sy = (int)(((uint32_t)dy * den) / num);
+  if (sy >= src_h) sy = src_h - 1;
+
+  for (int x = 0; x < border_x; x++) out_row[x] = border_color;
+
+  /* Same fixed-point nearest-neighbor accumulator as
+     lcd_render_to_display()'s own frac_scale branch. */
+  uint32_t step_fp = (uint32_t)(((uint32_t)den << 16) / num);
+  uint32_t sx_fp = 0;
+
+  /* 2026-10-26 real-hardware finding: calling _pixel_color() per pixel
+     (320x per scanline, from inside the DVI DMA IRQ) was confirmed via
+     the PIO's FDEBUG register (dvi_display.pio_debug_info()) to
+     actually underrun the TMDS TX FIFO (TXSTALL set on all 3 lanes,
+     TXOVER on one) -- unlike the Phase 1 color-bar path, which never
+     sets either bit. Measured heartbeat rate dropped to ~63% of the
+     color-bar path's (~9100/s vs ~14400/s), confirming this loop's
+     per-pixel cost (a non-inlined function call plus three branches
+     that are actually loop-invariant: active_pages, vdp_enabled &&
+     vdp_init_fill_done, and the page/bit split -- sy, and therefore all
+     three, is fixed for the entire row) was eating enough of the
+     per-scanline time budget to desync the TMDS serialiser permanently
+     ("No Signal", not recoverable without a reset, even though
+     dvi_heartbeat/late_scanline_ctr/fault_info stayed "healthy" --
+     none of them observe hardware-level FIFO state). Hoisting the
+     mode/page/bit decision to once per row (the `page >= active_pages`
+     check itself is dropped entirely here, not just hoisted -- sy is
+     already clamped to < src_h = active_pages*8 above, so that branch
+     is unreachable from this caller; _pixel_color() still needs it for
+     lcd_render_to_display()'s own, differently-clamped call site) cuts
+     each pixel down to a single array read plus the minimum work
+     needed to produce a color, matching the sibling MSX project's own
+     (much simpler, fixed-resolution, pre-rendered-16bpp) scanline_pump
+     in spirit: push everything that doesn't vary per-pixel out of the
+     per-pixel path. */
+  if (lcd->vdp_enabled && lcd->vdp_init_fill_done) {
+    const uint8_t *row_cvram = &lcd->color_vram[sy * LCD_WIDTH];
+    const uint16_t *palette = lcd->rgb332_to_565_table;
+    for (int dx = 0; dx < out_w; dx++) {
+      int sx = (int)(sx_fp >> 16);
+      if (sx >= LCD_WIDTH) sx = LCD_WIDTH - 1;
+      out_row[border_x + dx] = palette[row_cvram[sx]];
+      sx_fp += step_fp;
+    }
+  } else {
+    int page = sy >> 3;
+    int bit = sy & 7;
+    const uint8_t *row_vram = &lcd->vram[page * LCD_WIDTH];
+    uint16_t color_on = lcd->color_on;
+    uint16_t color_off = lcd->color_off;
+    for (int dx = 0; dx < out_w; dx++) {
+      int sx = (int)(sx_fp >> 16);
+      if (sx >= LCD_WIDTH) sx = LCD_WIDTH - 1;
+      bool on = (row_vram[sx] >> bit) & 1;
+      out_row[border_x + dx] = on ? color_on : color_off;
+      sx_fp += step_fp;
+    }
+  }
+
+  for (int x = border_x + out_w; x < dst_w; x++) out_row[x] = border_color;
 }
 
 void lcd_clear(lcd_state_t *lcd) {

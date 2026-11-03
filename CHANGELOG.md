@@ -7,6 +7,184 @@ push される運用のため、バージョン番号や「未リリース」の
 
 ---
 
+## 2026-11-03
+
+### 追加
+
+- **Waveshare RP2350-PiZero に対応（実験的）**: オンボードの DVI 出力（HDMI 端子）に
+  PB-1000 の画面を表示するボード向けのビルドを追加した。物理 LCD・タッチパネルは使わない。
+  `bash bldfrm.sh pizero` でビルドし、`firmware/firmware_pb1000_pizero.uf2` を出力する
+  （引数なしの Pico 2 W / Pico 2 向けビルドは変更なし）。詳細は
+  [Hardware Guide §10](doc/hardware_guide.md#10-waveshare-rp2350-pizeroオンボードdvi出力実験的) 参照。
+  - 画面: 320×240 を 640×480（60Hz）に 2 倍で出力する。液晶部分は液晶 VRAM を走査線ごとに
+    読み取って表示し、起動時のプロファイル選択画面・Win+F7 エミュレータメニュー・
+    F1 セットアップメニュー・FunKeyBar・ベゼル・ステータス表示・常時時計／メモリ表示は、
+    液晶の上に重ねる 320×240 の画面（同時に 16 色まで）に描く。
+  - `pb1000.ini` の `[display] driver=DVI` で使う。設定ファイルの雛形 `mp/pb1000_pizero.ini` を追加。
+  - `[display] scale` に 320 ドット幅に収まらない倍率（`2.0` 等）を指定した場合は、起動時に
+    収まる最大の倍率（320/192 ≒ 1.67）へ縮小する。
+  - 常時メモリ表示は、右上の時計と重ならないよう時計の下の行に表示する（Pico 2 / Pico 2 W は
+    従来どおり上部中央）。
+  - USB キーボードはボードの USB-PIO コネクタ（PIO-USB、GP28/GP29）に接続する。REPL は
+    USB-C（CDC）または UART0（GP0/GP1）。
+  - 40 ピンヘッダに USB-A コネクタを外付けする場合向けに、PIO-USB を GP22/GP23 に割り当てた
+    `firmware/firmware_pb1000_pizero_gp22.uf2`（`bash bldfrm.sh pizero gp22`）も用意した。
+    配線の確認用にテストスクリプト `mp/test/pio_usb_gp22_test.py` を追加。
+  - オンボード microSD（SPI1: SCK=GP30、MOSI=GP31、MISO=GP40、CS=GP43）を `/sd` にマウントする。
+  - RS-232C（PIO UART）は pio2（ステートマシン 8/9）を使う（pio0 = DVI、pio1 = PIO-USB）。
+  - フラッシュへの書き込み中（RAM プロファイルの保存等）も DVI 表示を続ける。
+  - WiFi を搭載しないため、NTP による時刻合わせはできない。
+  - 新規ファイル: `src/dvi_display.c/.h`・`src/moddvi_display.c`・`src/libdvi/`（PicoDVI 由来、
+    BSD-3-Clause。`src/libdvi/PROVENANCE.md` 参照）・`src/boards/WAVESHARE_RP2350_PIZERO/`。
+  - 確認用: `dvi_display.timing_info()`・`dvi_display.pio_debug_info()`・`usb_host.debug5()`、
+    テストスクリプト `mp/test/test_dvi_display.py`（カラーバー）・`test_dvi_init_trace.py`・
+    `test_dvi_lcd_vram.py`・`test_dvi_pio_fdebug_colorbar.py`。
+- **PIO-USB の D+ ピンをビルド時に指定できるようにした**（`src/usb_host_core.c` の
+  `PB1000_PIO_USB_DP_PIN`、D- は D+ の次の番号）。既定は従来どおり GP4、pizero ターゲットは GP28。
+
+### 改善
+
+- **USB キーボードのキー入力の反応を改善**（`mp/main_entry.py`）: これまで USB キーボードの
+  処理はメインループ 1 周に 1 回だけで、ループ 1 周（CPU の実行と画面更新）が長いと、
+  キーを押した・離したことがエミュレータに届くまで遅れていた。CPU を `step_chunk`
+  （既定 2048 ステップ）実行するごとにも処理するようにした。全ボード共通。
+
+### 修正
+
+- **SD カードの連続読み出しの終了処理を修正**（`mp/sdcard.py`）: 読み出し停止コマンド
+  （CMD12）の後、カードの処理完了を待ってから次のコマンドを送るようにした。
+
+### 変更
+
+- MODE 領域（&H6F51〜53）への書き込みを REPL に出力するログ（`[investigate]`）を削除
+  （`mp/main_entry.py`）。
+
+### その他
+
+- `firmware/` の全ファームウェア（`firmware_pb1000_pico2w.uf2`・`firmware_pb1000_pico2.uf2`・
+  `firmware_pb1000_pico2w_native_usb.uf2`・`firmware_pb1000_pico2_native_usb.uf2`・
+  `firmware_pb1000_pizero.uf2`）を更新し、`firmware_pb1000_pizero_gp22.uf2` を追加。
+
+---
+
+## 2026-10-27
+
+### 追加
+
+- **PC Link: Pico 2 W では WiFi でも接続できるように**: `pb1000.ini` の `[wifi] ssid` が
+  設定されていれば、PC Link 画面に入ると WiFi に接続し、画面に表示される IP アドレス
+  （ポート 8100）と 4 桁の PIN で PC から接続できる。シリアルポートも同時に使える。
+  - 実機側（`mp/pc_link.py`）: 接続の経過（経過秒数・再試行回数）を画面に表示し、接続に
+    失敗した場合は自動で再試行する（最大 45 秒）。PIN は F2 のたびに変わり、誤った PIN の
+    接続は拒否する。同時に接続できる PC は 1 台。PC Link 画面を抜けると WiFi も切断する。
+  - PC 側: `tools/device_files_gui.py` の **Port / WiFi** 欄に IP アドレスを入力して接続する
+    （PIN を入力）。接続できた IP アドレスは記録して次回から一覧に表示する
+    （`~/.pb1000_device_files.json`）。一覧には実機の名前 `pb1000.local`（mDNS）も表示
+    されるが、名前を解決できない環境では PIN を聞く前にその旨を表示する。
+    `tools/pc_link.py` は `--port <IPアドレス> --pin <PIN>` で WiFi 接続する。
+  - 通信は暗号化されない（PIN による接続制限のみ）。
+  - 詳細は [Usage Guide](doc/usage_guide.md) の「F2: PC Link」参照。
+
+### 修正
+
+- **PC Link 画面が ESC キーや表示の更新に反応しなくなることがある不具合を修正**
+  （`mp/pc_link.py`）: `mpremote` 等が切断時にシリアルポートへ送る制御文字（`\r\x02`）が
+  残っていると、実機が PC からの次の要求行を待ち続けてしまい、その間 ESC キーや画面の
+  更新（WiFi の接続経過の表示など）が止まっていた。シリアルポートからの受信を 1 バイト
+  ずつ待たずに読む方式に変更した。
+
+### その他
+
+- `firmware/firmware_pb1000_pico2w.uf2`・`firmware/firmware_pb1000_pico2.uf2` を更新
+  （2026-10-25 以降の `mp/*.py` の変更をフリーズ済みで含む）。以前これらのファイル
+  （`pc_link.py`・`boot_session.py`・`setup_menu.py`・`emulator_menu.py`）を
+  `mpremote cp` で実機に置いていた場合は、`mpremote rm` で削除すること（フラッシュ上の
+  ファイルがフリーズ版より優先されるため）。
+
+---
+
+## 2026-10-25
+
+### 追加
+
+- **PC Link: SD カードを実機に挿したまま、PC の GUI ツールからファイルを操作できるように**:
+  起動時のプロファイル選択画面で **F2** を押すと PC Link モードになり、REPL 用のシリアル
+  ポート（既定のビルドでは USB-C）経由で PC とファイルをやり取りできる。
+  - 実機側: `mp/pc_link.py`（新規、フリーズ対象に追加）。プロファイル選択画面
+    （`mp/boot_session.py`）に F2 を追加し、戻ったときにプロファイル一覧を再読み込みする。
+  - PC 側: `tools/device_files_gui.py`（新規、`tools/launcher.py` に「Device Files (PC
+    Link)」として追加）。ディスクイメージを MD-100 Disk Image Utility で直接編集して
+    書き戻す・スクリーンショットのプレビューとダウンロード・RAM プロファイルのダウン
+    ロード／アップロード／削除ができる。通信部分は `tools/pc_link.py`（新規、コマンド
+    ラインでも使える）。PC 側には pyserial が必要。
+  - エミュレータ起動前にだけ使えるモードなので、使用中のファイルを書き換えることはない。
+    アップロードは CRC を確認してから元のファイルを置き換える。
+  - 同じシリアルポートを他のプログラム（起動したままの `mpremote ... run main.py` 等）が
+    開いていると通信できないため、Linux では Connect 時にそれを検出して、使用中の
+    プログラムを表示する。
+  - 詳細は [Usage Guide](doc/usage_guide.md) の「F2: PC Link」参照。
+
+### 改善
+
+- **エミュレータメニュー（Win+F7）の画面描画で、全画面を一旦黒く消さないように変更**
+  （`mp/emulator_menu.py`）: 従来はカーソルを1つ動かすたびに全画面を黒で塗りつぶして
+  から全項目を描き直していたため、操作のたびに画面が一瞬消えて見えていた。
+  - カーソル移動時は、選択が外れる行と選択される行の2行だけを描き直すようにした
+    （描画量は画面全体の約1割）。
+  - 項目の実行後やサブメニューの表示時など、画面全体を描き直す場合も、先に黒で
+    消さず、見出し・各行・空き領域・メッセージ欄をそれぞれの背景色で上から描くように
+    した。最終的な画面の内容は従来と同じ。
+  - HDMIミラー出力でも同じく差分だけが送られる（受信側は描画済みの内容の上に
+    重ねて描くため、変更不要）。
+  - ディスク選択・メニュー内の各設定画面は、まだ従来どおり全画面を消してから描き直す。
+- **起動時のプロファイル選択画面でも、↑↓キーのたびに全画面を黒く消さないように変更**
+  （`mp/boot_session.py`）: 上記のエミュレータメニューと同じ方式。カーソル移動時は
+  選択が外れる行と選択される行の2行だけを描き直す。一覧がスクロールしたときや、
+  F1セットアップメニュー・F2 PC Linkから戻ったときの全体描画も、先に黒で消さずに
+  上から描く。
+- **F1セットアップメニューでも、操作のたびに全画面を黒く消さないように変更**
+  （`mp/setup_menu.py`）: 同じ方式。項目一覧のカーソル移動は2行だけを描き直し、
+  一覧のスクロールや項目の変更後、画面の切り替え時も黒で消さずに上から描く。
+  文字列・数値の入力画面はキー入力のたびに入力行だけを、確認画面・保存完了画面も
+  黒で消さずに描く。
+
+---
+
+## 2026-10-20
+
+### 修正
+
+- **エミュレータメニュー（Win+F7）の最上位画面で、ESCキーによる終了を無効化**
+  （`mp/emulator_menu.py`）: ESCキーはPB-1000本体のBRKキーに割り当てられている
+  ため、ESCでメニューを閉じた直後にCPUの実行が再開する瞬間、まだESC/BRKキーが
+  物理的に押されたままだと実行中のBASICプログラムにBREAKがかかってしまう
+  不具合があった。最上位画面ではESCキーを無効化し、メニューを閉じるには
+  **Exit** 項目の選択のみとした。サブメニュー（Toggles/Storage/Display/
+  System）内でのESCキーによる「1つ前の画面に戻る」動作は変更していない
+  （CPUの実行再開を伴わないため対象外）。
+- **メニュー画面上部のキー案内表記「EXE」「BRK」を「Enter」「ESC」に修正**
+  （`mp/emulator_menu.py`・`mp/emulator_menu_debug.py`・
+  `mp/emulator_menu_display_actions.py`・`mp/emulator_menu_system_actions.py`・
+  `mp/emulator_menu_ram.py`・`mp/disk_select_ui.py`・`mp/boot_session.py`・
+  `mp/setup_menu.py`）: これらの画面はUSB HIDキーボードのEnterキー
+  （スキャンコード0x28）・Escキー（0x29）を直接読み取って操作するもので
+  あり、PB-1000本体のEXE/BRKキーの意味とは独立している。表記を実際に
+  押すべきキーに合わせて修正。
+
+### ドキュメント
+
+- `doc/emulator_menu_guide.md`・`doc/emulator_menu_guide_en.md`を上記2点に
+  合わせて更新: キー案内表(EXE/BRK→Enter/ESC)、最上位画面でのESC無効化の
+  説明、「困ったときは」節の手順（ESCではなくExitでメニューを閉じる）。
+  また、Full Captureの説明に残っていた古い「PPM」表記を`PNG`に修正
+  （`doc/usage_guide.md`は2026-10-19に修正済みだったが、このガイドには
+  反映されていなかった）。
+- `doc/usage_guide.md`・`doc/usage_guide_en.md`・`doc/dev_guide.md`・
+  `doc/dev_guide_en.md`・`doc/config_guide.md`・`doc/config_guide_en.md`に
+  残っていた同種の古い「EXE」「BRK」表記も合わせて修正。
+
+---
+
 ## 2026-10-19
 
 ### 修正
