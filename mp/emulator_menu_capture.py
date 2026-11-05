@@ -35,7 +35,7 @@ def _do_vram_save(system):
 
     # Determine writable base directory (/sd/screenshots preferred)
     try:
-        _os.listdir("/sd")
+        _os.stat("/sd")
         base = "/sd/screenshots"
     except OSError:
         base = "/screenshots"
@@ -317,7 +317,7 @@ def _do_full_capture(system, display, fkbar=None):
     # Determine writable base directory (/sd/screenshots preferred), same
     # convention as VRAM Save.
     try:
-        _os.listdir("/sd")
+        _os.stat("/sd")
         base = "/sd/screenshots"
     except OSError:
         base = "/screenshots"

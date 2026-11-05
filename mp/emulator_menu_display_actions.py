@@ -154,7 +154,7 @@ def _save_display_colors(fg_color, bg_color):
     """Write display color settings (RGB332) to pb1000.ini. Returns save path or error string."""
     import os
     try:
-        os.listdir("/sd")
+        os.stat("/sd")
         path = "/sd/pb1000.ini"
     except OSError:
         path = "/pb1000.ini"

@@ -125,7 +125,7 @@ def _save_speed_settings(active_step_count, loop_idle_ms):
     Returns save path or error string."""
     import os
     try:
-        os.listdir("/sd")
+        os.stat("/sd")
         path = "/sd/pb1000.ini"
     except OSError:
         path = "/pb1000.ini"
