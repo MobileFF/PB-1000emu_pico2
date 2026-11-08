@@ -78,18 +78,112 @@ void tuh_event_hook_cb(uint8_t rhport, uint32_t eventid, bool in_isr) {
   (void)rhport; (void)eventid; (void)in_isr;
 }
 
+/* Diagnostics for usb_host.dev_info()/hid_info()/hid_reports(): what the
+ * attached device presented and the raw HID reports it sends, so a
+ * keyboard that mounts but produces no keys can be told apart from one
+ * that never mounts. Only a keyboard interface (protocol 1) sending 8-byte
+ * reports reaches c_kb_process_usb_key_extern() below. */
+#define DIAG_DESC_MAX USB_HOST_DIAG_DESC_MAX
+#define DIAG_REPORT_LOG 16
+#define DIAG_REPORT_BYTES USB_HOST_DIAG_REPORT_BYTES
+
+typedef struct {
+  uint8_t used, dev_addr, itf_protocol, protocol_mode;
+  uint16_t desc_len;
+  uint32_t report_count;
+  uint8_t desc[DIAG_DESC_MAX];
+} diag_hid_itf_t;
+
+typedef struct {
+  uint8_t instance, len;
+  uint8_t data[DIAG_REPORT_BYTES];
+} diag_report_t;
+
+static uint32_t diag_mount_count, diag_umount_count;
+static uint16_t diag_vid, diag_pid;
+static diag_hid_itf_t diag_hid[CFG_TUH_HID];
+static diag_report_t diag_reports[DIAG_REPORT_LOG];
+static uint32_t diag_report_seq;
+
+void tuh_mount_cb(uint8_t dev_addr) {
+  diag_mount_count++;
+  tuh_vid_pid_get(dev_addr, &diag_vid, &diag_pid);
+}
+
+void tuh_umount_cb(uint8_t dev_addr) {
+  (void)dev_addr;
+  diag_umount_count++;
+}
+
 void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const *desc_report, uint16_t desc_len) {
-  (void)desc_report; (void)desc_len;
+  if (instance < CFG_TUH_HID) {
+    diag_hid_itf_t *d = &diag_hid[instance];
+    d->used = 1;
+    d->dev_addr = dev_addr;
+    d->itf_protocol = tuh_hid_interface_protocol(dev_addr, instance);
+    d->protocol_mode = tuh_hid_get_protocol(dev_addr, instance);
+    d->desc_len = desc_len;
+    d->report_count = 0;
+    memcpy(d->desc, desc_report, desc_len < DIAG_DESC_MAX ? desc_len : DIAG_DESC_MAX);
+  }
   tuh_hid_receive_report(dev_addr, instance);
 }
 
 void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
-  (void)dev_addr; (void)instance;
+  (void)dev_addr;
+  if (instance < CFG_TUH_HID) diag_hid[instance].used = 0;
+}
+
+static void diag_log_report(uint8_t instance, uint8_t const *report, uint16_t len) {
+  if (instance < CFG_TUH_HID) diag_hid[instance].report_count++;
+  diag_report_t *r = &diag_reports[diag_report_seq % DIAG_REPORT_LOG];
+  r->instance = instance;
+  r->len = len > 255 ? 255 : (uint8_t)len;
+  memcpy(r->data, report, len < DIAG_REPORT_BYTES ? len : DIAG_REPORT_BYTES);
+  diag_report_seq++;
+}
+
+void usb_host_core_diag_dev(uint32_t *mount, uint32_t *umount, uint16_t *vid, uint16_t *pid) {
+  *mount = diag_mount_count;
+  *umount = diag_umount_count;
+  *vid = diag_vid;
+  *pid = diag_pid;
+}
+
+/* Copies interface `idx` (0..CFG_TUH_HID-1); returns false if unused. */
+bool usb_host_core_diag_hid(uint8_t idx, uint8_t *dev_addr, uint8_t *itf_protocol,
+                            uint8_t *protocol_mode, uint16_t *desc_len,
+                            uint32_t *report_count, uint8_t *desc, uint16_t *desc_copied) {
+  if (idx >= CFG_TUH_HID || !diag_hid[idx].used) return false;
+  diag_hid_itf_t *d = &diag_hid[idx];
+  *dev_addr = d->dev_addr;
+  *itf_protocol = d->itf_protocol;
+  *protocol_mode = d->protocol_mode;
+  *desc_len = d->desc_len;
+  *report_count = d->report_count;
+  *desc_copied = d->desc_len < DIAG_DESC_MAX ? d->desc_len : DIAG_DESC_MAX;
+  memcpy(desc, d->desc, *desc_copied);
+  return true;
+}
+
+/* Copies report `seq` (a running sequence number) if still in the log. */
+bool usb_host_core_diag_report(uint32_t seq, uint8_t *instance, uint8_t *len, uint8_t *data) {
+  if (seq >= diag_report_seq || diag_report_seq - seq > DIAG_REPORT_LOG) return false;
+  diag_report_t *r = &diag_reports[seq % DIAG_REPORT_LOG];
+  *instance = r->instance;
+  *len = r->len;
+  memcpy(data, r->data, DIAG_REPORT_BYTES);
+  return true;
+}
+
+uint32_t usb_host_core_diag_report_seq(void) {
+  return diag_report_seq;
 }
 
 static hid_keyboard_report_t prev_report = {0};
 
 void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t const *report, uint16_t len) {
+  diag_log_report(instance, report, len);
   if (tuh_hid_interface_protocol(dev_addr, instance) == HID_ITF_PROTOCOL_KEYBOARD &&
       len == sizeof(hid_keyboard_report_t)) {
     hid_keyboard_report_t const *kbd_report = (hid_keyboard_report_t const *)report;
@@ -143,11 +237,31 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
  * of a 1kHz ISR). */
 static volatile uint32_t pio_usb_sof_tick_count = 0;
 static int pio_usb_sof_alarm_num = -1;
+static absolute_time_t pio_usb_sof_next;
 
-static void pio_usb_sof_alarm_handler(uint alarm_num) {
+/* The next frame is timed from the previous target, not from the end of
+ * this one, so SOFs stay exactly 1ms apart however long the frame's
+ * transactions took. Devices without a crystal trim their clock to the SOF
+ * interval, and a hub disables a port whose device answers inside the end
+ * of the frame it expects from the SOF interval. The alarm therefore fires
+ * PIO_USB_SOF_LEAD_US early and the handler waits for the exact
+ * microsecond, which absorbs interrupt latency. */
+#define PIO_USB_SOF_LEAD_US 20
+
+static void __not_in_flash_func(pio_usb_sof_alarm_handler)(uint alarm_num) {
+  while (!time_reached(pio_usb_sof_next)) {
+    tight_loop_contents();
+  }
   pio_usb_sof_tick_count++;
   pio_usb_host_frame();
-  hardware_alarm_set_target(alarm_num, delayed_by_us(get_absolute_time(), 1000));
+  pio_usb_sof_next = delayed_by_us(pio_usb_sof_next, 1000);
+  if (hardware_alarm_set_target(alarm_num,
+                                from_us_since_boot(to_us_since_boot(pio_usb_sof_next) - PIO_USB_SOF_LEAD_US))) {
+    /* Target already passed: restart the cadence from now. */
+    pio_usb_sof_next = delayed_by_us(get_absolute_time(), 1000);
+    hardware_alarm_set_target(alarm_num,
+                              from_us_since_boot(to_us_since_boot(pio_usb_sof_next) - PIO_USB_SOF_LEAD_US));
+  }
 }
 
 /* PIO-USB host init (GP4/GP5 by default) — see
@@ -296,7 +410,9 @@ static void usb_host_core_init_pio_usb(void) {
 
   pio_usb_sof_alarm_num = hardware_alarm_claim_unused(true);
   hardware_alarm_set_callback(pio_usb_sof_alarm_num, pio_usb_sof_alarm_handler);
-  hardware_alarm_set_target(pio_usb_sof_alarm_num, delayed_by_us(get_absolute_time(), 1000));
+  pio_usb_sof_next = delayed_by_us(get_absolute_time(), 1000);
+  hardware_alarm_set_target(pio_usb_sof_alarm_num,
+                            from_us_since_boot(to_us_since_boot(pio_usb_sof_next) - PIO_USB_SOF_LEAD_US));
 }
 
 /* Real-hardware bring-up diagnostic: lets Python poll the raw PIO-USB
@@ -375,6 +491,13 @@ void usb_host_core_debug_pio_fdebug(uint32_t *fdebug) {
   *fdebug = pio0->fdebug;
 #endif
 }
+
+extern void hcd_pio_usb_pb1000_get_setup_log(uint8_t out[][9], uint32_t *count);
+
+void usb_host_core_debug_setup_log(uint8_t out[][9], uint32_t *count) {
+  hcd_pio_usb_pb1000_get_setup_log(out, count);
+}
+
 #else /* !PB1000_USE_PIO_USB */
 /* No-op stubs for the native-controller build -- see these functions'
  * declarations in usb_host_core.h for why they always exist. */
@@ -422,10 +545,17 @@ void usb_host_core_debug_pio_usb_history(uint32_t *count, uint32_t *out,
 void usb_host_core_debug_pio_fdebug(uint32_t *fdebug) {
   *fdebug = 0;
 }
+
+void usb_host_core_debug_setup_log(uint8_t out[][9], uint32_t *count) {
+  (void)out;
+  *count = 0;
+}
+
 #endif /* PB1000_USE_PIO_USB */
 
-void usb_host_core_init(void) {
+void usb_host_core_init(uint32_t sys_khz) {
 #ifdef PB1000_BOARD_PIZERO
+  (void)sys_khz;
   /* 2026-10-28 real-hardware finding (USB keyboard not enumerating over
    * PIO-USB -- see 調査用/RP2350-PiZero_実機認識しない問題調査.md):
    * pizero must NOT reach the set_sys_clock_khz()/stdio_uart_init() calls
@@ -456,7 +586,7 @@ void usb_host_core_init(void) {
      project (same RP2350 target) that 240MHz runs stably and meaningfully
      speeds up CPU emulation, since this sys_clock is shared by the whole
      chip, not just the USB host PIO state machines. */
-  set_sys_clock_khz(252000, true);
+  set_sys_clock_khz(sys_khz ? sys_khz : 252000, true);
   sleep_ms(10);
   stdio_uart_init();
 

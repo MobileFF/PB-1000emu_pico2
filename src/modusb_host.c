@@ -6,17 +6,18 @@
 // low‑level print helper (no buffering)
 #define TRACE(str) mp_hal_stdout_tx_str(str "\n")
 
-// Python API: usb_host.init()
+// Python API: usb_host.init([sys_khz])
+// sys_khz overrides the clk_sys the USB host sets (default 252000), for
+// testing PIO-USB timing with other clocks; ignored on pizero.
 static mp_obj_t mod_usb_host_init(size_t n_args, const mp_obj_t *args) {
-  (void)n_args;
-  (void)args;
+  uint32_t sys_khz = n_args > 0 ? mp_obj_get_int(args[0]) : 0;
 //  TRACE("[USB Host] wrapper: before core_init");
 //  mp_printf(&mp_plat_print, "[USB Host] wrapper: before core_init\n");
 #ifdef DEBUG_SKIP_CORE_INIT
   TRACE("[USB Host] skipping core_init\n");
   mp_printf(&mp_plat_print, "[USB Host] skipping core_init\n");
 #else
-  usb_host_core_init();
+  usb_host_core_init(sys_khz);
 #endif
   //  TRACE("[USB Host] wrapper: after core_init");
   //  mp_printf(&mp_plat_print, "[USB Host] wrapper: after core_init\n");
@@ -158,6 +159,92 @@ static mp_obj_t mod_usb_host_debug5(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(mod_usb_host_debug5_obj, mod_usb_host_debug5);
 
+// Python API: usb_host.dev_info() -> (mount_count, umount_count, vid, pid)
+// vid/pid are of the most recently mounted device.
+static mp_obj_t mod_usb_host_dev_info(void) {
+  uint32_t mount, umount;
+  uint16_t vid, pid;
+  usb_host_core_diag_dev(&mount, &umount, &vid, &pid);
+  mp_obj_t items[4] = {
+      mp_obj_new_int_from_uint(mount),
+      mp_obj_new_int_from_uint(umount),
+      MP_OBJ_NEW_SMALL_INT(vid),
+      MP_OBJ_NEW_SMALL_INT(pid),
+  };
+  return mp_obj_new_tuple(4, items);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(mod_usb_host_dev_info_obj, mod_usb_host_dev_info);
+
+// Python API: usb_host.hid_info() -> tuple of
+//   (instance, dev_addr, itf_protocol, protocol_mode, desc_len, report_count,
+//    report_descriptor_bytes)
+// for each mounted HID interface. itf_protocol: 0=none 1=keyboard 2=mouse;
+// protocol_mode: 0=boot 1=report. Only the first 128 descriptor bytes are kept.
+static mp_obj_t mod_usb_host_hid_info(void) {
+  mp_obj_t list = mp_obj_new_list(0, NULL);
+  uint8_t desc[USB_HOST_DIAG_DESC_MAX];
+  for (uint8_t i = 0; i < USB_HOST_DIAG_HID_SLOTS; i++) {
+    uint8_t dev_addr, itf_protocol, protocol_mode;
+    uint16_t desc_len, desc_copied;
+    uint32_t report_count;
+    if (!usb_host_core_diag_hid(i, &dev_addr, &itf_protocol, &protocol_mode,
+                                &desc_len, &report_count, desc, &desc_copied)) {
+      continue;
+    }
+    mp_obj_t items[7] = {
+        MP_OBJ_NEW_SMALL_INT(i),
+        MP_OBJ_NEW_SMALL_INT(dev_addr),
+        MP_OBJ_NEW_SMALL_INT(itf_protocol),
+        MP_OBJ_NEW_SMALL_INT(protocol_mode),
+        MP_OBJ_NEW_SMALL_INT(desc_len),
+        mp_obj_new_int_from_uint(report_count),
+        mp_obj_new_bytes(desc, desc_copied),
+    };
+    mp_obj_list_append(list, mp_obj_new_tuple(7, items));
+  }
+  return list;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(mod_usb_host_hid_info_obj, mod_usb_host_hid_info);
+
+// Python API: usb_host.hid_reports(since_seq) -> (next_seq, reports)
+// reports: tuple of (seq, instance, len, first_16_bytes) for every raw HID
+// report received since `since_seq` that is still in the 16-entry log.
+static mp_obj_t mod_usb_host_hid_reports(mp_obj_t since_obj) {
+  uint32_t since = mp_obj_get_int(since_obj);
+  uint32_t next = usb_host_core_diag_report_seq();
+  mp_obj_t list = mp_obj_new_list(0, NULL);
+  for (uint32_t seq = since; seq < next; seq++) {
+    uint8_t instance, len, data[USB_HOST_DIAG_REPORT_BYTES];
+    if (!usb_host_core_diag_report(seq, &instance, &len, data)) continue;
+    mp_obj_t items[4] = {
+        mp_obj_new_int_from_uint(seq),
+        MP_OBJ_NEW_SMALL_INT(instance),
+        MP_OBJ_NEW_SMALL_INT(len),
+        mp_obj_new_bytes(data, len < USB_HOST_DIAG_REPORT_BYTES ? len : USB_HOST_DIAG_REPORT_BYTES),
+    };
+    mp_obj_list_append(list, mp_obj_new_tuple(4, items));
+  }
+  mp_obj_t result[2] = {mp_obj_new_int_from_uint(next), list};
+  return mp_obj_new_tuple(2, result);
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(mod_usb_host_hid_reports_obj, mod_usb_host_hid_reports);
+
+// Python API: usb_host.setup_log() -> tuple of 9-byte bytes objects
+// [dev_addr, bmRequestType, bRequest, wValue(2), wIndex(2), wLength(2)],
+// oldest first, last 16 setup packets sent. PIO-USB builds only (empty on
+// the native-controller build).
+static mp_obj_t mod_usb_host_setup_log(void) {
+  uint8_t log[16][9];
+  uint32_t count;
+  usb_host_core_debug_setup_log(log, &count);
+  mp_obj_t list = mp_obj_new_list(0, NULL);
+  for (uint32_t i = 0; i < count; i++) {
+    mp_obj_list_append(list, mp_obj_new_bytes(log[i], 9));
+  }
+  return list;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(mod_usb_host_setup_log_obj, mod_usb_host_setup_log);
+
 
 static const mp_rom_map_elem_t usb_host_module_globals_table[] = {
     {MP_ROM_QSTR(MP_QSTR___name__), MP_ROM_QSTR(MP_QSTR_usb_host)},
@@ -172,6 +259,10 @@ static const mp_rom_map_elem_t usb_host_module_globals_table[] = {
     {MP_ROM_QSTR(MP_QSTR_debug3), MP_ROM_PTR(&mod_usb_host_debug3_obj)},
     {MP_ROM_QSTR(MP_QSTR_debug4), MP_ROM_PTR(&mod_usb_host_debug4_obj)},
     {MP_ROM_QSTR(MP_QSTR_debug5), MP_ROM_PTR(&mod_usb_host_debug5_obj)},
+    {MP_ROM_QSTR(MP_QSTR_dev_info), MP_ROM_PTR(&mod_usb_host_dev_info_obj)},
+    {MP_ROM_QSTR(MP_QSTR_hid_info), MP_ROM_PTR(&mod_usb_host_hid_info_obj)},
+    {MP_ROM_QSTR(MP_QSTR_hid_reports), MP_ROM_PTR(&mod_usb_host_hid_reports_obj)},
+    {MP_ROM_QSTR(MP_QSTR_setup_log), MP_ROM_PTR(&mod_usb_host_setup_log_obj)},
 };
 static MP_DEFINE_CONST_DICT(usb_host_module_globals,
                             usb_host_module_globals_table);

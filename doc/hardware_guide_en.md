@@ -188,8 +188,11 @@ USB-A connector (or a cut USB cable) and two resistors.
 - **Wiring quality matters**: a breadboard + jumper-wire prototype has been observed to pass
   SETUP but fail CRC on subsequent data transfers, breaking enumeration. Use a soldered
   perfboard or similar solid construction.
-- **Known limitation**: some USB keyboards are not recognized over this path (a compatibility
-  issue; root cause not identified). Try a different keyboard if yours isn't recognized.
+- **Known limitation**: some USB keyboards (including wireless keyboard receivers) are not
+  recognized when plugged straight into GP4/GP5. Putting a **USB hub in between** can make them
+  work (up to 4 devices besides the hub itself, including any device built into the hub). If a
+  keyboard still isn't recognized through a hub, try a different one. `mp/test/usb_kbd_diag.py`
+  helps find out where it fails.
 
 **Native USB host (`USE_PIO_USB=OFF` build)**
 

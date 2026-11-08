@@ -7,6 +7,40 @@ date heading instead of a version number or "Unreleased" marker.
 
 ---
 
+## 2026-11-08
+
+### Added
+
+- **USB keyboards behind a USB hub on PIO-USB** (`src/usb_host/tusb_config.h`): up to 4 devices
+  can be attached behind a hub instead of 1 (a card reader or other device built into the hub
+  counts as one). Some keyboards (including wireless keyboard receivers) that are not recognized
+  when plugged straight into GP4/GP5 work through a hub. See
+  [Hardware Guide §8](doc/hardware_guide_en.md#8-usb-keyboard).
+- **USB keyboard diagnostics and test script** (`src/usb_host_core.c`, `src/modusb_host.c`,
+  `mp/test/usb_kbd_diag.py`): `usb_host.dev_info()`, `hid_info()`, `hid_reports()` and
+  `setup_log()` return the attached device's VID:PID, its HID interfaces (keyboard, mouse, ...)
+  with their report descriptors, the raw reports received, and the most recent setup packets
+  sent during enumeration (PIO-USB only). Use them to find out why a keyboard does not respond
+  (enumeration stops partway, no interface usable as a keyboard, or a different report format).
+  All boards.
+
+### Fixed
+
+- **PIO-USB SOF (the 1 ms start-of-frame) interval drifted** (`src/usb_host_core.c`): the next
+  SOF was scheduled 1 ms after the previous frame's work finished, so the interval was longer
+  than 1 ms and also moved with interrupt latency. A USB hub treats that as traffic at the end
+  of a frame and disables the port, so devices behind a hub stopped answering after a while.
+  SOFs are now sent exactly 1 ms apart.
+
+### Changed
+
+- **PIO-USB library updated to 0.7.3** (`src/usb_host/pio_usb/`, see
+  [PROVENANCE.md](src/usb_host/pio_usb/PROVENANCE.md)).
+- **`usb_host.init()` takes an optional clk_sys in kHz** (`src/modusb_host.c`): 252 MHz when
+  omitted, as before. Ignored on the RP2350-PiZero.
+
+---
+
 ## 2026-11-03
 
 ### Added
@@ -57,6 +91,10 @@ date heading instead of a version number or "Unreleased" marker.
 
 - **End of SD card multi-block reads** (`mp/sdcard.py`): after the stop command (CMD12), wait
   for the card to finish before sending the next command.
+- **Full Capture and other emulator-menu actions stopped with `UnicodeError` when the SD card
+  root held a file name that is not valid UTF-8** (`mp/emulator_menu_capture.py`,
+  `mp/emulator_menu_display_actions.py`, `mp/emulator_menu_system_actions.py`): the SD card is
+  now detected with `os.stat("/sd")` instead of listing its root (`os.listdir("/sd")`).
 
 ### Changed
 

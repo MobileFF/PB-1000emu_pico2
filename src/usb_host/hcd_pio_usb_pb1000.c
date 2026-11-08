@@ -142,6 +142,22 @@ void hcd_pio_usb_pb1000_get_setup_info(uint32_t *setup_send_count,
   *port_reset_end_count = pio_usb_port_reset_end_count;
 }
 
+/* The last SETUP_LOG_LEN setup packets sent (raw 8 bytes + dev_addr), for
+ * usb_host.setup_log(): shows how far enumeration got for a device that
+ * never mounts (e.g. a configuration descriptor read that is never
+ * followed by SET_CONFIGURATION). */
+#define SETUP_LOG_LEN 16
+static uint8_t pio_usb_setup_log[SETUP_LOG_LEN][9];
+
+void hcd_pio_usb_pb1000_get_setup_log(uint8_t out[][9], uint32_t *count) {
+  uint32_t n = pio_usb_setup_send_count;
+  uint32_t first = n > SETUP_LOG_LEN ? n - SETUP_LOG_LEN : 0;
+  for (uint32_t i = first; i < n; i++) {
+    memcpy(out[i - first], pio_usb_setup_log[i % SETUP_LOG_LEN], 9);
+  }
+  *count = n - first;
+}
+
 uint32_t hcd_pio_usb_pb1000_get_is_fullspeed(void) {
   root_port_t *root = PIO_USB_ROOT_PORT(0);
   return root->is_fullspeed ? 1 : 0;
@@ -272,6 +288,9 @@ bool hcd_edpt_abort_xfer(uint8_t rhport, uint8_t dev_addr, uint8_t ep_addr) {
 
 bool hcd_setup_send(uint8_t rhport, uint8_t dev_addr,
                      uint8_t const setup_packet[8]) {
+  uint8_t *log = pio_usb_setup_log[pio_usb_setup_send_count % SETUP_LOG_LEN];
+  log[0] = dev_addr;
+  memcpy(&log[1], setup_packet, 8);
   pio_usb_setup_send_count++;
   pio_usb_last_setup_word = ((uint32_t)setup_packet[0] << 24) |
                              ((uint32_t)setup_packet[1] << 16) |

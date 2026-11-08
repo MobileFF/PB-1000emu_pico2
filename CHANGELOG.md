@@ -7,6 +7,40 @@ push される運用のため、バージョン番号や「未リリース」の
 
 ---
 
+## 2026-11-08
+
+### 追加
+
+- **PIO-USB で USB ハブ経由のキーボードに対応**（`src/usb_host/tusb_config.h`）: ハブの先に
+  つなげる機器を 1 台から 4 台に増やした（ハブに内蔵されたカードリーダー等も 1 台に数える）。
+  GP4/GP5 に直接つなぐと認識しないキーボード（ワイヤレスキーボードの受信機を含む）でも、
+  ハブを挟むと認識する場合がある。詳細は
+  [Hardware Guide §8](doc/hardware_guide.md#8-usb-キーボード) 参照。
+- **USB キーボードの診断用関数とテストスクリプトを追加**（`src/usb_host_core.c`・
+  `src/modusb_host.c`・`mp/test/usb_kbd_diag.py`）: 接続した機器の VID:PID、HID インターフェースの
+  種類（キーボード／マウス等）とレポートディスクリプタ、受信した生のレポート、接続処理で送った
+  直近のセットアップパケット（PIO-USB のみ）を `usb_host.dev_info()`・`hid_info()`・
+  `hid_reports()`・`setup_log()` で読める。キーボードが反応しない原因（接続処理の途中で
+  止まる、キーボードとして扱えるインターフェースがない、レポートの形式が違う）の切り分けに使う。
+  全ボード共通。
+
+### 修正
+
+- **PIO-USB の SOF（1ms ごとのフレーム開始）の間隔がずれる不具合を修正**（`src/usb_host_core.c`）:
+  これまでは前のフレームの処理が終わった時刻から 1ms 後を次の SOF にしていたため、間隔が
+  1ms より長くなり、割り込みの遅れの分だけ前後にもずれていた。USB ハブはこのずれを
+  フレームの終わりでの通信とみなしてポートを無効にするため、ハブ経由の機器が途中から
+  応答しなくなっていた。SOF を正確に 1ms 間隔で送るようにした。
+
+### 変更
+
+- **PIO-USB ライブラリを 0.7.3 に更新**（`src/usb_host/pio_usb/`、
+  [PROVENANCE.md](src/usb_host/pio_usb/PROVENANCE.md) 参照）。
+- **`usb_host.init()` に clk_sys を kHz で指定する省略可能な引数を追加**（`src/modusb_host.c`）:
+  省略時は従来どおり 252MHz。RP2350-PiZero では無視する。
+
+---
+
 ## 2026-11-03
 
 ### 追加
@@ -53,6 +87,10 @@ push される運用のため、バージョン番号や「未リリース」の
 
 - **SD カードの連続読み出しの終了処理を修正**（`mp/sdcard.py`）: 読み出し停止コマンド
   （CMD12）の後、カードの処理完了を待ってから次のコマンドを送るようにした。
+- **SD カードのルートに UTF-8 で読めない名前のファイルがあると、エミュレータメニューの
+  Full Capture 等が `UnicodeError` で止まる不具合を修正**（`mp/emulator_menu_capture.py`・
+  `mp/emulator_menu_display_actions.py`・`mp/emulator_menu_system_actions.py`）: SD カードの
+  有無をルートの一覧（`os.listdir("/sd")`）ではなく `os.stat("/sd")` で判定するようにした。
 
 ### 変更
 

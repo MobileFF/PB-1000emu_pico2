@@ -6,8 +6,10 @@ Vendored 2026-10-04 from a sibling MicroPython/RP2350 project
 
 - **Upstream**: [sekigon-gonnoc/Pico-PIO-USB](https://github.com/sekigon-gonnoc/Pico-PIO-USB),
   MIT License (see `LICENSE` in this directory).
-- **Exact version vendored**: tag `0.7.2`, commit
-  `3c1eec341a5232640e4c00628b889b641af34b28`.
+- **Exact version vendored**: tag `0.7.3`, commit
+  `b186e36bea0f3bcc2ee94ca1fa81e7f71281443a` (originally `0.7.2`, `3c1eec341a5232640e4c00628b889b641af34b28`;
+  `pio_usb.c`, `pio_usb_host.c`, `pio_usb_ll.h` and `usb_crc.c` updated to
+  `0.7.3` on 2026-11-05 — the other files are identical in both tags).
 
 Files copied verbatim (unmodified) from that tag's `src/`: `pio_usb.c/h`,
 `pio_usb_host.c`, `pio_usb_ll.h`, `sdk_compat.h`, `usb_crc.c/h`,
@@ -31,8 +33,10 @@ Unlike the other files, `pio_usb_configuration.h` carries one hand-edited
 constant, inherited from the sibling project's own real-hardware finding:
 
 - `PIO_USB_EP_POOL_CNT` reduced from upstream's default `32` to `8` — see
-  that file's own comment. This project only ever has a single HID
-  keyboard on this port; the sibling project measured the full 32-slot
+  that file's own comment. This project has one HID keyboard on this
+  port, either directly or behind a USB hub (8 also covers a hub, a
+  keyboard receiver with two HID interfaces and a device built into the
+  hub, confirmed on real hardware); the sibling project measured the full 32-slot
   pool (`endpoint_t pio_usb_ep_pool[32]`, ~6KB of `.bss`) pushing its GC
   heap below MicroPython's required minimum on real RP2350 hardware once
   combined with its own large static buffers. This project has its own

@@ -5,7 +5,9 @@
 #include <stdint.h>
 
 
-void usb_host_core_init(void);
+/* sys_khz: clk_sys for the USB host (0 = default 252MHz). Ignored on
+ * pizero, where dvi_display_init() owns the clock. */
+void usb_host_core_init(uint32_t sys_khz);
 void usb_host_core_start_bg_timer(int interval_ms);
 void usb_host_core_stop_bg_timer(void);
 
@@ -58,5 +60,20 @@ void usb_host_core_debug_pio_usb_history(uint32_t *count, uint32_t *out,
  * TXOVER = (fdebug>>16)&0xF, one bit per PIO SM, sticky/write-1-to-clear
  * -- same convention as dvi_display.pio_debug_info()). */
 void usb_host_core_debug_pio_fdebug(uint32_t *fdebug);
+
+/* Last (up to 16) setup packets as [dev_addr, 8 raw bytes]; PIO-USB only
+ * (count is always 0 on the native-controller build). */
+void usb_host_core_debug_setup_log(uint8_t out[][9], uint32_t *count);
+
+/* Device / HID interface / raw report diagnostics, see usb_host_core.c. */
+#define USB_HOST_DIAG_DESC_MAX 128
+#define USB_HOST_DIAG_REPORT_BYTES 16
+#define USB_HOST_DIAG_HID_SLOTS 8  /* >= CFG_TUH_HID; unused slots are skipped */
+void usb_host_core_diag_dev(uint32_t *mount, uint32_t *umount, uint16_t *vid, uint16_t *pid);
+bool usb_host_core_diag_hid(uint8_t idx, uint8_t *dev_addr, uint8_t *itf_protocol,
+                            uint8_t *protocol_mode, uint16_t *desc_len,
+                            uint32_t *report_count, uint8_t *desc, uint16_t *desc_copied);
+bool usb_host_core_diag_report(uint32_t seq, uint8_t *instance, uint8_t *len, uint8_t *data);
+uint32_t usb_host_core_diag_report_seq(void);
 
 #endif

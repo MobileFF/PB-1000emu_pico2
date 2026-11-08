@@ -45,9 +45,9 @@ typedef struct {
 
 /* Deliberately reduced from upstream's default of 32 (matching the same
  * reduction validated on a sibling RP2350 MicroPython project — see this
- * directory's PROVENANCE.md): this project only ever has a single HID
- * keyboard on this port (a control endpoint pair + one interrupt-IN
- * report endpoint, plus slack for a device behind a hub). Saves
+ * directory's PROVENANCE.md): this project has one HID keyboard on this
+ * port, directly or behind a USB hub (enough for a hub, a receiver with
+ * two HID interfaces and a device built into the hub). Saves
  * ~24 * sizeof(endpoint_t) (~4.5KB) of .bss, which mattered for fitting
  * under the GC heap's required minimum on that project's real hardware. */
 #define PIO_USB_EP_POOL_CNT 8
