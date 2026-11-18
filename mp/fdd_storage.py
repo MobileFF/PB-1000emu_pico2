@@ -15,7 +15,7 @@ class StorageBackend:
         read_raw() for backends that don't override this; ImageStorageBackend
         overrides it with a zero-Python-heap-allocation path via
         f.readinto(), since this is called on every sector-cache miss
-        (md100_dos.py's _my_sec_read()) -- a real hot path for any file
+        (md100_volume.py's sector cache) -- a real hot path for any file
         read/directory-scan/seek operation, unlike write_raw() which is only
         hit on writes. Returns True on success."""
         raw = self.read_raw(sector)
@@ -47,9 +47,9 @@ class ImageStorageBackend(StorageBackend):
     def read_into(self, sector, buf):
         # readinto() fills buf directly from the file with zero Python-heap
         # allocation, unlike read_raw() (which must return a fresh bytes
-        # object every call). md100_dos.py's _my_sec_read() -- the sector
-        # cache miss path hit by essentially every disk read/dir-scan/seek
-        # -- always passes its own persistent secbuf here, so there's no
+        # object every call). md100_volume.py's sector cache miss path --
+        # hit by essentially every disk read/dir-scan/seek -- always passes
+        # its own persistent cache buffer here, so there's no
         # need to allocate an intermediate object at all.
         self._f.seek(sector * SIZE_SECTOR)
         return self._f.readinto(buf) == SIZE_SECTOR

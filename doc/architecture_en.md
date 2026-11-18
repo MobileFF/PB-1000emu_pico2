@@ -237,6 +237,30 @@ hardware.
 
 ---
 
+### Virtual FDD (MD-100) layer: `mp/md100_link.py` / `mp/md100_volume.py` / `mp/fdd_storage.py`
+
+```
+PB1000FddMixin (one byte per STR pulse on I/O ports 0x0C00-)
+  └─ Md100Link.exchange(byte) -> response byte   … md100_link.py: MD-100 command protocol
+       └─ Md100Volume                            … md100_volume.py: file system on the disk image
+            └─ ImageStorageBackend                … fdd_storage.py: 256-byte sector read/write
+```
+
+- `Md100Link`: a state machine that takes one byte from the PB-1000 and returns one byte. It
+  handles directory read, open/close, record read/write, delete, rename, sector read/write,
+  format, file size, and free space. `pb1000.py` holds one as `virtual_fdd_controller`, and
+  `configure_virtual_fdd()` connects an `Md100Volume` to it with `attach()` each time a disk
+  image is opened.
+- `Md100Volume`: reads and writes files in the MD-100 format (4-sector allocation table,
+  12-sector directory, 4-sector blocks) in 256-byte records through handles 0-15. It keeps the
+  allocation table (1KB) in RAM and remembers each handle's last position, so sequential access
+  costs about one sector read per record.
+- Use from extensions: `ext/vram_loader.py` shares `virtual_fdd_controller.volume`;
+  `ext/bank_loader.py` attaches its own `Md100Volume` to the same storage for reading.
+- Unit tests (run on CPython): `python3 mp/test/test_md100_volume.py`, `python3 mp/test/test_md100_link.py`
+
+---
+
 ### `mp/pb1000_state_io.py`
 
 Responsibilities:

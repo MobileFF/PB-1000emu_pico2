@@ -9,7 +9,7 @@ doc/extension_api.md「bank_loader.py」を参照。ここに全文を置くと
 起動時ロードのたびにコンパイル時メモリを圧迫するため要点のみ。
 """
 
-from md100_dos import MD100Dos, DS_NO_ERROR
+from md100_volume import Md100Volume
 
 SD_LOAD_ADDR  = 0x5E81
 FDD_LOAD_ADDR = 0x5E91
@@ -113,24 +113,24 @@ def _load_fdd(system):
             _set_result(w, _ERR_FDD_READY, 0)
             return
 
-        # Use a fresh DOS instance on the shared backend to avoid disturbing
+        # Use a fresh volume instance on the shared backend to avoid disturbing
         # the FDD protocol's own open handles and sector cache.
-        dos = MD100Dos()
-        dos.dos_init(system.virtual_fdd)
+        dos = Md100Volume()
+        dos.attach(system.virtual_fdd)
 
         handle = 0
-        idx = dos.open_disk_file(handle, name11)
+        idx = dos.open(handle, name11)
         if idx < 0:
             _set_result(w, _ERR_FILE, 0)
             return
 
         if skip_recs:
-            dos.seek_abs_disk_file(handle, skip_recs)
+            dos.seek(handle, skip_recs)
 
         rec_buf = bytearray(256)
         total = 0
         while True:
-            n = dos.read_disk_file(handle, rec_buf)
+            n = dos.read_record(handle, rec_buf)
             if n == 0:
                 break
             avail = buf_size - dest_off - total
@@ -140,9 +140,9 @@ def _load_fdd(system):
             total += to_copy
             if total >= buf_size - dest_off:
                 break
-            dos.seek_rel_disk_file(handle, 1)
+            dos.skip(handle, 1)
 
-        dos.close_disk_file(handle)
+        dos.close(handle)
 
         _set_result(w, _ERR_OK, total)
 

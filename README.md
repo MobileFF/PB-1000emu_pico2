@@ -79,7 +79,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 - **PB-1000 の ROM イメージは含まれません**。ROM は CASIO 社に著作権があり、本リポジトリでは配布していません。実機から吸い出したご自身の ROM イメージをお使いください（詳細は [Usage Guide](doc/usage_guide.md) 参照）。
 - **HD61700 CPU コア（`src/hd61700.c`/`.h`）は MAME プロジェクトの `hd61700.cpp`（Sandro Ronco 氏作、BSD-3-Clause license）の C言語移植です。** パーミッシブライセンスのため GPL-3.0 への組み込みに問題はありませんが、著作権表示・条件・免責事項の全文を [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) に記載しています。
-- 「謝辞」に記載の Piotr Piatek 氏の PB-1000 エミュレータについては、ソースコード（`pb1000es/`、参考資料として同梱・ビルド対象外）を本プロジェクトの実装と比較した結果、直接転用は確認されませんでした。詳細は [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) を参照してください。
+- 「謝辞」に記載の Piotr Piatek 氏の PB-1000 エミュレータについては、ソースコードは本リポジトリに同梱しておらず、本プロジェクトのコードはこれに由来しません（動作の参考としてのみ使用）。仮想 FDD（MD-100）層は、以前の版では同氏のソースコードの移植でしたが、独立に書き直して置き換えました。詳細は [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) を参照してください。
 - 本プロジェクトは **MicroPython**（MIT License）、**Raspberry Pi Pico SDK**（BSD-3-Clause）、**TinyUSB**（MIT License）をビルド時にリンクしています。これらの詳細も [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) に記載しています。
 
 ## 謝辞

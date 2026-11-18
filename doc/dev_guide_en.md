@@ -70,9 +70,9 @@ mp/
   xpt2046.py              # XPT2046 touch panel controller driver
   sdcard.py               # SD card SPI driver
   disk_select_ui.py       # Virtual FDD disk image selection UI
-  fdd_protocol.py         # Virtual FDD (MD-100) command/data protocol
   fdd_storage.py          # Virtual FDD storage backend
-  md100_dos.py            # MD-100 DOS layer (ported from pb1000es dos.pas)
+  md100_link.py           # Virtual FDD (MD-100) command/data protocol
+  md100_volume.py         # MD-100 disk file-system layer
   ntp_sync.py             # NTP time sync over WiFi
   debug.py                # REPL CPU/register debug helpers
   ext/                    # Extension API modules (auto-loaded)

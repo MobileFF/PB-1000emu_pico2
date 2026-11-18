@@ -370,9 +370,9 @@ CALL &H5E20 (SD)                    CALL &H5E21 (FDD)
   │                                   │
   ├─ ファイルパスを解決               ├─ FDD マウント確認 (is_ready)
   ├─ open() で読み込み                ├─ name11 に変換 (8.3形式)
-  │                                   ├─ open_disk_file(handle, name11)
-  │                                   ├─ read_disk_file() × セクタ数
-  │                                   └─ close_disk_file(handle)
+  │                                   ├─ Md100Volume.open(handle, name11)
+  │                                   ├─ read_record() × レコード数
+  │                                   └─ close(handle)
   ├─ bank_ram[slot][0:n] = data  ←── 共通: バンクRAM に書き込み
   ├─ color_vram[dst:dst+n] = bank_ram[slot][0:n]  ←── VRAM 転送
   ├─ set_vdp_enable(True) + set_vdp_init_done(True) + mark_dirty()

@@ -10,3 +10,8 @@ references/
 __pycache__/
 *.py[cod]
 *$py.class
+
+# KiCad 自動バックアップ・キャッシュ
+*-backups/
+*.bak
+fp-info-cache

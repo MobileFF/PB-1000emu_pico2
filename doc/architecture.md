@@ -237,6 +237,30 @@ importする（`main_input_joystick.py` は `[joystick] enable=true` の時の�
 
 ---
 
+### 仮想 FDD（MD-100）層: `mp/md100_link.py` / `mp/md100_volume.py` / `mp/fdd_storage.py`
+
+```
+PB1000FddMixin（I/O ポート 0x0C00〜 の STR パルスごとに 1 バイト）
+  └─ Md100Link.exchange(byte) → 応答バイト   … md100_link.py: MD-100 コマンドプロトコル
+       └─ Md100Volume                        … md100_volume.py: ディスクイメージ上のファイルシステム
+            └─ ImageStorageBackend            … fdd_storage.py: 256 バイト単位のセクタ読み書き
+```
+
+- `Md100Link`: PB-1000 から 1 バイト受け取り、1 バイト返す状態機械。ディレクトリ読み出し・
+  オープン／クローズ・レコード読み書き・削除・改名・セクタ読み書き・フォーマット・
+  ファイルサイズ・空き容量の各コマンドを処理する。
+  `pb1000.py` が `virtual_fdd_controller` として 1 つ保持し、
+  `configure_virtual_fdd()` でディスクイメージを開くたびに `attach()` で `Md100Volume` をつなぐ。
+- `Md100Volume`: MD-100 形式（割り当て表 4 セクタ・ディレクトリ 12 セクタ・4 セクタ単位のブロック）の
+  ファイルを、ハンドル 0〜15 経由で 256 バイトのレコード単位で読み書きする。割り当て表（1KB）を
+  RAM に保持し、ハンドルごとに直前の位置を覚えているので、順次アクセスでは 1 レコードあたり
+  ほぼ 1 回のセクタ読み込みで済む。
+- 拡張モジュールからの利用: `ext/vram_loader.py` は `virtual_fdd_controller.volume` を共用し、
+  `ext/bank_loader.py` は同じストレージに自前の `Md100Volume` をつないで読む。
+- 単体テスト（CPython で実行）: `python3 mp/test/test_md100_volume.py`、`python3 mp/test/test_md100_link.py`
+
+---
+
 ### `mp/pb1000_state_io.py`
 
 役割:

@@ -123,19 +123,29 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ---
 
-## Piotr Piatek's PB-1000 emulator (`pb1000es/*.pas`, reference material only)
+## Piotr Piatek's PB-1000 emulator (reference only, not included)
 
-Piotr Piatek's PB-1000 emulator source (bundled in this repository under
-`pb1000es/` purely as historical reference material, and **not** built
-or shipped as part of the firmware) carries no license file and no
-license statement was found published alongside it. Its copyright
-status should therefore be treated as "all rights reserved" by its
-author. A comparison of this repository's `src/hd61700.c` against
-`pb1000es/*.pas` found no evidence of direct code reuse — the two use
-entirely different naming conventions and code structure, and MAME's
-own header (which this project's core is a direct port of) states it
-was informed by Piotr Piatek's *documentation*, not his source code.
-No files in `src/` or `mp/` are derived from `pb1000es/`.
+Piotr Piatek's PB-1000 emulator source is **not** included in this
+repository, and is not built or shipped as part of the firmware. It
+carries no license file and no license statement was found published
+alongside it. Its copyright status should therefore be treated as
+"all rights reserved" by its author. A comparison of this repository's
+`src/hd61700.c` against that source (Pascal `*.pas` files) found no
+evidence of direct code reuse — the two use entirely different naming
+conventions and code structure, and MAME's own header (which this
+project's core is a direct port of) states it was informed by Piotr
+Piatek's *documentation*, not his source code.
+
+The virtual FDD (MD-100) layer (`mp/md100_volume.py`, `mp/md100_link.py`)
+was written from a functional specification of the MD-100 disk format and
+command protocol by an implementer who did not consult that
+source. It replaces `mp/md100_dos.py` and `mp/fdd_protocol.py`, which
+were Python ports of that source's `dos.pas` / `fdd.pas` and have been
+removed from this repository.
+
+No files in `src/` or `mp/` are derived from it. It was used only as a
+behavioral reference (e.g. for comparing CPU and keyboard-matrix
+behavior).
 
 ---
 

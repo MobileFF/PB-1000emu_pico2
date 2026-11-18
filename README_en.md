@@ -79,7 +79,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 - **PB-1000 ROM images are not included.** The ROM is copyrighted by CASIO and is not distributed in this repository. Use a ROM image you have dumped from your own hardware (see the [Usage Guide](doc/usage_guide_en.md)).
 - **The HD61700 CPU core (`src/hd61700.c`/`.h`) is a C port of the MAME project's `hd61700.cpp`** (by Sandro Ronco, BSD-3-Clause license). Being a permissive license, incorporating it into this GPL-3.0 project is not a problem; the full copyright notice, conditions, and disclaimer are reproduced in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
-- Regarding Piotr Piatek's PB-1000 emulator mentioned in "Acknowledgments": its source (`pb1000es/`, bundled purely as reference material and not part of the build) was compared against this project's implementation, and no direct code reuse was found. See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) for details.
+- Regarding Piotr Piatek's PB-1000 emulator mentioned in "Acknowledgments": its source code is not included in this repository, and no code in this project is derived from it (it was used only as a behavioral reference). The virtual FDD (MD-100) layer, which in earlier versions was a port of that source, has been independently rewritten and replaced. See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) for details.
 - This project links **MicroPython** (MIT License), the **Raspberry Pi Pico SDK** (BSD-3-Clause), and **TinyUSB** (MIT License) at build time; details are also in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
 ## Acknowledgments

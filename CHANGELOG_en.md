@@ -7,6 +7,30 @@ date heading instead of a version number or "Unreleased" marker.
 
 ---
 
+## 2026-11-14
+
+### Changed
+
+- **Virtual FDD (MD-100) layer replaced with an independent implementation**
+  (`mp/md100_volume.py`, `mp/md100_link.py`): the previous `mp/md100_dos.py` and
+  `mp/fdd_protocol.py` were ports of Piotr Piatek's PB-1000 emulator source, which has no stated
+  license, so they have been removed and replaced with code written from a functional
+  specification of the MD-100 disk format and command protocol. The disk image format is
+  unchanged; existing images work as before. See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+- **`ext/bank_loader.py` and `ext/vram_loader.py` updated for the new virtual FDD layer**: behavior is
+  unchanged. If you have copied them to the SD card (`/sd/ext/` or a profile's `ext/`) or to `/ext/`,
+  replace them together with the firmware update: the old versions import a module that no longer
+  exists and fail to load on the new firmware (and the new versions do not work on older firmware).
+
+### Fixed
+
+- **Last record of a file opened in APPEND mode lost one byte**: the last valid byte was dropped
+  from the record returned for appending ("ABC" came back as "AB").
+- **Reading or writing a sector outside the disk image now returns an error**: sector read
+  returns "invalid command" (0x20), sector write returns "write protected" (0x02).
+
+---
+
 ## 2026-11-08
 
 ### Added

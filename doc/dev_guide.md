@@ -68,9 +68,9 @@ mp/
   xpt2046.py              # XPT2046 タッチパネルコントローラドライバ
   sdcard.py               # SD カード SPI ドライバ
   disk_select_ui.py       # 仮想 FDD ディスクイメージ選択 UI
-  fdd_protocol.py         # 仮想 FDD (MD-100) コマンド/データプロトコル
   fdd_storage.py          # 仮想 FDD ストレージバックエンド
-  md100_dos.py            # MD-100 DOS 層（pb1000es dos.pas 移植）
+  md100_link.py           # 仮想 FDD (MD-100) コマンド/データプロトコル
+  md100_volume.py         # MD-100 ディスクのファイルシステム層
   ntp_sync.py             # WiFi 経由 NTP 時刻同期
   debug.py                # REPL 向け CPU/レジスタデバッグ補助
   ext/                    # 拡張 API モジュール（自動ロード）

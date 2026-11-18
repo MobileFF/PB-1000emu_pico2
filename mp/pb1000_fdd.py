@@ -25,7 +25,7 @@ import os
 import sys
 import hd61700 as cpu_core
 from fdd_storage import ImageStorageBackend
-from md100_dos import MD100Dos
+from md100_volume import Md100Volume
 
 PD_RES = 0x08
 PD_PWR = 0x10
@@ -103,7 +103,7 @@ class PB1000FddMixin:
                 self._gpo_parity = 0         # Reset parity for clean D92E P1/P0 pairs
             else:
                 self._virtual_fdd_ack = False
-                self.virtual_fdd_controller.close()
+                self.virtual_fdd_controller.shutdown()
 
         if powered_now:
             # Power is ON (Active Low)
@@ -111,7 +111,7 @@ class PB1000FddMixin:
                 # Rising edge of RES: Device Enters Reset (Active HIGH)
                 self._log_vfdd(f"Reset Detected (Active HIGH)")
                 self._virtual_fdd_ack = False
-                self.virtual_fdd_controller.open()
+                self.virtual_fdd_controller.reset()
             elif (current & PD_RES) == 0 and (previous & PD_RES) != 0:
                 # Falling edge of RES: Reset Released (Run Mode)
                 self._log_vfdd("Reset released")
@@ -134,12 +134,12 @@ class PB1000FddMixin:
 
                 if res_released_now:
                     # Boot pulse: RES released in this same CTRL write as STR
-                    # fell (e.g. CTRL 1C->00). Don't call transfer() here — it
+                    # fell (e.g. CTRL 1C->00). Don't call exchange() here — it
                     # would advance state before the real command is issued;
                     # just leave _io_rd_regs[4]=0x55 for the ROM's OPTCD read.
                     pass
                 else:
-                    val_out_next = self.virtual_fdd_controller.transfer(val_in)
+                    val_out_next = self.virtual_fdd_controller.exchange(val_in)
                     self._io_rd_regs[4] = val_out_next
                     cpu_core.set_vfdd_data(val_out_next)
 
@@ -152,7 +152,7 @@ class PB1000FddMixin:
                 self._log_vfdd("Interface entered power-off state")
         if (current & PD_RES) != 0 and (previous & PD_RES) == 0:
             # FDD Reset rising edge outside powered block: reset state machine
-            self.virtual_fdd_controller.open()
+            self.virtual_fdd_controller.reset()
 
         self._port_last_write = current
 
@@ -315,13 +315,12 @@ class PB1000FddMixin:
         self._inject_optcd_signature("configure")
 
         backend = ImageStorageBackend(path, readonly=readonly)
-        dos = MD100Dos()
-        dos.dos_init(backend)
+        vol = Md100Volume()
+        vol.attach(backend)
         if new_disk:
-            dos.format_disk()
+            vol.format()
         self.virtual_fdd = backend
-        self.virtual_fdd_controller.attach_dos(dos)
-        self.virtual_fdd_controller.fdd_open()
+        self.virtual_fdd_controller.attach(vol)   # also resets the link state
 
         # New C-side Selective Hooking:
         # We stay in C-managed memory mode (Full Speed) and only hook 0x0C00 range.
@@ -359,7 +358,7 @@ class PB1000FddMixin:
                 self.virtual_fdd.close()
             except Exception:
                 pass
-        self.virtual_fdd_controller.attach_dos(None)
+        self.virtual_fdd_controller.attach(None)
         self.virtual_fdd = None
         self.virtual_fdd_config = {"enabled": False}
 

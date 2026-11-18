@@ -213,11 +213,11 @@ def _to_name11(fname):
 
 
 def _get_dos(system):
-    """FDDProtocol から MD100Dos インスタンスを取得する。None なら未マウント。"""
+    """Md100Link から Md100Volume インスタンスを取得する。None なら未マウント。"""
     ctrl = getattr(system, 'virtual_fdd_controller', None)
     if ctrl is None:
         return None
-    dos = getattr(ctrl, '_dos', None)
+    dos = getattr(ctrl, 'volume', None)
     if dos is None or not dos.is_ready():
         return None
     return dos
@@ -225,11 +225,7 @@ def _get_dos(system):
 
 def _find_free_handle(dos):
     """未使用のファイルハンドルを返す。なければ -1。"""
-    # _fileinfo[h][0] (_FI_DIRINDEX) が -1 なら未使用
-    for h in range(len(dos._fileinfo) - 1, -1, -1):
-        if dos._fileinfo[h][0] < 0:
-            return h
-    return -1
+    return dos.find_free_handle()
 
 
 def _load_vram_fdd(system):
@@ -279,11 +275,10 @@ def _load_vram_fdd(system):
     system._fdd_active = True
     try:
         # ── ファイルオープン ──────────────────────────────────────────────────
-        from md100_dos import DS_NO_ERROR, DS_FILE_NOT_FOUND
-        idx = dos.open_disk_file(handle, name11)
+        idx = dos.open(handle, name11)
         if idx < 0:
             _write_result(w, _ERR_NOFILE)
-            print(f"vram_loader(FDD): not found: {fname!r} (status={dos.dos_status})")
+            print(f"vram_loader(FDD): not found: {fname!r} (status={dos.status})")
             return
 
         # ── セクタ単位で読み込みバンクRAMに積む ──────────────────────────────
@@ -294,7 +289,7 @@ def _load_vram_fdd(system):
         remaining_skip = skip   # まだスキップすべき残バイト数
         try:
             while offset < max_bytes:
-                n = dos.read_disk_file(handle, sec_buf)
+                n = dos.read_record(handle, sec_buf)
                 if n == 0:
                     break
 
@@ -309,16 +304,16 @@ def _load_vram_fdd(system):
                     _bank_write(bank_buf, offset, sec_buf[src_start:src_start + copy_n])
                     offset += copy_n
 
-                if dos.is_end_of_disk_file(handle):
+                if dos.at_last_record(handle):
                     break
-                dos.seek_rel_disk_file(handle, 1)
+                dos.skip(handle, 1)
         except Exception as e:
-            dos.close_disk_file(handle)
+            dos.close(handle)
             _write_result(w, _ERR_READ)
             print(f"vram_loader(FDD): read error: {e}")
             return
 
-        dos.close_disk_file(handle)
+        dos.close(handle)
 
         xfer_len = offset
         if xfer_len == 0:

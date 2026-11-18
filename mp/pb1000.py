@@ -12,9 +12,8 @@ import machine
 # `from pb1000 import init_display` call sites (mostly test scripts) still
 # work without changes; PB1000System itself never calls this re-export.
 from display_init import init_display
-from fdd_protocol import FDDProtocol
+from md100_link import Md100Link
 from fdd_storage import ImageStorageBackend
-from md100_dos import MD100Dos
 # PB1000System's own class body used to hold every method directly and grew
 # to ~1943 lines, which on 2026-08-22 failed to compile on real hardware
 # with MemoryError despite ~193KB free (heap fragmentation, not capacity --
@@ -57,8 +56,8 @@ VFDD_IO_WRITE_ADDR = 0x0C04
 # on every _draw_text() call -- that call runs once per status-bar redraw,
 # which real-hardware [MEM_OVERLAY] logs showed firing far more often than
 # expected (see project memory), making this 45-entry dict literal a much
-# larger per-call cost than the similar mp/fdd_protocol.py:_switch_cmd()
-# dispatch-dict issue found and fixed earlier the same session.
+# larger per-call cost than a similar per-command dispatch-dict issue in
+# the virtual FDD protocol layer found and fixed earlier the same session.
 _STATUS_FONT = {
     'A':0x7E0909097E, 'B':0x7F49494936, 'C':0x3E41414122, 'D':0x7F4141413E,
     'E':0x7F49494941, 'F':0x7F09090901, 'G':0x3E4149493A, 'H':0x7F0808087F,
@@ -307,7 +306,7 @@ class PB1000System(PB1000FddMixin, PB1000StateIOMixin):
         self.virtual_fdd = None
         self._virtual_fdd_ack = False
         self._last_vfdd_transfer_time = 0
-        self.virtual_fdd_controller = FDDProtocol()
+        self.virtual_fdd_controller = Md100Link()
         self.virtual_fdd_config = None
         self._pending_virtual_fdd_config = None
         self._io_wr_regs = bytearray((0, 0, 0, 0, 0, 0xFF, 0x03, 0))
